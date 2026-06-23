@@ -518,6 +518,22 @@ def read_trades(limit: int = 50, mode: str | None = None,
     return rows  # ORDER BY id DESC → 最新在最前
 
 
+def mark_price(symbol: str = "BTCUSDT") -> dict:
+    """抓 Binance 期貨當前標記價格（免金鑰，毫秒級延遲）。"""
+    import json, urllib.request, time
+    url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            d = json.loads(r.read())
+        return {
+            "symbol": symbol,
+            "price": float(d.get("markPrice", 0)),
+            "ts": int(time.time()),
+        }
+    except Exception as e:                             # noqa: BLE001
+        return {"symbol": symbol, "price": None, "ts": int(time.time()), "error": str(e)}
+
+
 def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 limit: int = 200, source: str = "testnet") -> dict:
     """K 線 + 指標資料 — 供前端 TradingView 式圖表使用。

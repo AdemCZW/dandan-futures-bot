@@ -34,6 +34,7 @@ export const api = {
   hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),
   klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
     get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  price: (symbol = 'BTCUSDT') => get(`/api/price?symbol=${symbol}`),
 }
 
 export const pct = (x) => `${(x * 100).toFixed(2)}%`

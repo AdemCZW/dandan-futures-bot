@@ -137,3 +137,8 @@ def klines(symbol: str = "BTCUSDT", interval: str = "4h",
         return service.klines_data(symbol, interval, limit, source)
     except Exception as e:                                   # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/api/price")
+def price(symbol: str = "BTCUSDT"):
+    return service.mark_price(symbol)
