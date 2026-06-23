@@ -14,11 +14,34 @@ function actT(a) {
   if (a.sl != null) s += ` [SL ${a.sl} / TP ${a.tp}]`
   return s
 }
+function sideBadge(side) {
+  const s = String(side || '')
+  if (/空|short|sell|賣/i.test(s)) return 'badge-short'
+  if (/多|long|buy|買/i.test(s)) return 'badge-long'
+  return 'badge-flat'
+}
 function Stg({ n, role, children }) {
   return (
-    <div style={{ background: 'var(--panel2)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', flex: 1, minWidth: 150 }}>
-      <div style={{ fontSize: 11, color: 'var(--accent)' }}>{n}. {role}</div>
-      <div style={{ fontSize: 13, marginTop: 4 }}>{children}</div>
+    <div style={{
+      position: 'relative',
+      background: 'var(--panel2)',
+      borderRadius: 'var(--radius)',
+      padding: '8px 12px',
+      flex: 1,
+      minWidth: 150,
+      boxShadow: 'inset 2px 0 0 0 var(--accent)',
+    }}>
+      <div style={{
+        fontFamily: 'var(--font-display)',
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: 'var(--accent)',
+      }}>
+        <span className="num">{n}</span> · {role}
+      </div>
+      <div style={{ fontSize: 13, marginTop: 4, color: 'var(--text)' }}>{children}</div>
     </div>
   )
 }
@@ -45,25 +68,24 @@ export default function Live() {
 
   return (
     <>
-      <div className="panel">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ width: 10, height: 10, borderRadius: 999, background: fresh ? 'var(--green)' : 'var(--muted)' }} />
-          <h3 style={{ margin: 0 }}>即時監控 {fresh ? '· 運行中' : '· 待命/已停'}</h3>
+      <div className={`panel${fresh ? ' is-active hud-neon-top' : ''}`}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <span className={`status-pulse${fresh ? '' : ' is-offline'}`} />
+          <h3 style={{ margin: 0, paddingLeft: 10 }}>即時監控 {fresh ? '· 運行中' : '· 待命/已停'}</h3>
           {d && (
-            <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 12,
-              background: d.mode === 'futures' ? 'var(--accent)' : 'var(--panel2)',
-              color: d.mode === 'futures' ? '#000' : 'var(--muted)',
-              border: '1px solid var(--border)', fontWeight: 600 }}>
+            <span className={d.mode === 'futures' ? 'badge badge-system' : 'badge badge-flat'}>
               {d.mode === 'futures' ? '合約測試網' : 'Paper 模擬'}
             </span>
           )}
-          <span className="muted" style={{ marginLeft: 'auto' }}>每 5 秒自動刷新（#{tick}）</span>
+          <span className="badge badge-system" style={{ marginLeft: 'auto' }}>
+            每 5 秒自動刷新（#<span className="num">{tick}</span>）
+          </span>
         </div>
         {err && <div className="err">⚠ {err}</div>}
         {d && (
-          <div className="muted" style={{ marginTop: 6 }}>
-            {d.strategy} · {d.symbol} {d.interval} · 輪詢 {d.poll}s ·
-            最後更新 {d.age_seconds != null ? `${d.age_seconds}s 前` : '—'}
+          <div className="muted" style={{ marginTop: 8 }}>
+            {d.strategy} · {d.symbol} {d.interval} · 輪詢 <span className="num">{d.poll}</span>s ·
+            最後更新 {d.age_seconds != null ? <><span className="num">{d.age_seconds}</span>s 前</> : '—'}
             {!d.active && ' · 尚未啟動（請先跑 run_paper.py 或 run_live_futures.py）'}
           </div>
         )}
@@ -72,21 +94,38 @@ export default function Live() {
       {d && d.active && (
         <>
           <div className="cards">
-            <div className="card"><div className="v">{posLabel}</div><div className="k">目前部位</div></div>
-            <div className="card"><div className="v">{d.price != null ? d.price.toFixed(2) : '—'}</div><div className="k">現價（即時）</div></div>
-            <div className="card"><div className="v">{d.equity != null ? d.equity.toFixed(2) : '—'}</div><div className="k">權益（USDT）</div></div>
-            <div className="card"><div className={`v ${cls(d.unrealized_pnl)}`}>{d.unrealized_pnl >= 0 ? '+' : ''}{d.unrealized_pnl}</div><div className="k">未實現損益</div></div>
+            <div className={`card${d.in_position ? (d.direction === -1 ? ' is-short' : ' is-long') : ''}`}>
+              <div className="v">{posLabel}</div><div className="k">目前部位</div>
+            </div>
+            <div className="card glow-update" data-fresh={fresh ? '1' : '0'}>
+              <div className="v num signal-glow" key={`price-${d.price}`}>{d.price != null ? d.price.toFixed(2) : '—'}</div>
+              <div className="k">現價（即時）</div>
+            </div>
+            <div className="card glow-update" data-fresh={fresh ? '1' : '0'}>
+              <div className="v num" key={`equity-${d.equity}`}>{d.equity != null ? d.equity.toFixed(2) : '—'}</div>
+              <div className="k">權益（USDT）</div>
+            </div>
+            <div className="card">
+              <div className={`v num signal-glow ${cls(d.unrealized_pnl)}`} key={`pnl-${d.unrealized_pnl}`}>{d.unrealized_pnl >= 0 ? '+' : ''}{d.unrealized_pnl}</div>
+              <div className="k">未實現損益</div>
+            </div>
           </div>
 
           {d.last_decision && (
-            <div className="panel">
-              <h3 style={{ marginTop: 0 }}>本根決策（6 角色 SOP）· {String(d.last_decision.ts).slice(0, 16)}</h3>
+            <div className={`panel${fresh ? ' is-active' : ''}`}>
+              <h3 style={{ marginTop: 0 }}>本根決策（6 角色 SOP）· <span className="num">{String(d.last_decision.ts).slice(0, 16)}</span></h3>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <Stg n="1" role="市場分析師">價 {d.last_decision.price} · 高 {d.last_decision.high} · 低 {d.last_decision.low}{d.last_decision.volume != null ? ` · 量 ${d.last_decision.volume}` : ''}{d.last_decision.anomaly ? ' · ⚠ 暴量' : ''}</Stg>
-                <Stg n="2" role="信號工程師">{Object.keys(d.last_decision.ind || {}).length ? Object.entries(d.last_decision.ind).map(([k, v]) => `${k}=${v}`).join(' · ') : '—'}</Stg>
-                <Stg n="3" role="量化研究員">目前 {TLBL[d.last_decision.pos_before]} → 目標 <b>{d.last_decision.target != null ? TLBL[d.last_decision.target] : '—'}</b></Stg>
-                <Stg n="4" role="風控官">{d.last_decision.risk ? `${d.last_decision.risk.allow ? '准入' : '否決'} · 量 ${d.last_decision.risk.qty} · ${d.last_decision.risk.reason}` : '本根未觸發進場檢查'}</Stg>
-                <Stg n="5" role="執行工程師">{(d.last_decision.actions || []).map(actT).join('；') || '—'} · 權益 {d.last_decision.equity}</Stg>
+                <Stg n="1" role="市場分析師">價 <span className="num">{d.last_decision.price}</span> · 高 <span className="num">{d.last_decision.high}</span> · 低 <span className="num">{d.last_decision.low}</span>{d.last_decision.volume != null ? <> · 量 <span className="num">{d.last_decision.volume}</span></> : ''}{d.last_decision.anomaly ? ' · ⚠ 暴量' : ''}</Stg>
+                <Stg n="2" role="信號工程師">{Object.keys(d.last_decision.ind || {}).length ? <span className="num">{Object.entries(d.last_decision.ind).map(([k, v]) => `${k}=${v}`).join(' · ')}</span> : '—'}</Stg>
+                <Stg n="3" role="量化研究員">目前 {TLBL[d.last_decision.pos_before]} → 目標{' '}
+                  {d.last_decision.target != null
+                    ? <span className={`badge ${d.last_decision.target === 1 ? 'badge-long' : d.last_decision.target === -1 ? 'badge-short' : 'badge-flat'}`}>{TLBL[d.last_decision.target]}</span>
+                    : <span className="badge badge-flat">—</span>}
+                </Stg>
+                <Stg n="4" role="風控官">{d.last_decision.risk
+                  ? <>{d.last_decision.risk.allow ? '准入' : '否決'} · 量 <span className="num">{d.last_decision.risk.qty}</span> · {d.last_decision.risk.reason}</>
+                  : '本根未觸發進場檢查'}</Stg>
+                <Stg n="5" role="執行工程師">{(d.last_decision.actions || []).map(actT).join('；') || '—'} · 權益 <span className="num">{d.last_decision.equity}</span></Stg>
               </div>
             </div>
           )}
@@ -102,14 +141,14 @@ export default function Live() {
           />
 
           {d.in_position && (
-            <div className="panel">
-              <h3>持倉</h3>
+            <div className="panel is-active">
+              <h3>持倉 · {d.direction === -1 ? '持空' : '持多'}</h3>
               <div className="cards">
-                <div className="card"><div className="v">{d.entry_price.toFixed(2)}</div><div className="k">進場價</div></div>
-                <div className="card"><div className="v neg">{d.sl != null ? d.sl.toFixed(2) : '—'}</div><div className="k">停損</div></div>
-                <div className="card"><div className="v pos">{d.tp != null ? d.tp.toFixed(2) : '—'}</div><div className="k">停利</div></div>
-                <div className="card"><div className="v">{d.base}</div><div className="k">持幣量</div></div>
-                <div className="card"><div className="v">{d.cash != null ? d.cash.toFixed(2) : '—'}</div><div className="k">現金</div></div>
+                <div className="card"><div className="v num">{d.entry_price.toFixed(2)}</div><div className="k">進場價</div></div>
+                <div className="card"><div className="v num neg">{d.sl != null ? d.sl.toFixed(2) : '—'}</div><div className="k">停損</div></div>
+                <div className="card"><div className="v num pos">{d.tp != null ? d.tp.toFixed(2) : '—'}</div><div className="k">停利</div></div>
+                <div className="card"><div className="v num">{d.base}</div><div className="k">持幣量</div></div>
+                <div className="card"><div className="v num">{d.cash != null ? d.cash.toFixed(2) : '—'}</div><div className="k">現金</div></div>
               </div>
             </div>
           )}
@@ -120,12 +159,16 @@ export default function Live() {
               <tbody>
                 {d.recent_trades.map((t, i) => (
                   <tr key={i}>
-                    <td>{String(t.ts).slice(0, 16)}</td><td>{t.side}</td>
-                    <td>{Number(t.price).toFixed(2)}</td><td>{Number(t.qty).toFixed(6)}</td>
-                    <td className={cls(t.pnl)}>{t.pnl >= 0 ? '+' : ''}{Number(t.pnl).toFixed(2)}</td>
+                    <td>{String(t.ts).slice(0, 16)}</td>
+                    <td>
+                      <span className={`badge ${sideBadge(t.side)}`}>{t.side}</span>
+                    </td>
+                    <td className="num">{Number(t.price).toFixed(2)}</td>
+                    <td className="num">{Number(t.qty).toFixed(6)}</td>
+                    <td className={`num ${cls(t.pnl)}`}>{t.pnl >= 0 ? '+' : ''}{Number(t.pnl).toFixed(2)}</td>
                   </tr>
                 ))}
-                {d.recent_trades.length === 0 && <tr><td colSpan={5} className="muted">（尚無成交）</td></tr>}
+                {d.recent_trades.length === 0 && <tr><td colSpan={5} style={{ color: 'var(--muted-dim)', fontFamily: 'var(--font-mono)', textAlign: 'left' }}>// 無資料</td></tr>}
               </tbody>
             </table>
           </div>

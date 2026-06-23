@@ -13,16 +13,18 @@ function toTaipei(ts) {
   return `${tw.getUTCFullYear()}/${p(tw.getUTCMonth() + 1)}/${p(tw.getUTCDate())} ${p(tw.getUTCHours())}:${p(tw.getUTCMinutes())}`
 }
 
+// 動作標籤：保留原文字（含中文雙重編碼），並映射到統一徽章語意色
+// badge：做多/獲利→long(綠)、做空/虧損→short(紅)、中性出場→flat(青)
 function labelSide(side) {
   const map = {
-    entry:        { text: '進場做多',          color: 'pos' },
-    entry_short:  { text: '進場做空',          color: 'neg' },
-    exit_signal:  { text: '出場　信號觸發',    color: '' },
-    exit_sltp:    { text: '出場　停損 / 停利', color: '' },
-    exit_sl:      { text: '出場　停損',        color: 'neg' },
-    exit_tp:      { text: '出場　停利',        color: 'pos' },
+    entry:        { text: '進場做多',          color: 'pos', badge: 'badge-long'  },
+    entry_short:  { text: '進場做空',          color: 'neg', badge: 'badge-short' },
+    exit_signal:  { text: '出場　信號觸發',    color: '',    badge: 'badge-flat'  },
+    exit_sltp:    { text: '出場　停損 / 停利', color: '',    badge: 'badge-flat'  },
+    exit_sl:      { text: '出場　停損',        color: 'neg', badge: 'badge-short' },
+    exit_tp:      { text: '出場　停利',        color: 'pos', badge: 'badge-long'  },
   }
-  return map[side] ?? { text: side, color: '' }
+  return map[side] ?? { text: side, color: '', badge: 'badge-flat' }
 }
 
 function labelMode(mode) {
@@ -61,10 +63,14 @@ export default function Journal() {
   const exits = rows.filter(r => !String(r.side).startsWith('entry'))
   const wins = exits.filter(r => Number(r.pnl) > 0).length
   const totalPnl = exits.reduce((s, r) => s + (Number(r.pnl) || 0), 0)
+  const winRate = exits.length > 0 ? (wins / exits.length * 100) : 0
 
   return (
     <div className="panel">
-      <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+      <h3>交易日誌 · JOURNAL</h3>
+
+      {/* 控制列：來源篩選 + 重新整理（次要動作走 ghost 描邊） */}
+      <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap', gap: 12 }}>
         <div className="field">
           <label>來源篩選</label>
           <select value={mode} onChange={(e) => setMode(e.target.value)}>
@@ -72,21 +78,35 @@ export default function Journal() {
             {MODES.map((m) => <option key={m} value={m}>{labelMode(m)}</option>)}
           </select>
         </div>
-        <button className="run" onClick={load}>重新整理</button>
-        {exits.length > 0 && (
-          <span style={{ fontSize: 13, lineHeight: '32px' }} className="muted">
-            已出場 {exits.length} 筆 ·
-            勝率 <strong>{(wins / exits.length * 100).toFixed(0)}%</strong> ·
-            總損益 <strong className={cls(totalPnl)}>
-              {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USDT
-            </strong>
-          </span>
-        )}
+        <button className="btn-ghost" onClick={load} style={{ alignSelf: 'flex-end' }}>
+          重新整理
+        </button>
       </div>
 
+      {/* 摘要讀數列：等寬數值右對齊、損益語意著色 */}
+      {exits.length > 0 && (
+        <div className="cards" style={{ marginBottom: 12 }}>
+          <div className="card">
+            <div className="k">已出場筆數</div>
+            <div className="v num">{exits.length}</div>
+          </div>
+          <div className="card">
+            <div className="k">勝率</div>
+            <div className="v num">{winRate.toFixed(0)}<span style={{ fontSize: 14, color: 'var(--muted)' }}>%</span></div>
+          </div>
+          <div className={`card ${totalPnl >= 0 ? 'is-long' : 'is-short'}`}>
+            <div className="k">總損益 · USDT</div>
+            <div className={`v num signal-glow ${cls(totalPnl)}`}>
+              {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
+            </div>
+          </div>
+        </div>
+      )}
+
       {err && <div className="err">⚠ {err}</div>}
+
       <div className="muted" style={{ marginBottom: 8, fontSize: 12 }}>
-        共 {rows.length} 筆 · 時間為台灣時間（UTC+8）· 最新交易在最上方
+        共 <span className="num">{rows.length}</span> 筆 · 時間為台灣時間（UTC+8）· 最新交易在最上方
       </div>
 
       <table>
@@ -108,22 +128,21 @@ export default function Journal() {
             const pnl = Number(t.pnl)
             return (
               <tr key={i}>
-                <td style={{ fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+                <td className="num" style={{ whiteSpace: 'nowrap' }}>
                   {toTaipei(t.ts)}
                 </td>
                 <td>{labelMode(t.mode)}</td>
                 <td>{labelStrategy(t.strategy)}</td>
-                <td className={s.color} style={{ fontWeight: 500 }}>
-                  {s.text}
+                <td>
+                  <span className={`badge ${s.badge}`}>{s.text}</span>
                 </td>
-                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                <td className="num" style={{ textAlign: 'right' }}>
                   {Number(t.price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </td>
-                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                <td className="num" style={{ textAlign: 'right' }}>
                   {Number(t.qty).toFixed(6)}
                 </td>
-                <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}
-                    className={isEntry ? 'muted' : cls(pnl)}>
+                <td className={`num ${isEntry ? 'muted' : cls(pnl)}`} style={{ textAlign: 'right' }}>
                   {isEntry
                     ? '—'
                     : `${pnl >= 0 ? '+' : ''}${pnl.toFixed(4)}`}
@@ -133,8 +152,8 @@ export default function Journal() {
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={7} className="muted" style={{ textAlign: 'center', padding: '24px 0' }}>
-                尚無交易留底（跑 run_live_futures.py 或 run_paper.py 後會自動出現）
+              <td colSpan={7} className="num" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--muted-dim)' }}>
+                // 尚無交易留底（跑 run_live_futures.py 或 run_paper.py 後會自動出現）
               </td>
             </tr>
           )}

@@ -8,6 +8,8 @@
 # 產出物
 *.png
 *.html
+# 前端進入點不可忽略（必須在 *.html 之後否定）
+!webapp/frontend/index.html
 bot_state*.json
 
 # 前端
