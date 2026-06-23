@@ -649,6 +649,32 @@ def test_ofm_in_strategies_registry():
 
 
 # --------------------------------------------------------------------------- #
+# BOT_PARAMS JSON 解析（run_live_futures 的 parse_bot_params helper）
+#   環境變數格式：'{"use_htf_filter": true, "htf_ema_period": 200}'
+#   空字串 / 未設 → 空 dict；無效 JSON → 空 dict（不崩潰）。
+# --------------------------------------------------------------------------- #
+from run_live_futures import parse_bot_params
+
+
+def test_parse_bot_params_empty_string_returns_empty():
+    assert parse_bot_params("") == {}
+
+
+def test_parse_bot_params_none_returns_empty():
+    assert parse_bot_params(None) == {}
+
+
+def test_parse_bot_params_valid_json():
+    result = parse_bot_params('{"use_htf_filter": true, "htf_ema_period": 200}')
+    assert result == {"use_htf_filter": True, "htf_ema_period": 200}
+
+
+def test_parse_bot_params_invalid_json_returns_empty():
+    result = parse_bot_params("{bad json}")
+    assert result == {}
+
+
+# --------------------------------------------------------------------------- #
 # HTF（高時框）趨勢過濾器 — SupertrendStrategy
 #   use_htf_filter=False 預設關閉（向後相容）。
 #   開啟後：close > ema_trend → 只做多；close < ema_trend → 只做空。

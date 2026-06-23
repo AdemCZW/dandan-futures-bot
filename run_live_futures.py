@@ -37,6 +37,22 @@ from core.bot_state import BotState
 STATE_PATH = "bot_state_futures.json"
 
 
+def parse_bot_params(raw: str | None) -> dict:
+    """解析 BOT_PARAMS 環境變數（JSON 字串）成策略參數 dict。
+
+    空字串 / None / 無效 JSON → 回空 dict，不崩潰。
+    用法：BOT_PARAMS='{"use_htf_filter": true, "htf_ema_period": 200}'
+    """
+    if not raw:
+        return {}
+    try:
+        result = json.loads(raw)
+        return result if isinstance(result, dict) else {}
+    except (json.JSONDecodeError, ValueError):
+        print(f"[警告] BOT_PARAMS 解析失敗，忽略：{raw!r}")
+        return {}
+
+
 class FuturesLiveTrader:
     """合約多/空決策 + 下單 + 狀態持久化。dir：+1 多 / -1 空 / 0 空手。可獨立測試。"""
 
@@ -357,9 +373,12 @@ def main():
     ap.add_argument("--poll", type=int, default=int(os.getenv("BOT_POLL", "30")))
     ap.add_argument("--budget", type=float, default=float(os.getenv("BOT_BUDGET", "500")),
                     help="每筆最大倉位（USDT）。由帳戶餘額動態算出 max_position_pct。")
+    ap.add_argument("--params", default=os.getenv("BOT_PARAMS", ""),
+                    help='策略參數 JSON，例如 \'{"use_htf_filter": true, "htf_ema_period": 200}\'')
     args = ap.parse_args()
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
     cfg.futures_leverage, cfg.poll_seconds = args.leverage, args.poll
+    cfg.strategy_params = {**cfg.strategy_params, **parse_bot_params(args.params)}
 
     # 健康/狀態 HTTP 伺服器「最先」啟動：不等任何幣安 API（exchange_info/leverage/balance），
     # 確保雲端 healthcheck 在啟動初期就能通過；金鑰缺失或交易初始化失敗都不能讓 process 結束。
