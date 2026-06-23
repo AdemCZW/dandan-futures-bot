@@ -612,3 +612,46 @@ def test_cvd_missing_column_returns_all_nan():
                        "volume": np.ones(4)})
     c = se.cvd(df)
     assert len(c) == 4 and c.isna().all()
+
+
+# --------------------------------------------------------------------------- #
+# Supertrend（ATR 趨勢跟蹤）：回傳趨勢線 supertrend + 方向 st_dir(+1多/-1空)。
+#   band 鎖定為遞迴、路徑相依，但只用過去與當根 → causal、不 repaint。
+# --------------------------------------------------------------------------- #
+def _st_trend_df(updown):
+    """先強升後強降的確定性 OHLC，用來驗證 supertrend 方向翻轉。"""
+    parts = []
+    base = 100.0
+    for direction, n in updown:
+        seg = base + direction * np.arange(n, dtype=float) * 2.0
+        parts.append(seg)
+        base = seg[-1]
+    px = np.concatenate(parts)
+    return pd.DataFrame({"open": px, "high": px + 1.0, "low": px - 1.0,
+                         "close": px, "volume": np.ones(len(px))})
+
+
+def test_supertrend_direction_is_plus_minus_one():
+    df = _st_trend_df([(+1, 40), (-1, 40)])
+    st = se.supertrend(df, period=10, multiplier=3.0)
+    d = st["st_dir"].dropna()
+    assert set(np.unique(d.values)).issubset({-1.0, 1.0})
+
+
+def test_supertrend_follows_trend_direction():
+    df = _st_trend_df([(+1, 50), (-1, 50)])
+    st = se.supertrend(df, period=10, multiplier=3.0)
+    # 升段末端應為多方(+1)、降段末端應為空方(-1)
+    assert st["st_dir"].iloc[45] == 1.0
+    assert st["st_dir"].iloc[-1] == -1.0
+
+
+def test_supertrend_is_causal_prefix_matches():
+    """路徑相依但 causal：前綴重算在重疊區完全一致。"""
+    df = _st_trend_df([(+1, 30), (-1, 30), (+1, 30)])
+    full = se.supertrend(df, period=10, multiplier=3.0)
+    for k in (50, 70, 85):
+        pref = se.supertrend(df.iloc[:k], period=10, multiplier=3.0)
+        a, b = full["st_dir"].iloc[:k], pref["st_dir"]
+        assert a.isna().equals(b.isna())
+        np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)

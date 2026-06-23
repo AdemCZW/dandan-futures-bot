@@ -43,6 +43,10 @@ GRIDS = {
         "pivot_right": [2, 3],
         "ema_trend_period": [100, 200],
     },
+    "supertrend": {                      # ATR 趨勢跟蹤（allow_short=True）；經典值 10/3
+        "period": [7, 10, 14],
+        "multiplier": [2.0, 2.5, 3.0],
+    },
 }
 
 

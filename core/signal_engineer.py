@@ -172,6 +172,54 @@ def cvd(df: pd.DataFrame) -> pd.Series:
     return delta.cumsum()
 
 
+def supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """Supertrend — ATR 通道趨勢跟蹤（BTC 最常被引用的穩健趨勢策略核心）。
+
+    以 hl2 ± multiplier×ATR 造上下軌，再「鎖定」成只朝有利方向收緊的最終軌：
+      - 收盤上穿上軌 → 轉多(st_dir=+1)，趨勢線跟下軌；
+      - 收盤下穿下軌 → 轉空(st_dir=-1)，趨勢線跟上軌。
+    band 鎖定為遞迴（依賴前一根最終軌與方向），但只用過去與當根 → causal、不 repaint。
+
+    回傳 DataFrame[supertrend, st_dir]，st_dir ∈ {+1, -1, NaN(warmup)}。
+    """
+    atr_ = atr(df, period)
+    hl2 = (df["high"] + df["low"]) / 2.0
+    upper_basic = hl2 + multiplier * atr_
+    lower_basic = hl2 - multiplier * atr_
+    close = df["close"].to_numpy()
+    ub, lb = upper_basic.to_numpy(), lower_basic.to_numpy()
+    n = len(df)
+    final_ub = np.full(n, np.nan)
+    final_lb = np.full(n, np.nan)
+    st = np.full(n, np.nan)
+    direction = np.full(n, np.nan)
+
+    # 第一根有效 ATR 之後才開始（warmup 期 ATR 仍有值但不穩，沿用標準作法從頭遞迴）
+    prev_dir = 1
+    for i in range(n):
+        if np.isnan(ub[i]):
+            continue
+        if i == 0 or np.isnan(final_ub[i - 1]):
+            final_ub[i], final_lb[i] = ub[i], lb[i]
+            direction[i] = prev_dir
+            st[i] = final_lb[i] if prev_dir == 1 else final_ub[i]
+            continue
+        # 最終上軌：只在更低或前收已突破時才更新（否則鎖住）
+        final_ub[i] = ub[i] if (ub[i] < final_ub[i - 1] or close[i - 1] > final_ub[i - 1]) else final_ub[i - 1]
+        final_lb[i] = lb[i] if (lb[i] > final_lb[i - 1] or close[i - 1] < final_lb[i - 1]) else final_lb[i - 1]
+        # 方向翻轉：收盤穿越前一根最終軌
+        if close[i] > final_ub[i - 1]:
+            direction[i] = 1
+        elif close[i] < final_lb[i - 1]:
+            direction[i] = -1
+        else:
+            direction[i] = prev_dir
+        prev_dir = int(direction[i])
+        st[i] = final_lb[i] if direction[i] == 1 else final_ub[i]
+
+    return pd.DataFrame({"supertrend": st, "st_dir": direction}, index=df.index)
+
+
 def regime(df: pd.DataFrame, er_period: int = 14, er_trend: float = 0.30,
            chop_period: int = 14, chop_trend: float = 38.2,
            adx_period: int = 14, adx_trend: float = 25.0,

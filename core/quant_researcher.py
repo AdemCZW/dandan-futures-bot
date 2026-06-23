@@ -270,10 +270,43 @@ class FibRetracementStrategy(Strategy):
         return 0
 
 
+class SupertrendStrategy(Strategy):
+    """Supertrend ATR 趨勢跟蹤（多空雙向）。
+
+    跟隨 st_dir：轉多做多、轉空做空。趨勢策略本身即定義趨勢，不另外套 regime 閘門
+    （regime_pref='any'）。訂單流閘門只擋「新開倉/翻倉」，既有同向倉不強制平出。
+    這是 BTC 上文獻最常引用的穩健趨勢策略（Supertrend ATR=10、mult=3 為經典值）。
+    """
+    name = "supertrend"
+    defaults = {"period": 10, "multiplier": 3.0}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        st = se.supertrend(out, period=int(self.params["period"]),
+                           multiplier=float(self.params["multiplier"]))
+        out["st_dir"] = st["st_dir"]
+        out["supertrend"] = st["supertrend"]
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(out)
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        st_dir = row.get("st_dir") if hasattr(row, "get") else row["st_dir"]
+        if st_dir is None or (isinstance(st_dir, float) and math.isnan(st_dir)):
+            return position                       # 方向未定（warmup）→ 維持現狀
+        target = 1 if float(st_dir) > 0 else -1
+        if target == position:
+            return position                       # 同向 → 續抱（不被訂單流閘門踢出）
+        # 新開倉/翻倉：訂單流不可逆向，否則退回空手（仍平掉反向倉）
+        return target if self._structure_ok(row, target) else 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
     ZScoreLongShortStrategy.name: ZScoreLongShortStrategy,
+    SupertrendStrategy.name: SupertrendStrategy,
     FibRetracementStrategy.name: FibRetracementStrategy,
 }
 

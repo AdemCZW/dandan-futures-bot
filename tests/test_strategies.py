@@ -163,12 +163,14 @@ def test_build_strategy_passes_params():
     assert strat.params["window"] == 30
 
 
-def test_strategies_registry_has_four_keys():
-    assert set(STRATEGIES) == {"ema_cross", "zscore_revert", "zscore_ls", "fib_retracement"}
+def test_strategies_registry_has_five_keys():
+    assert set(STRATEGIES) == {"ema_cross", "zscore_revert", "zscore_ls",
+                               "fib_retracement", "supertrend"}
     assert STRATEGIES["ema_cross"] is EMACrossStrategy
     assert STRATEGIES["zscore_revert"] is ZScoreRevertStrategy
     assert STRATEGIES["zscore_ls"] is ZScoreLongShortStrategy
     assert STRATEGIES["fib_retracement"] is FibRetracementStrategy
+    assert STRATEGIES["supertrend"] is SupertrendStrategy
 
 
 # --------------------------------------------------------------------------- #
@@ -478,3 +480,54 @@ def test_structure_gate_blocks_a_long_fib_would_otherwise_take():
     assert strat.signal(blocked, 0) == 0                               # 被訂單流閘門擋下
     allowed = pd.Series({**base, "taker_ratio_s": 0.60})               # 買盤支持
     assert strat.signal(allowed, 0) == 1
+
+
+# --------------------------------------------------------------------------- #
+# SupertrendStrategy（ATR 趨勢跟蹤，多空雙向）
+#   跟隨 st_dir 翻轉進出；訂單流閘門只擋「新開/翻倉」，不強制平既有倉。
+# --------------------------------------------------------------------------- #
+from core.quant_researcher import SupertrendStrategy
+
+
+def _st_row(st_dir, taker_ratio_s=None):
+    d = {"close": 100.0, "st_dir": st_dir}
+    if taker_ratio_s is not None:
+        d["taker_ratio_s"] = taker_ratio_s
+    return pd.Series(d)
+
+
+def test_supertrend_strategy_allows_short():
+    assert SupertrendStrategy.allow_short is True
+
+
+def test_supertrend_enters_long_on_uptrend_flat():
+    strat = SupertrendStrategy()
+    assert strat.signal(_st_row(1.0), 0) == 1
+
+
+def test_supertrend_enters_short_on_downtrend_flat():
+    strat = SupertrendStrategy()
+    assert strat.signal(_st_row(-1.0), 0) == -1
+
+
+def test_supertrend_holds_through_adverse_flow_no_forced_exit():
+    """既有多倉、方向仍多 → 續抱，即使訂單流轉弱也不被閘門踢出。"""
+    strat = SupertrendStrategy(use_structure=True, of_long_min=0.45)
+    assert strat.signal(_st_row(1.0, taker_ratio_s=0.20), 1) == 1
+
+
+def test_supertrend_structure_gate_blocks_fresh_long():
+    """開啟閘門：空手要新開多單，但賣壓重 → 不進場(0)。"""
+    strat = SupertrendStrategy(use_structure=True, of_long_min=0.45)
+    assert strat.signal(_st_row(1.0, taker_ratio_s=0.25), 0) == 0
+    assert strat.signal(_st_row(1.0, taker_ratio_s=0.60), 0) == 1
+
+
+def test_supertrend_nan_direction_holds_position():
+    strat = SupertrendStrategy()
+    assert strat.signal(_st_row(float("nan")), 1) == 1
+    assert strat.signal(_st_row(float("nan")), 0) == 0
+
+
+def test_supertrend_in_strategies_registry():
+    assert "supertrend" in STRATEGIES
