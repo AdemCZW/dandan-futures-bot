@@ -41,7 +41,8 @@ class RiskOfficer:
         per_unit_loss = max(abs(price - stop_price), 1e-9)
         qty_by_risk = risk_amount / per_unit_loss
 
-        max_notional = equity * self.cfg.max_position_pct
+        leverage = max(getattr(self.cfg, "futures_leverage", 1), 1)
+        max_notional = equity * self.cfg.max_position_pct * leverage
         qty_by_cap = max_notional / price
 
         return max(min(qty_by_risk, qty_by_cap), 0.0)
