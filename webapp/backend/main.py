@@ -161,8 +161,8 @@ def copytrader_positions(uid: str = ""):
 
 
 @app.get("/api/large-trades")
-def large_trades(symbol: str = "BTCUSDT", min_usdt: float = 500_000, limit: int = 100):
+def large_trades(symbol: str = "BTCUSDT", min_usdt: float = 100_000, limit: int = 500):
     try:
-        return service.binance_large_trades(symbol=symbol, min_usdt=min_usdt, limit=limit)
+        return service.okx_large_trades(symbol=symbol, min_usdt=min_usdt, limit=limit)
     except Exception as e:                                   # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")

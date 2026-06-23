@@ -163,9 +163,10 @@ def test_build_strategy_passes_params():
     assert strat.params["window"] == 30
 
 
-def test_strategies_registry_has_seven_keys():
-    assert set(STRATEGIES) == {"ema_cross", "zscore_revert", "zscore_ls",
-                               "fib_retracement", "supertrend", "donchian", "of_momentum"}
+def test_strategies_registry_has_core_seven_keys():
+    # 原始 7 核心策略仍在註冊表（新增短線策略後改子集檢查；完整集合見 *_twelve_keys）
+    assert {"ema_cross", "zscore_revert", "zscore_ls",
+            "fib_retracement", "supertrend", "donchian", "of_momentum"} <= set(STRATEGIES)
     assert STRATEGIES["ema_cross"] is EMACrossStrategy
     assert STRATEGIES["zscore_revert"] is ZScoreRevertStrategy
     assert STRATEGIES["zscore_ls"] is ZScoreLongShortStrategy
@@ -745,3 +746,262 @@ def test_supertrend_htf_prepare_adds_ema_trend():
     out = SupertrendStrategy(use_htf_filter=True, htf_ema_period=50).prepare(df)
     assert "ema_trend" in out.columns
     assert not out["ema_trend"].isna().all()
+
+
+# =========================================================================== #
+# 新增短線策略（研究 + 對抗式驗證後挑選的 5 個，皆 stateless 單列 signal）。
+# 全部多空雙向、emit +1/0/-1，從空手才開新倉（不直接翻倉）。
+# =========================================================================== #
+from core.quant_researcher import (
+    VwapBandReversionStrategy, HeikinAshiMomoStrategy, MacdScalpStrategy,
+    BollingerSqueezeStrategy, Rsi2ConnorsStrategy,
+)
+
+
+# --- 1. vwap_band_reversion（rolling VWAP 偏離 + 影線拒絕，盤整均值回歸） ----
+def _vwap_row(vwdist_z, lower_wick=0.6, upper_wick=0.6, close=100.0,
+              vwap_roll=100.0, regime="range"):
+    return pd.Series({"close": close, "vwap_roll": vwap_roll, "vwdist_z": vwdist_z,
+                      "lower_wick_frac": lower_wick, "upper_wick_frac": upper_wick,
+                      "regime": regime})
+
+
+def test_vwap_allows_short_and_registered():
+    assert VwapBandReversionStrategy.allow_short is True
+    assert STRATEGIES["vwap_band_reversion"] is VwapBandReversionStrategy
+
+
+def test_vwap_long_on_deep_negative_z_with_lower_wick():
+    s = VwapBandReversionStrategy()              # k=2.2, wick_frac=0.5
+    assert s.signal(_vwap_row(-3.0, lower_wick=0.6), 0) == 1
+
+
+def test_vwap_short_on_deep_positive_z_with_upper_wick():
+    s = VwapBandReversionStrategy()
+    assert s.signal(_vwap_row(3.0, upper_wick=0.6), 0) == -1
+
+
+def test_vwap_no_entry_without_rejection_wick():
+    s = VwapBandReversionStrategy()
+    assert s.signal(_vwap_row(-3.0, lower_wick=0.2), 0) == 0     # 影線不足 → 不接刀
+
+
+def test_vwap_no_entry_outside_range_regime():
+    s = VwapBandReversionStrategy()
+    assert s.signal(_vwap_row(-3.0, regime="trend"), 0) == 0     # 趨勢盤不做均值回歸
+
+
+def test_vwap_exit_long_back_to_fair_value():
+    s = VwapBandReversionStrategy()
+    # 持多，價回到 VWAP 上方 → 平倉
+    assert s.signal(_vwap_row(0.0, close=101.0, vwap_roll=100.0), 1) == 0
+
+
+def test_vwap_hold_long_while_below_fair_value():
+    s = VwapBandReversionStrategy()
+    assert s.signal(_vwap_row(-1.5, close=98.0, vwap_roll=100.0), 1) == 1
+
+
+@pytest.mark.parametrize("pos", [-1, 0, 1])
+def test_vwap_nan_holds_position(pos):
+    s = VwapBandReversionStrategy()
+    assert s.signal(_vwap_row(float("nan")), pos) == pos
+
+
+# --- 2. heikin_ashi_momo（HA 顏色連續 + 強實體，順勢續抱） -------------------
+def _ha_row(ha_color, lower_wick=0.05, upper_wick=0.05, run=3,
+            close=110.0, ema_trend=100.0):
+    return pd.Series({"ha_color": ha_color, "ha_lower_wick_frac": lower_wick,
+                      "ha_upper_wick_frac": upper_wick, "ha_same_color_run": run,
+                      "close": close, "ema_trend": ema_trend})
+
+
+def test_ha_allows_short_and_registered():
+    assert HeikinAshiMomoStrategy.allow_short is True
+    assert STRATEGIES["heikin_ashi_momo"] is HeikinAshiMomoStrategy
+
+
+def test_ha_long_on_strong_bull_run_in_uptrend():
+    s = HeikinAshiMomoStrategy()                 # wick_frac=0.15, min_run=2
+    assert s.signal(_ha_row(1.0, lower_wick=0.05, run=3, close=110, ema_trend=100), 0) == 1
+
+
+def test_ha_short_on_strong_bear_run_in_downtrend():
+    s = HeikinAshiMomoStrategy()
+    assert s.signal(_ha_row(-1.0, upper_wick=0.05, run=3, close=90, ema_trend=100), 0) == -1
+
+
+def test_ha_no_long_with_big_lower_wick():
+    s = HeikinAshiMomoStrategy()
+    assert s.signal(_ha_row(1.0, lower_wick=0.5, run=3), 0) == 0    # 下影線太長＝動能弱
+
+
+def test_ha_no_long_below_trend_filter():
+    s = HeikinAshiMomoStrategy()
+    assert s.signal(_ha_row(1.0, close=90, ema_trend=100), 0) == 0  # 在 EMA 下方不做多
+
+
+def test_ha_no_long_when_run_too_short():
+    s = HeikinAshiMomoStrategy()
+    assert s.signal(_ha_row(1.0, run=1), 0) == 0                    # 連續根數不足
+
+
+def test_ha_exit_long_on_color_flip():
+    s = HeikinAshiMomoStrategy()
+    assert s.signal(_ha_row(-1.0, close=110, ema_trend=100), 1) == 0
+
+
+@pytest.mark.parametrize("pos", [-1, 0, 1])
+def test_ha_nan_holds_position(pos):
+    s = HeikinAshiMomoStrategy()
+    assert s.signal(_ha_row(float("nan")), pos) == pos
+
+
+# --- 3. macd_scalp（價格 MACD 零軸 + ADX 趨勢閘門） -------------------------
+def _macd_row(line, signal, hist, hist_prev, hist_prev2, cross_up, cross_dn,
+              close=110.0, ema_trend=100.0, adx=25.0, regime="trend"):
+    return pd.Series({"macd_line": line, "macd_signal": signal, "macd_hist": hist,
+                      "macd_hist_prev": hist_prev, "macd_hist_prev2": hist_prev2,
+                      "cross_up": cross_up, "cross_dn": cross_dn,
+                      "close": close, "ema_trend": ema_trend, "adx": adx, "regime": regime})
+
+
+def test_macd_allows_short_and_registered():
+    assert MacdScalpStrategy.allow_short is True
+    assert STRATEGIES["macd_scalp"] is MacdScalpStrategy
+
+
+def test_macd_long_on_bull_cross_above_zero_in_trend():
+    s = MacdScalpStrategy()                       # adx_min=18
+    row = _macd_row(5.0, 4.0, 2.0, 1.0, 0.5, True, False, close=110, ema_trend=100, adx=25)
+    assert s.signal(row, 0) == 1
+
+
+def test_macd_short_on_bear_cross_below_zero_in_trend():
+    s = MacdScalpStrategy()
+    row = _macd_row(-5.0, -4.0, -2.0, -1.0, -0.5, False, True, close=90, ema_trend=100, adx=25)
+    assert s.signal(row, 0) == -1
+
+
+def test_macd_no_long_below_zero_line():
+    s = MacdScalpStrategy()
+    row = _macd_row(-1.0, -2.0, 0.5, 0.2, 0.0, True, False, close=110, ema_trend=100, adx=25)
+    assert s.signal(row, 0) == 0                  # macd_line<0 → 零軸過濾擋下
+
+
+def test_macd_no_entry_when_adx_below_min():
+    s = MacdScalpStrategy()
+    row = _macd_row(5.0, 4.0, 2.0, 1.0, 0.5, True, False, close=110, ema_trend=100, adx=10)
+    assert s.signal(row, 0) == 0                  # 無趨勢強度 → 不進場
+
+
+def test_macd_exit_long_on_two_bar_hist_fade():
+    s = MacdScalpStrategy()
+    # 持多，柱狀圖連兩根走弱（hist<prev<prev2）→ 動能衰竭出場
+    row = _macd_row(5.0, 4.5, 0.5, 1.0, 1.5, False, False, close=110, ema_trend=100, adx=25)
+    assert s.signal(row, 1) == 0
+
+
+@pytest.mark.parametrize("pos", [-1, 0, 1])
+def test_macd_nan_holds_position(pos):
+    s = MacdScalpStrategy()
+    row = _macd_row(float("nan"), 4.0, 2.0, 1.0, 0.5, True, False)
+    assert s.signal(row, pos) == pos
+
+
+# --- 4. bb_squeeze_breakout（布林帶寬壓縮 → 波動突破） ----------------------
+def _bb_row(close, squeeze_prev, pct_b=1.2, bb_mid=100.0, bb_upper=110.0,
+            bb_lower=90.0, adx=25.0):
+    return pd.Series({"close": close, "squeeze_prev": squeeze_prev, "pct_b": pct_b,
+                      "bb_mid": bb_mid, "bb_upper": bb_upper, "bb_lower": bb_lower,
+                      "adx": adx})
+
+
+def test_bb_allows_short_and_registered():
+    assert BollingerSqueezeStrategy.allow_short is True
+    assert STRATEGIES["bb_squeeze_breakout"] is BollingerSqueezeStrategy
+
+
+def test_bb_long_on_squeeze_breakout_up():
+    s = BollingerSqueezeStrategy()                # adx_min=20
+    assert s.signal(_bb_row(111.0, squeeze_prev=True, bb_upper=110.0, adx=25), 0) == 1
+
+
+def test_bb_short_on_squeeze_breakdown():
+    s = BollingerSqueezeStrategy()
+    assert s.signal(_bb_row(89.0, squeeze_prev=True, bb_lower=90.0, adx=25), 0) == -1
+
+
+def test_bb_no_breakout_without_prior_squeeze():
+    s = BollingerSqueezeStrategy()
+    assert s.signal(_bb_row(111.0, squeeze_prev=False, bb_upper=110.0, adx=25), 0) == 0
+
+
+def test_bb_no_breakout_when_adx_weak():
+    s = BollingerSqueezeStrategy()
+    assert s.signal(_bb_row(111.0, squeeze_prev=True, bb_upper=110.0, adx=10), 0) == 0
+
+
+def test_bb_exit_long_back_through_mid():
+    s = BollingerSqueezeStrategy()
+    # 持多，跌回中軌下 → 突破失敗出場
+    assert s.signal(_bb_row(99.0, squeeze_prev=False, pct_b=0.3, bb_mid=100.0), 1) == 0
+
+
+@pytest.mark.parametrize("pos", [-1, 0, 1])
+def test_bb_nan_holds_position(pos):
+    s = BollingerSqueezeStrategy()
+    row = _bb_row(float("nan"), squeeze_prev=True)
+    assert s.signal(row, pos) == pos
+
+
+# --- 5. rsi2_connors（RSI(2) 極端 + EMA200 方向閘門，順勢回調） -------------
+def _rsi2_row(rsi2, close=110.0, trend_ema=100.0, sma_exit=100.0):
+    return pd.Series({"rsi2": rsi2, "close": close, "trend_ema": trend_ema,
+                      "sma_exit": sma_exit})
+
+
+def test_rsi2_allows_short_and_registered():
+    assert Rsi2ConnorsStrategy.allow_short is True
+    assert STRATEGIES["rsi2_connors"] is Rsi2ConnorsStrategy
+
+
+def test_rsi2_long_on_oversold_in_uptrend():
+    s = Rsi2ConnorsStrategy()                     # rsi_lo=5
+    assert s.signal(_rsi2_row(3.0, close=110, trend_ema=100), 0) == 1
+
+
+def test_rsi2_short_on_overbought_in_downtrend():
+    s = Rsi2ConnorsStrategy()                     # rsi_hi=95
+    assert s.signal(_rsi2_row(97.0, close=90, trend_ema=100), 0) == -1
+
+
+def test_rsi2_no_long_against_trend():
+    s = Rsi2ConnorsStrategy()
+    assert s.signal(_rsi2_row(3.0, close=90, trend_ema=100), 0) == 0   # 跌破 EMA200 不接刀
+
+
+def test_rsi2_exit_long_above_short_mean():
+    s = Rsi2ConnorsStrategy()
+    assert s.signal(_rsi2_row(50.0, close=105.0, sma_exit=100.0), 1) == 0
+
+
+def test_rsi2_hold_long_below_short_mean():
+    s = Rsi2ConnorsStrategy()
+    assert s.signal(_rsi2_row(50.0, close=98.0, sma_exit=100.0), 1) == 1
+
+
+@pytest.mark.parametrize("pos", [-1, 0, 1])
+def test_rsi2_nan_holds_position(pos):
+    s = Rsi2ConnorsStrategy()
+    assert s.signal(_rsi2_row(float("nan")), pos) == pos
+
+
+# --- 註冊表擴充為 12 個策略 -------------------------------------------------
+def test_strategies_registry_has_twelve_keys():
+    assert set(STRATEGIES) == {
+        "ema_cross", "zscore_revert", "zscore_ls", "fib_retracement",
+        "supertrend", "donchian", "of_momentum",
+        "vwap_band_reversion", "heikin_ashi_momo", "macd_scalp",
+        "bb_squeeze_breakout", "rsi2_connors",
+    }

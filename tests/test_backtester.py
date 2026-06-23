@@ -351,6 +351,57 @@ def test_no_lookahead_equity_prefix_invariant():
 
 
 # ====================================================================
+# (f) expectancy / profit_factor 績效指標（錦標賽排序用）
+# ====================================================================
+def test_expectancy_is_mean_pnl_per_closed_trade():
+    """expectancy = 每筆平倉交易 pnl 的平均（含費）。一勝一負兩筆驗證。"""
+    cfg = make_cfg(stop_loss_pct=0.9, take_profit_pct=0.9)   # 拉寬停損停利，只讓信號出場
+    risk = RiskOfficer(cfg)
+    # bar0 進多@100 → bar1 平@110（賺）→ bar2 進多@110 → bar3 平@100（賠）
+    df = df_with_sig([100.0, 110.0, 110.0, 100.0], [1, 0, 1, 0])
+    res = run_backtest(df, SigStrategy(allow_short=False), risk, cfg)
+
+    assert len(res.trades) == 2
+    pnls = [t["pnl"] for t in res.trades]
+    assert pnls[0] > 0 and pnls[1] < 0                       # 一勝一負
+    assert res.expectancy == pytest.approx(sum(pnls) / 2, rel=1e-12, abs=1e-9)
+
+
+def test_profit_factor_is_gross_profit_over_gross_loss():
+    cfg = make_cfg(stop_loss_pct=0.9, take_profit_pct=0.9)
+    risk = RiskOfficer(cfg)
+    df = df_with_sig([100.0, 110.0, 110.0, 100.0], [1, 0, 1, 0])
+    res = run_backtest(df, SigStrategy(allow_short=False), risk, cfg)
+
+    pnls = [t["pnl"] for t in res.trades]
+    gross_profit = sum(p for p in pnls if p > 0)
+    gross_loss = -sum(p for p in pnls if p < 0)
+    assert res.profit_factor == pytest.approx(gross_profit / gross_loss, rel=1e-12)
+
+
+def test_profit_factor_infinite_when_no_losers():
+    """全勝（無虧損交易）→ profit_factor = +inf，expectancy>0。"""
+    cfg = make_cfg(stop_loss_pct=0.9, take_profit_pct=0.9)
+    risk = RiskOfficer(cfg)
+    df = df_with_sig([100.0, 110.0], [1, 0])                 # 單筆賺錢
+    res = run_backtest(df, SigStrategy(allow_short=False), risk, cfg)
+
+    assert len(res.trades) == 1 and res.trades[0]["pnl"] > 0
+    assert res.profit_factor == float("inf")
+    assert res.expectancy > 0
+
+
+def test_expectancy_zero_when_no_trades():
+    cfg = make_cfg()
+    risk = RiskOfficer(cfg)
+    df = df_with_sig([100.0, 100.0], [0, 0])                 # 從不進場
+    res = run_backtest(df, SigStrategy(allow_short=False), risk, cfg)
+    assert len(res.trades) == 0
+    assert res.expectancy == 0.0
+    assert res.profit_factor == 0.0
+
+
+# ====================================================================
 # 健全性：max_daily_loss_pct 開大確實關閉熔斷（能正常進場）
 # ====================================================================
 def test_circuit_breaker_disabled_allows_entry():

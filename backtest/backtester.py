@@ -37,6 +37,23 @@ class BacktestResult:
         return len(wins) / len(self.trades) if self.trades else 0.0
 
     @property
+    def expectancy(self) -> float:
+        """每筆平倉交易的平均盈虧（含費）。短線評估核心：>0 才有正期望。"""
+        return sum(t["pnl"] for t in self.trades) / len(self.trades) if self.trades else 0.0
+
+    @property
+    def profit_factor(self) -> float:
+        """毛利 / 毛損。>1 才賺錢；無虧損交易→+inf（有獲利）或 0（完全無交易）。
+
+        這比純勝率誠實：高勝率配差盈虧比會讓 profit_factor 跌破 1，當場現形。
+        """
+        gross_profit = sum(t["pnl"] for t in self.trades if t["pnl"] > 0)
+        gross_loss = -sum(t["pnl"] for t in self.trades if t["pnl"] < 0)
+        if gross_loss == 0:
+            return float("inf") if gross_profit > 0 else 0.0
+        return gross_profit / gross_loss
+
+    @property
     def sharpe(self) -> float:
         e = self.equity_curve
         if len(e) < 3:

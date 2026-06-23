@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 import math
+import numpy as np
 import pandas as pd
 from core import signal_engineer as se
 
@@ -415,6 +416,269 @@ class OrderFlowMomentumStrategy(Strategy):
         return position
 
 
+def _num(v, default=None):
+    """把 row 取出的值轉 float；None/NaN → default。給短線策略的 NaN 防護用。"""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return default if math.isnan(f) else f
+
+
+class VwapBandReversionStrategy(Strategy):
+    """滾動 VWAP 偏離 + 影線拒絕的均值回歸（多空雙向，盤整盤）。
+
+    與 zscore 系列的差異（避免淪為換皮）：fair value 用【成交量加權】的滾動 VWAP，
+    且進場必須在觸帶當根出現【拒絕影線】（下影線買、上影線賣）——量價結構雙確認，
+    而非單純統計極端。研究+對抗式驗證後選為均值回歸的一條獨立 edge。
+    """
+    name = "vwap_band_reversion"
+    defaults = {"vwap_window": 50, "k": 2.2, "exit_z": 0.4, "wick_frac": 0.5,
+                "use_structure": True, "of_long_min": 0.45, "of_short_max": 0.55}
+    allow_short = True
+    regime_pref = "range"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        w = int(self.params["vwap_window"])
+        out["vwap_roll"] = se.rolling_vwap(out, w)
+        dist = out["close"] - out["vwap_roll"]
+        out["band_sd"] = dist.rolling(w).std(ddof=0)
+        out["vwdist_z"] = dist / out["band_sd"].replace(0, np.nan)
+        rng = (out["high"] - out["low"]).replace(0, np.nan)
+        body_low = out[["open", "close"]].min(axis=1)
+        body_high = out[["open", "close"]].max(axis=1)
+        out["lower_wick_frac"] = (body_low - out["low"]) / rng
+        out["upper_wick_frac"] = (out["high"] - body_high) / rng
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(self._prepare_regime(out))
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        z, vwap, close = _num(g("vwdist_z")), _num(g("vwap_roll")), _num(g("close"))
+        if z is None or vwap is None or close is None:
+            return position
+        exit_z = self.params["exit_z"]
+        if position == 1:
+            return 0 if (close >= vwap or z >= -exit_z) else 1
+        if position == -1:
+            return 0 if (close <= vwap or z <= exit_z) else -1
+        if not self._regime_ok(row):
+            return 0
+        k, wf = self.params["k"], self.params["wick_frac"]
+        lw, uw = _num(g("lower_wick_frac"), 0.0), _num(g("upper_wick_frac"), 0.0)
+        if z <= -k and lw >= wf and self._structure_ok(row, 1):
+            return 1
+        if z >= k and uw >= wf and self._structure_ok(row, -1):
+            return -1
+        return 0
+
+
+class HeikinAshiMomoStrategy(Strategy):
+    """Heikin-Ashi 顏色連續 + 強實體的順勢續抱（多空雙向）。
+
+    用 HA K 棒的「顏色連續根數 + 影線幾何」作動量訊號——這是既有策略都沒用過的
+    K 棒建構式動量（有別於 ema_cross 的均線交叉、supertrend 的 ATR 通道）。
+    EMA(200) 為長線方向閘門；平滑訂單流只擋新開倉。從空手才開新倉（不直接翻倉）。
+    """
+    name = "heikin_ashi_momo"
+    defaults = {"ema_len": 200, "wick_frac": 0.15, "min_run": 2,
+                "use_structure": True, "of_smooth": 20,
+                "of_long_min": 0.45, "of_short_max": 0.55}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        ha = se.heikin_ashi(out)
+        for c in ("ha_open", "ha_close", "ha_high", "ha_low"):
+            out[c] = ha[c]
+        color = np.sign(ha["ha_close"] - ha["ha_open"])
+        out["ha_color"] = color
+        rng = (ha["ha_high"] - ha["ha_low"]).replace(0, np.nan)
+        body_low = pd.concat([ha["ha_open"], ha["ha_close"]], axis=1).min(axis=1)
+        body_high = pd.concat([ha["ha_open"], ha["ha_close"]], axis=1).max(axis=1)
+        out["ha_lower_wick_frac"] = (body_low - ha["ha_low"]) / rng
+        out["ha_upper_wick_frac"] = (ha["ha_high"] - body_high) / rng
+        col = color.to_numpy()
+        run = np.ones(len(col))
+        for i in range(1, len(col)):
+            run[i] = run[i - 1] + 1 if (col[i] == col[i - 1] and col[i] != 0) else 1
+        out["ha_same_color_run"] = run
+        out["ema_trend"] = se.ema(out["close"], int(self.params["ema_len"]))
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(out)
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        color, close, ema_t = _num(g("ha_color")), _num(g("close")), _num(g("ema_trend"))
+        if color is None or close is None or ema_t is None:
+            return position
+        if position == 1:
+            return 0 if (color <= 0 or close < ema_t) else 1
+        if position == -1:
+            return 0 if (color >= 0 or close > ema_t) else -1
+        wf, min_run = self.params["wick_frac"], self.params["min_run"]
+        run = _num(g("ha_same_color_run"))
+        if run is None:
+            return 0
+        lw, uw = _num(g("ha_lower_wick_frac")), _num(g("ha_upper_wick_frac"))
+        if (color > 0 and lw is not None and lw <= wf and run >= min_run
+                and close > ema_t and self._structure_ok(row, 1)):
+            return 1
+        if (color < 0 and uw is not None and uw <= wf and run >= min_run
+                and close < ema_t and self._structure_ok(row, -1)):
+            return -1
+        return 0
+
+
+class MacdScalpStrategy(Strategy):
+    """價格 MACD 零軸 + ADX 趨勢閘門的動量策略（多空雙向，趨勢盤）。
+
+    觸發＝MACD 線/訊號交叉 + 零軸過濾 + 柱狀圖上升 + EMA(50) 方向 + ADX 強度 + regime。
+    與 of_momentum（MACD-on-CVD 吃訂單流）不同：這是吃【價格】的 MACD。
+    出場＝柱狀圖連兩根衰竭或反向交叉。從空手才開新倉。
+    """
+    name = "macd_scalp"
+    defaults = {"fast": 12, "slow": 26, "sig": 9, "ema_trend_period": 50,
+                "adx_min": 18, "use_structure": True,
+                "of_long_min": 0.45, "of_short_max": 0.55}
+    allow_short = True
+    regime_pref = "trend"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        m = se.macd(out["close"], int(self.params["fast"]), int(self.params["slow"]),
+                    int(self.params["sig"]))
+        out["macd_line"], out["macd_signal"], out["macd_hist"] = (
+            m["macd_line"], m["macd_signal"], m["macd_hist"])
+        out["macd_hist_prev"] = out["macd_hist"].shift(1)
+        out["macd_hist_prev2"] = out["macd_hist"].shift(2)
+        line, sig = m["macd_line"], m["macd_signal"]
+        out["cross_up"] = (line > sig) & (line.shift(1) <= sig.shift(1))
+        out["cross_dn"] = (line < sig) & (line.shift(1) >= sig.shift(1))
+        out["ema_trend"] = se.ema(out["close"], int(self.params["ema_trend_period"]))
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(self._prepare_regime(out))
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        line, hist = _num(g("macd_line")), _num(g("macd_hist"))
+        if line is None or _num(g("macd_signal")) is None or hist is None:
+            return position
+        hp = _num(g("macd_hist_prev"), hist)
+        hp2 = _num(g("macd_hist_prev2"), hp)
+        cross_up, cross_dn = bool(g("cross_up")), bool(g("cross_dn"))
+        if position == 1:
+            return 0 if ((hist < hp and hp < hp2) or cross_dn) else 1
+        if position == -1:
+            return 0 if ((hist > hp and hp > hp2) or cross_up) else -1
+        if not self._regime_ok(row):
+            return 0
+        adx = _num(g("adx"), 0.0)
+        close, ema_t = _num(g("close")), _num(g("ema_trend"))
+        trend_up = (close is None or ema_t is None) or close > ema_t
+        trend_dn = (close is None or ema_t is None) or close < ema_t
+        adx_min = self.params["adx_min"]
+        if cross_up and line > 0 and hist > hp and trend_up and adx >= adx_min and self._structure_ok(row, 1):
+            return 1
+        if cross_dn and line < 0 and hist < hp and trend_dn and adx >= adx_min and self._structure_ok(row, -1):
+            return -1
+        return 0
+
+
+class BollingerSqueezeStrategy(Strategy):
+    """布林帶寬百分位壓縮 → 波動突破（多空雙向）。
+
+    squeeze＝bandwidth 落在過去 squeeze_lookback 根的低百分位（波動壓縮）；
+    前一根 squeeze 後當根收盤突破上/下軌 + ADX 確認 → 順勢突破進場。
+    與 donchian（價格通道突破）不同：這裡用【波動壓縮】百分位作突破前置條件、%B 作位置。
+    出場＝跌回中軌（突破失敗）。從空手才開新倉。
+    """
+    name = "bb_squeeze_breakout"
+    defaults = {"bb_n": 20, "mult": 2.0, "squeeze_lookback": 100, "squeeze_pct": 0.20,
+                "adx_min": 20, "adx_period": 14, "use_structure": True,
+                "of_long_min": 0.45, "of_short_max": 0.55}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        bb = se.bollinger(out["close"], int(self.params["bb_n"]), float(self.params["mult"]))
+        for c in ("bb_mid", "bb_upper", "bb_lower", "bandwidth", "pct_b"):
+            out[c] = bb[c]
+        lb, q = int(self.params["squeeze_lookback"]), float(self.params["squeeze_pct"])
+        thresh = out["bandwidth"].rolling(lb).quantile(q)
+        squeeze = out["bandwidth"] <= thresh
+        out["squeeze"] = squeeze
+        out["squeeze_prev"] = squeeze.shift(1).fillna(False)
+        out["adx"] = se.adx(out, int(self.params["adx_period"]))["adx"]
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(out)
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        close, mid = _num(g("close")), _num(g("bb_mid"))
+        if close is None or mid is None:
+            return position
+        if position == 1:
+            pb = _num(g("pct_b"), 1.0)
+            return 0 if (close < mid or pb < 0.5) else 1
+        if position == -1:
+            pb = _num(g("pct_b"), 0.0)
+            return 0 if (close > mid or pb > 0.5) else -1
+        if not bool(g("squeeze_prev")):
+            return 0
+        if _num(g("adx"), 0.0) < self.params["adx_min"]:
+            return 0
+        upper = _num(g("bb_upper"), float("inf"))
+        lower = _num(g("bb_lower"), float("-inf"))
+        if close > upper and self._structure_ok(row, 1):
+            return 1
+        if close < lower and self._structure_ok(row, -1):
+            return -1
+        return 0
+
+
+class Rsi2ConnorsStrategy(Strategy):
+    """Larry Connors RSI(2) 極端 + EMA(200) 方向閘門（多空雙向，順勢回調）。
+
+    RSI(2)<rsi_lo 且 close>EMA200 → 上升趨勢中買超賣回調；
+    RSI(2)>rsi_hi 且 close<EMA200 → 下降趨勢中空超買反彈。出場＝close 回到 SMA(5)。
+    與 zscore（滾動 z 帶）/fib（pivot+RSI14）不同：快速振盪器的趨勢內回調，不是統計極端的逆勢淡化。
+    """
+    name = "rsi2_connors"
+    defaults = {"rsi_lo": 5, "rsi_hi": 95, "trend_ema_period": 200, "sma_exit_period": 5}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out["rsi2"] = se.rsi(out["close"], 2)
+        out["trend_ema"] = se.ema(out["close"], int(self.params["trend_ema_period"]))
+        out["sma_exit"] = out["close"].rolling(int(self.params["sma_exit_period"])).mean()
+        out["atr"] = se.atr(out, 14)
+        return out
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        rsi2, close, trend = _num(g("rsi2")), _num(g("close")), _num(g("trend_ema"))
+        if rsi2 is None or close is None or trend is None:
+            return position
+        sma = _num(g("sma_exit"))
+        if position == 1:
+            return 1 if sma is None else (0 if close > sma else 1)
+        if position == -1:
+            return -1 if sma is None else (0 if close < sma else -1)
+        if rsi2 < self.params["rsi_lo"] and close > trend:
+            return 1
+        if rsi2 > self.params["rsi_hi"] and close < trend:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -423,6 +687,11 @@ STRATEGIES = {
     DonchianBreakoutStrategy.name: DonchianBreakoutStrategy,
     OrderFlowMomentumStrategy.name: OrderFlowMomentumStrategy,
     FibRetracementStrategy.name: FibRetracementStrategy,
+    VwapBandReversionStrategy.name: VwapBandReversionStrategy,
+    HeikinAshiMomoStrategy.name: HeikinAshiMomoStrategy,
+    MacdScalpStrategy.name: MacdScalpStrategy,
+    BollingerSqueezeStrategy.name: BollingerSqueezeStrategy,
+    Rsi2ConnorsStrategy.name: Rsi2ConnorsStrategy,
 }
 
 

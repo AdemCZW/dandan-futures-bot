@@ -96,15 +96,15 @@ function HlSection() {
 
 // ─── Binance Large Trades section ─────────────────────────────────────────────
 const MIN_OPTS = [
+  { label: '1萬U', val: 10_000 },
+  { label: '5萬U', val: 50_000 },
   { label: '10萬U', val: 100_000 },
-  { label: '50萬U', val: 500_000 },
-  { label: '100萬U', val: 1_000_000 },
 ]
 
 function LargeTradesSection() {
   const [trades, setTrades]   = useState([])
   const [loading, setLoading] = useState(false)
-  const [minUsdt, setMinUsdt] = useState(100_000)
+  const [minUsdt, setMinUsdt] = useState(10_000)
   const [autoSec, setAutoSec] = useState(10)
   const [countdown, setCd]    = useState(10)
   const newIds = useRef(new Set())
@@ -151,7 +151,7 @@ function LargeTradesSection() {
       {/* sub-header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: '#e6edf3', fontFamily: 'var(--font-display)' }}>
-          幣安 BTC 大單監控
+          OKX BTC 大單監控
         </div>
         {autoSec > 0 && (
           <span style={{ fontSize: 10, color: '#3fb950', fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -226,7 +226,7 @@ function LargeTradesSection() {
         </table>
       </div>
       <div style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-display)', marginTop: 6 }}>
-        幣安合約 aggTrades · 主動買/賣方判斷 · 顯示最近 30 筆
+        OKX 永續合約 · 同單聚合 (同毫秒+同方向) · 主動買/賣方 · 顯示最近 30 筆
       </div>
     </div>
   )
@@ -237,7 +237,7 @@ export default function CopyTrading() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
       <div style={{ fontSize: 11, color: '#484f58', fontFamily: 'var(--font-display)' }}>
-        帶單追蹤 · HyperLiquid 頂級交易者 + 幣安 BTC 大單流
+        帶單追蹤 · HyperLiquid 頂級交易者 + OKX BTC 大單流
       </div>
       <HlSection />
       <LargeTradesSection />

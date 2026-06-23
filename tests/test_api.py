@@ -127,12 +127,13 @@ def test_copytrader_positions_returns_structure():
 
 
 def test_large_trades_endpoint_returns_structure():
-    """幣安大單端點：回傳 200 + trades 清單；外網不通時退化為空清單。"""
-    r = client.get("/api/large-trades?symbol=BTCUSDT&min_usdt=100000&limit=20")
+    """OKX 大單端點：回傳 200 + trades 清單 + 來源標示 OKX；外網不通時退化為空清單。"""
+    r = client.get("/api/large-trades?symbol=BTCUSDT&min_usdt=10000&limit=20")
     assert r.status_code == 200
     d = r.json()
     assert "trades" in d and isinstance(d["trades"], list)
     assert "symbol" in d and "min_usdt" in d
+    assert "OKX" in d.get("source", "")           # 已從幣安切換到 OKX
     for t in d["trades"]:
         assert {"time", "side", "price", "qty", "usdt"} <= set(t.keys())
         assert t["side"] in ("buy", "sell")

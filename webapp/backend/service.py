@@ -563,43 +563,94 @@ def binance_copytrader_positions(uid: str) -> dict:
     return {"positions": positions, "uid": uid}
 
 
-def binance_large_trades(symbol: str = "BTCUSDT", min_usdt: float = 500_000,
-                         limit: int = 100) -> dict:
-    """幣安合約最近大單（免金鑰，用 fapi aggTrades）。
+_OKX_CTVAL_CACHE: dict = {}
+# fallback 合約面值（BTC 每張 0.01、ETH 0.1、SOL 1）；查不到時用這份
+_OKX_CTVAL_FALLBACK = {"BTC-USDT-SWAP": 0.01, "ETH-USDT-SWAP": 0.1, "SOL-USDT-SWAP": 1.0}
 
-    m=True → maker 是買方，即主動賣出（sell aggressor）。
-    過濾名義價值 >= min_usdt 的成交，依大小降序。
+
+def _okx_inst_id(symbol: str) -> str:
+    """BTCUSDT → BTC-USDT-SWAP（永續合約）。"""
+    s = symbol.upper()
+    if s.endswith("USDT"):
+        return f"{s[:-4]}-USDT-SWAP"
+    return s
+
+
+def _okx_ctval(inst_id: str) -> float:
+    """合約面值（每張幾顆幣）。查 OKX instruments，快取；失敗退回 fallback。"""
+    if inst_id in _OKX_CTVAL_CACHE:
+        return _OKX_CTVAL_CACHE[inst_id]
+    import json, urllib.request
+    val = _OKX_CTVAL_FALLBACK.get(inst_id, 0.01)
+    try:
+        url = f"https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId={inst_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            d = json.loads(r.read())
+        ct = (d.get("data") or [{}])[0].get("ctVal")
+        if ct:
+            val = float(ct)
+    except Exception:
+        pass
+    _OKX_CTVAL_CACHE[inst_id] = val
+    return val
+
+
+def okx_large_trades(symbol: str = "BTCUSDT", min_usdt: float = 100_000,
+                     limit: int = 500) -> dict:
+    """OKX 永續合約最近大單（免金鑰，用公開 market/trades）。
+
+    OKX 回傳的是逐筆成交（顆粒很細），把「同一毫秒時間戳 + 同方向」的逐筆
+    聚合回單一主動單（VWAP 均價、合計數量），再換算名義價值 = 張數×ctVal×價，
+    過濾 >= min_usdt 並依大小降序。side=buy 主動買、sell 主動賣。
     """
     import json, urllib.request
+    from collections import OrderedDict
 
-    url = (f"https://fapi.binance.com/fapi/v1/aggTrades"
-           f"?symbol={symbol}&limit={min(limit, 1000)}")
+    inst_id = _okx_inst_id(symbol)
+    ctval = _okx_ctval(inst_id)
+    url = (f"https://www.okx.com/api/v5/market/trades"
+           f"?instId={inst_id}&limit={min(limit, 500)}")
     try:
-        with urllib.request.urlopen(url, timeout=8) as r:
-            raw = json.loads(r.read())
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            raw = (json.loads(r.read()).get("data") or [])
     except Exception:
         raw = []
 
-    trades = []
+    # 聚合同 (ts, side) 的逐筆成交 → 還原成主動單
+    agg: "OrderedDict[tuple, dict]" = OrderedDict()
     for t in raw:
         try:
-            price = float(t["p"])
-            qty   = float(t["q"])
-            usdt  = price * qty
-            if usdt < min_usdt:
-                continue
-            trades.append({
-                "time":  int(t["T"]),
-                "side":  "sell" if t.get("m") else "buy",
-                "price": round(price, 2),
-                "qty":   round(qty, 4),
-                "usdt":  round(usdt, 0),
-            })
-        except Exception:
+            ts, side = t["ts"], t["side"]
+            sz, px = float(t["sz"]), float(t["px"])
+        except (KeyError, ValueError, TypeError):
             continue
+        key = (ts, side)
+        a = agg.setdefault(key, {"ts": int(ts), "side": side, "sz": 0.0, "pxsz": 0.0})
+        a["sz"] += sz
+        a["pxsz"] += px * sz
+
+    trades = []
+    for a in agg.values():
+        if a["sz"] <= 0:
+            continue
+        btc = a["sz"] * ctval
+        px = a["pxsz"] / a["sz"]
+        usdt = btc * px
+        if usdt < min_usdt:
+            continue
+        trades.append({
+            "time":  a["ts"],
+            "side":  a["side"],                       # OKX 已是主動方向（taker side）
+            "price": round(px, 2),
+            "qty":   round(btc, 4),
+            "usdt":  round(usdt, 0),
+        })
 
     trades.sort(key=lambda x: x["usdt"], reverse=True)
-    return {"trades": trades, "symbol": symbol, "min_usdt": min_usdt}
+    return {"trades": trades, "symbol": symbol, "min_usdt": min_usdt,
+            "source": f"OKX {inst_id}"}
 
 
 def whale_data(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30) -> dict:

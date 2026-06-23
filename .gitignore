@@ -37,3 +37,9 @@ venv/
 
 # OS
 .DS_Store
+
+# 學習迴圈執行產物（本地）
+learning_log.jsonl
+learning_best.json
+learning_loop.out
+tournament_result.json

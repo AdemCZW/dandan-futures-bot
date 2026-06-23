@@ -688,3 +688,131 @@ def test_donchian_is_causal_prefix_matches():
             a, b = full[col].iloc[:k], pref[col]
             assert a.isna().equals(b.isna())
             np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# MACD（price MACD：line=ema(fast)-ema(slow)、signal=ema(line)、hist=line-signal）
+# --------------------------------------------------------------------------- #
+def test_macd_components_match_ema_definition(wiggly_series):
+    out = se.macd(wiggly_series, fast=12, slow=26, sig=9)
+    assert set(["macd_line", "macd_signal", "macd_hist"]).issubset(out.columns)
+    line = se.ema(wiggly_series, 12) - se.ema(wiggly_series, 26)
+    signal = se.ema(line, 9)
+    np.testing.assert_allclose(out["macd_line"].values, line.values, rtol=1e-12)
+    np.testing.assert_allclose(out["macd_signal"].values, signal.values, rtol=1e-12)
+    np.testing.assert_allclose(out["macd_hist"].values, (line - signal).values, rtol=1e-12)
+
+
+def test_macd_is_causal_no_lookahead(wiggly_series):
+    full = se.macd(wiggly_series, 12, 26, 9)
+    for k in (20, 40, 55):
+        pref = se.macd(wiggly_series.iloc[:k], 12, 26, 9)
+        for col in ("macd_line", "macd_signal", "macd_hist"):
+            np.testing.assert_allclose(full[col].iloc[:k].values, pref[col].values, rtol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Bollinger Bands（mid=SMA、band=mid±mult*std(母體 ddof=0)、bandwidth、pct_b）
+# --------------------------------------------------------------------------- #
+def test_bollinger_levels_match_definition():
+    rng = np.random.RandomState(9)
+    close = pd.Series(100 + np.cumsum(rng.normal(size=80)))
+    period, mult = 20, 2.0
+    out = se.bollinger(close, period, mult)
+    assert set(["bb_mid", "bb_upper", "bb_lower", "bandwidth", "pct_b"]).issubset(out.columns)
+    i = 50
+    win = close.iloc[i - period + 1: i + 1]
+    mid = win.mean()
+    sd = win.std(ddof=0)                     # Bollinger 慣例用母體標準差
+    assert out["bb_mid"].iloc[i] == pytest.approx(mid)
+    assert out["bb_upper"].iloc[i] == pytest.approx(mid + mult * sd)
+    assert out["bb_lower"].iloc[i] == pytest.approx(mid - mult * sd)
+    assert out["pct_b"].iloc[i] == pytest.approx(
+        (close.iloc[i] - (mid - mult * sd)) / ((mid + mult * sd) - (mid - mult * sd)))
+
+
+def test_bollinger_constant_series_zero_width_pctb_nan():
+    """常數序列 → 上下軌重合、bandwidth=0、pct_b 為 NaN（避免除零）。"""
+    s = pd.Series([100.0] * 30)
+    out = se.bollinger(s, 20, 2.0)
+    assert out["bandwidth"].iloc[-1] == pytest.approx(0.0)
+    assert np.isnan(out["pct_b"].iloc[-1])
+
+
+def test_bollinger_is_causal_no_lookahead():
+    rng = np.random.RandomState(13)
+    close = pd.Series(100 + np.cumsum(rng.normal(size=90)))
+    full = se.bollinger(close, 20, 2.0)
+    for k in (30, 60, 85):
+        pref = se.bollinger(close.iloc[:k], 20, 2.0)
+        for col in ("bb_mid", "bb_upper", "bb_lower", "bandwidth", "pct_b"):
+            a, b = full[col].iloc[:k], pref[col]
+            assert a.isna().equals(b.isna())
+            np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# rolling VWAP（causal 滾動 N 根成交量加權典型價，無 session 錨點）
+# --------------------------------------------------------------------------- #
+def test_rolling_vwap_volume_weighted():
+    # 典型價=close（h=l=c），window=2：vwap[1] = (100*1 + 200*3)/(1+3) = 175
+    px = [100.0, 200.0]
+    df = pd.DataFrame({"open": px, "high": px, "low": px, "close": px,
+                       "volume": [1.0, 3.0]})
+    v = se.rolling_vwap(df, window=2)
+    assert np.isnan(v.iloc[0])                      # 不足一窗 → NaN
+    assert v.iloc[1] == pytest.approx(175.0)
+
+
+def test_rolling_vwap_constant_price_equals_price():
+    n = 30
+    df = pd.DataFrame({"open": [100.0]*n, "high": [100.0]*n, "low": [100.0]*n,
+                       "close": [100.0]*n, "volume": np.arange(1, n + 1, dtype=float)})
+    v = se.rolling_vwap(df, window=10).dropna()
+    assert np.allclose(v.values, 100.0)
+
+
+def test_rolling_vwap_is_causal():
+    rng = np.random.RandomState(21)
+    n = 80
+    px = 100 + np.cumsum(rng.normal(size=n))
+    df = pd.DataFrame({"open": px, "high": px + 0.5, "low": px - 0.5, "close": px,
+                       "volume": np.abs(rng.normal(size=n)) + 1})
+    full = se.rolling_vwap(df, 20)
+    for k in (30, 50, 70):
+        pref = se.rolling_vwap(df.iloc[:k], 20)
+        a, b = full.iloc[:k], pref
+        assert a.isna().equals(b.isna())
+        np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Heikin-Ashi（遞迴、causal；ha_close=OHLC/4、ha_open=前ha均、ha_high/low 含影線）
+# --------------------------------------------------------------------------- #
+def test_heikin_ashi_hand_computation():
+    df = pd.DataFrame({"open": [10.0, 11.0], "high": [12.0, 13.0],
+                       "low": [9.0, 10.0], "close": [11.0, 12.0]})
+    ha = se.heikin_ashi(df)
+    assert set(["ha_open", "ha_close", "ha_high", "ha_low"]).issubset(ha.columns)
+    # bar0：ha_close=(10+12+9+11)/4=10.5；ha_open=(10+11)/2=10.5；high=12；low=9
+    assert ha["ha_close"].iloc[0] == pytest.approx(10.5)
+    assert ha["ha_open"].iloc[0] == pytest.approx(10.5)
+    assert ha["ha_high"].iloc[0] == pytest.approx(12.0)
+    assert ha["ha_low"].iloc[0] == pytest.approx(9.0)
+    # bar1：ha_close=(11+13+10+12)/4=11.5；ha_open=(10.5+10.5)/2=10.5；high=13；low=10
+    assert ha["ha_close"].iloc[1] == pytest.approx(11.5)
+    assert ha["ha_open"].iloc[1] == pytest.approx(10.5)
+    assert ha["ha_high"].iloc[1] == pytest.approx(13.0)
+    assert ha["ha_low"].iloc[1] == pytest.approx(10.0)
+
+
+def test_heikin_ashi_is_causal_prefix_matches():
+    rng = np.random.RandomState(31)
+    n = 60
+    px = 100 + np.cumsum(rng.normal(size=n))
+    df = pd.DataFrame({"open": px, "high": px + 1, "low": px - 1, "close": px + rng.normal(size=n) * 0.2})
+    full = se.heikin_ashi(df)
+    for k in (20, 40, 55):
+        pref = se.heikin_ashi(df.iloc[:k])
+        for col in ("ha_open", "ha_close", "ha_high", "ha_low"):
+            np.testing.assert_allclose(full[col].iloc[:k].values, pref[col].values, rtol=1e-9)

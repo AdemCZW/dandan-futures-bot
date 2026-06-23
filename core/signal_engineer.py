@@ -286,6 +286,73 @@ def regime(df: pd.DataFrame, er_period: int = 14, er_trend: float = 0.30,
     }, index=df.index)
 
 
+def macd(close: pd.Series, fast: int = 12, slow: int = 26, sig: int = 9) -> pd.DataFrame:
+    """價格 MACD：line=ema(fast)−ema(slow)、signal=ema(line)、hist=line−signal。
+
+    全為 ema（adjust=False，causal）的組合，天然 causal、不 repaint。
+    與 of_momentum（MACD-on-CVD，吃訂單流）不同：這是吃【價格】的動量。
+    """
+    line = ema(close, fast) - ema(close, slow)
+    signal = ema(line, sig)
+    return pd.DataFrame({"macd_line": line, "macd_signal": signal,
+                         "macd_hist": line - signal}, index=close.index)
+
+
+def bollinger(close: pd.Series, period: int = 20, mult: float = 2.0) -> pd.DataFrame:
+    """布林通道：mid=SMA(period)、上下軌=mid±mult×母體標準差(ddof=0)。
+
+    另回傳 bandwidth=(上−下)/mid（波動壓縮度，squeeze 用）與
+    pct_b=(close−下)/(上−下)（band 位置，0=下軌、1=上軌；可超出 [0,1]）。
+    全用滾動過去 period 根，causal。range=0（常數段）→ pct_b=NaN 避免除零。
+    """
+    mid = close.rolling(period).mean()
+    sd = close.rolling(period).std(ddof=0)            # Bollinger 慣例：母體標準差
+    upper = mid + mult * sd
+    lower = mid - mult * sd
+    width = upper - lower
+    return pd.DataFrame({
+        "bb_mid": mid, "bb_upper": upper, "bb_lower": lower,
+        "bandwidth": width / mid.replace(0, np.nan),
+        "pct_b": (close - lower) / width.replace(0, np.nan),
+    }, index=close.index)
+
+
+def rolling_vwap(df: pd.DataFrame, window: int = 50) -> pd.Series:
+    """滾動 N 根成交量加權典型價（causal，無 session 錨點）。
+
+    典型價=(high+low+close)/3；vwap=Σ(典型價×量)/Σ量（過去 window 根）。
+    這是日內 VWAP 的 causal 變體：不重置、只看過去 window 根，故無 look-ahead。
+    Σ量=0 → NaN（避免除零）。
+    """
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    vol = df["volume"]
+    pv = (typical * vol).rolling(window).sum()
+    vv = vol.rolling(window).sum()
+    return pv / vv.replace(0, np.nan)
+
+
+def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    """Heikin-Ashi 平均 K 線（遞迴、causal）。
+
+    ha_close=(O+H+L+C)/4；ha_open[i]=(ha_open[i−1]+ha_close[i−1])/2，
+    種子 ha_open[0]=(O[0]+C[0])/2；ha_high=max(H, ha_open, ha_close)、
+    ha_low=min(L, ha_open, ha_close)。遞迴只依賴前一根 → causal、不 repaint。
+    """
+    o = df["open"].to_numpy(); h = df["high"].to_numpy()
+    l = df["low"].to_numpy();  c = df["close"].to_numpy()
+    n = len(df)
+    ha_close = (o + h + l + c) / 4.0
+    ha_open = np.empty(n)
+    if n:
+        ha_open[0] = (o[0] + c[0]) / 2.0
+        for i in range(1, n):
+            ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0
+    ha_high = np.maximum.reduce([h, ha_open, ha_close]) if n else np.array([])
+    ha_low = np.minimum.reduce([l, ha_open, ha_close]) if n else np.array([])
+    return pd.DataFrame({"ha_open": ha_open, "ha_close": ha_close,
+                         "ha_high": ha_high, "ha_low": ha_low}, index=df.index)
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """一次把常用指標都算好，附加到 DataFrame。"""
     out = df.copy()
