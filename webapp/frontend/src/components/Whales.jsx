@@ -50,11 +50,139 @@ function Signal({ label, value, threshold, reverse }) {
 
 const CHART_STYLE = { fontSize: 11, fill: 'var(--muted)' }
 
+function fmtVal(v) {
+  if (v == null) return '—'
+  if (Math.abs(v) >= 1e9) return `$${(v / 1e9).toFixed(2)}B`
+  if (Math.abs(v) >= 1e6) return `$${(v / 1e6).toFixed(1)}M`
+  if (Math.abs(v) >= 1e3) return `$${(v / 1e3).toFixed(0)}K`
+  return `$${v}`
+}
+
+function DirBadge({ dir }) {
+  const cfg = {
+    long:  { label: '做多', bg: '#0a2', color: '#fff' },
+    short: { label: '做空', bg: '#c02', color: '#fff' },
+    flat:  { label: '空手', bg: 'var(--panel2)', color: 'var(--muted)' },
+  }[dir] ?? { label: dir, bg: 'var(--panel2)', color: 'var(--muted)' }
+  return (
+    <span style={{ fontSize: 11, padding: '1px 7px', borderRadius: 8,
+      background: cfg.bg, color: cfg.color, fontWeight: 600 }}>
+      {cfg.label}
+    </span>
+  )
+}
+
+function HLLeaderboard() {
+  const [hl, setHl] = useState(null)
+  const [hlErr, setHlErr] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function load() {
+    setLoading(true)
+    try {
+      setHl(await api.hlLeaderboard(30))
+      setHlErr('')
+    } catch (e) {
+      setHlErr(String(e.message || e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 120000)  // 每 2 分鐘（配合快取）
+    return () => clearInterval(t)
+  }, [])
+
+  const sum = hl?.btc_summary
+  return (
+    <div className="panel">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+        <div style={{ fontWeight: 600 }}>Hyperliquid 頂尖交易者 — BTC 持倉</div>
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>鏈上公開數據 · 每 2 分鐘刷新</span>
+        {loading && <span style={{ fontSize: 11, color: 'var(--accent)' }}>載入中…</span>}
+        <button onClick={load} style={{ marginLeft: 'auto', fontSize: 11, padding: '2px 8px',
+          borderRadius: 6, border: '1px solid var(--border)', background: 'var(--panel2)',
+          color: 'var(--fg)', cursor: 'pointer' }}>手動刷新</button>
+      </div>
+
+      {hlErr && <div className="err">⚠ {hlErr}</div>}
+
+      {sum && (
+        <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13 }}>
+          <span style={{ color: '#0a2', fontWeight: 700 }}>做多 {sum.long} 人</span>
+          <span style={{ color: '#c02', fontWeight: 700 }}>做空 {sum.short} 人</span>
+          <span style={{ color: 'var(--muted)' }}>空手 {sum.flat} 人</span>
+          <span style={{ color: 'var(--muted)', marginLeft: 8 }}>
+            多空比 {sum.long + sum.short > 0
+              ? ((sum.long / (sum.long + sum.short)) * 100).toFixed(0)
+              : '—'}% 做多
+          </span>
+        </div>
+      )}
+
+      {hl?.traders?.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: 'var(--muted)', borderBottom: '1px solid var(--border)' }}>
+                <th style={{ textAlign: 'left', padding: '4px 8px' }}>#</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px' }}>交易者</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px' }}>帳戶規模</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px' }}>今日損益</th>
+                <th style={{ textAlign: 'center', padding: '4px 8px' }}>BTC 方向</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px' }}>BTC 數量</th>
+                <th style={{ textAlign: 'right', padding: '4px 8px' }}>未實現損益</th>
+              </tr>
+            </thead>
+            <tbody>
+              {hl.traders.map((t, i) => (
+                <tr key={t.address}
+                  style={{ borderBottom: '1px solid var(--border)',
+                    background: i % 2 === 0 ? 'transparent' : 'var(--panel2)' }}>
+                  <td style={{ padding: '5px 8px', color: 'var(--muted)' }}>{i + 1}</td>
+                  <td style={{ padding: '5px 8px', fontWeight: 500 }}>
+                    <a href={`https://app.hyperliquid.xyz/explorer/address/${t.address}`}
+                      target="_blank" rel="noreferrer"
+                      style={{ color: 'var(--accent)', textDecoration: 'none' }}>
+                      {t.name}
+                    </a>
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right' }}>{fmtVal(t.account_value)}</td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right',
+                    color: t.day_pnl > 0 ? 'var(--green)' : t.day_pnl < 0 ? '#e05' : 'var(--muted)' }}>
+                    {t.day_pnl >= 0 ? '+' : ''}{fmtVal(t.day_pnl)}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'center' }}>
+                    <DirBadge dir={t.btc_direction} />
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {t.btc_size > 0 ? `${t.btc_size} BTC` : '—'}
+                  </td>
+                  <td style={{ padding: '5px 8px', textAlign: 'right',
+                    color: t.btc_upnl > 0 ? 'var(--green)' : t.btc_upnl < 0 ? '#e05' : 'var(--muted)' }}>
+                    {t.btc_size > 0 ? (t.btc_upnl >= 0 ? '+' : '') + fmtVal(t.btc_upnl) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {!hl && !loading && !hlErr && (
+        <div className="muted" style={{ textAlign: 'center', padding: 30 }}>載入中…</div>
+      )}
+    </div>
+  )
+}
+
 export default function Whales() {
   const [d, setD] = useState(null)
   const [err, setErr] = useState('')
   const [period, setPeriod] = useState('5m')
-  const [chart, setChart] = useState('top_acct') // top_acct | top_pos | global | taker | oi
+  const [chart, setChart] = useState('top_acct')
   const [tick, setTick] = useState(0)
   const timer = useRef(null)
 
@@ -226,6 +354,9 @@ export default function Whales() {
           </div>
         )}
       </div>
+
+      {/* ── Hyperliquid leaderboard ──────────────────────────── */}
+      <HLLeaderboard />
 
       {/* ── explanation ──────────────────────────────────────── */}
       <div className="panel" style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.8 }}>

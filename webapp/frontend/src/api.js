@@ -30,6 +30,7 @@ export const api = {
   live: () => get('/api/live'),
   whales: (symbol = 'BTCUSDT', period = '5m', limit = 30) =>
     get(`/api/whales?symbol=${symbol}&period=${period}&limit=${limit}`),
+  hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),
 }
 
 export const pct = (x) => `${(x * 100).toFixed(2)}%`

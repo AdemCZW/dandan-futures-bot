@@ -335,6 +335,94 @@ def live_status(state_path: str = None) -> dict:
     }
 
 
+_hl_cache: dict = {"ts": 0.0, "data": None}
+_HL_TTL = 120  # 秒；leaderboard 32MB，快取 2 分鐘
+
+
+def hyperliquid_leaderboard(top_n: int = 30) -> dict:
+    """Hyperliquid 前 top_n 活躍命名交易者 + 各自 BTC 持倉方向（多/空/平）。
+
+    Leaderboard 資料快取 2 分鐘；BTC 持倉平行抓取（ThreadPoolExecutor）。
+    """
+    import json, time, urllib.request
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    now = time.time()
+    if now - _hl_cache["ts"] > _HL_TTL or _hl_cache["data"] is None:
+        try:
+            url = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
+            with urllib.request.urlopen(url, timeout=15) as r:
+                raw = json.loads(r.read())
+            rows = raw.get("leaderboardRows", [])
+        except Exception:
+            rows = []
+
+        # 過濾：有 displayName 且今日有交易量
+        def _day(r):
+            return next((p[1] for p in r.get("windowPerformances", []) if p[0] == "day"), {})
+
+        active = [r for r in rows
+                  if r.get("displayName")
+                  and float(_day(r).get("vlm", 0)) > 0]
+        active.sort(key=lambda r: float(r.get("accountValue", 0)), reverse=True)
+        _hl_cache["ts"] = now
+        _hl_cache["data"] = active
+
+    rows = _hl_cache["data"] or []
+    top = rows[:top_n]
+
+    def _btc_pos(addr: str):
+        try:
+            req = urllib.request.Request(
+                "https://api.hyperliquid.xyz/info",
+                data=json.dumps({"type": "clearinghouseState", "user": addr}).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=6) as r:
+                state = json.loads(r.read())
+            for p in state.get("assetPositions", []):
+                pos = p.get("position", {})
+                if pos.get("coin") == "BTC":
+                    szi = float(pos.get("szi", 0))
+                    return ("long" if szi > 0 else "short"), round(abs(szi), 4), round(float(pos.get("unrealizedPnl", 0)), 2)
+        except Exception:
+            pass
+        return "flat", 0.0, 0.0
+
+    def _entry(row):
+        day = next((p[1] for p in row.get("windowPerformances", []) if p[0] == "day"), {})
+        week = next((p[1] for p in row.get("windowPerformances", []) if p[0] == "week"), {})
+        direction, btc_size, btc_upnl = _btc_pos(row["ethAddress"])
+        return {
+            "name": row.get("displayName", row["ethAddress"][:10] + "…"),
+            "address": row["ethAddress"],
+            "account_value": round(float(row.get("accountValue", 0)), 0),
+            "day_pnl": round(float(day.get("pnl", 0)), 2),
+            "day_roi": round(float(day.get("roi", 0)) * 100, 3),
+            "week_pnl": round(float(week.get("pnl", 0)), 2),
+            "btc_direction": direction,
+            "btc_size": btc_size,
+            "btc_upnl": btc_upnl,
+        }
+
+    results = [None] * len(top)
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = {ex.submit(_entry, row): i for i, row in enumerate(top)}
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
+
+    entries = [r for r in results if r]
+    long_count  = sum(1 for e in entries if e["btc_direction"] == "long")
+    short_count = sum(1 for e in entries if e["btc_direction"] == "short")
+    flat_count  = sum(1 for e in entries if e["btc_direction"] == "flat")
+    return {
+        "source": "Hyperliquid Mainnet",
+        "top_n": len(entries),
+        "btc_summary": {"long": long_count, "short": short_count, "flat": flat_count},
+        "traders": entries,
+    }
+
+
 def whale_data(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30) -> dict:
     """抓幣安合約公開大戶數據（免金鑰，全部用 fapi 公開端點）。
 

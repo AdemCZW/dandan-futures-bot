@@ -104,6 +104,14 @@ def live():
     return service.live_status()
 
 
+@app.get("/api/hl-leaderboard")
+def hl_leaderboard(top_n: int = 30):
+    try:
+        return service.hyperliquid_leaderboard(top_n=top_n)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.get("/api/whales")
 def whales(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30):
     try:
