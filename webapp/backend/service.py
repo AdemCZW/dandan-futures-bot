@@ -185,18 +185,22 @@ def run_optimize_api(strategy: str, source: str = "synthetic",
 
 
 _RAILWAY_BOT_URL = os.getenv("RAILWAY_BOT_URL", "").rstrip("/")
+# 第二台對照實驗 bot（短線 donchian 15m）的 Railway URL，供 /api/live2 顯示並行對照組。
+_RAILWAY_BOT_URL_2 = os.getenv("RAILWAY_BOT_URL_2", "").rstrip("/")
 
 
-def _fetch_railway_trades(limit: int = 50, mode: str | None = None) -> list[dict]:
+def _fetch_railway_trades(limit: int = 50, mode: str | None = None,
+                          base_url: str | None = None) -> list[dict]:
     """從 Railway bot /trades 端點抓近期成交（Railway bot 部署後才有效）。"""
     import json, urllib.request
-    if not _RAILWAY_BOT_URL:
+    url_base = base_url if base_url is not None else _RAILWAY_BOT_URL
+    if not url_base:
         return []
     try:
         qs = f"limit={limit}"
         if mode:
             qs += f"&mode={mode}"
-        url = f"{_RAILWAY_BOT_URL}/trades?{qs}"
+        url = f"{url_base}/trades?{qs}"
         with urllib.request.urlopen(url, timeout=5) as r:
             data = json.loads(r.read())
         return data if isinstance(data, list) else []
@@ -204,14 +208,16 @@ def _fetch_railway_trades(limit: int = 50, mode: str | None = None) -> list[dict
         return []
 
 
-def live_status(state_path: str = None) -> dict:
+def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
     """即時監控：自動選用最近活躍的 bot（paper / futures testnet）狀態，回傳權益與 SOP。
 
     優先順序：
-      1. RAILWAY_BOT_URL（.env 設定後從雲端 Railway bot 取狀態）
+      1. railway_url 或 RAILWAY_BOT_URL（.env 設定後從雲端 Railway bot 取狀態）
       2. 本機 bot_state_futures.json（2 分鐘內有更新）
       3. 本機 bot_state_paper.json
+    railway_url 可指定第二台 bot（對照實驗）的 URL，供 /api/live2 使用。
     """
+    ru = railway_url if railway_url is not None else _RAILWAY_BOT_URL
     import json
     import urllib.request
     from datetime import datetime, timezone
@@ -236,10 +242,10 @@ def live_status(state_path: str = None) -> dict:
             return datetime.min.replace(tzinfo=timezone.utc)
 
     def _fetch_railway() -> dict:
-        if not _RAILWAY_BOT_URL:
+        if not ru:
             return {}
         try:
-            url = f"{_RAILWAY_BOT_URL}/state"
+            url = f"{ru}/state"
             with urllib.request.urlopen(url, timeout=5) as r:
                 data = json.loads(r.read())
             return data if isinstance(data, dict) else {}
@@ -315,8 +321,8 @@ def live_status(state_path: str = None) -> dict:
 
     trades_mode = "live_futures_testnet" if mode == "futures" else "paper"
     # 若有 Railway URL，近期成交從雲端抓；否則讀本機 DB
-    if _RAILWAY_BOT_URL and mode == "futures":
-        recent = _fetch_railway_trades(limit=15, mode=trades_mode)
+    if ru and mode == "futures":
+        recent = _fetch_railway_trades(limit=15, mode=trades_mode, base_url=ru)
     else:
         recent = read_trades(limit=15, mode=trades_mode, db_path="trades.db")
     return {
