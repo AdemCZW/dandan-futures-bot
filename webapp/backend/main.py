@@ -102,3 +102,11 @@ def trades(limit: int = 50, mode: str | None = None):
 @app.get("/api/live")
 def live():
     return service.live_status()
+
+
+@app.get("/api/whales")
+def whales(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30):
+    try:
+        return service.whale_data(symbol=symbol, period=period, limit=limit)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")

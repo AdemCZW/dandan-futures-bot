@@ -335,6 +335,72 @@ def live_status(state_path: str = None) -> dict:
     }
 
 
+def whale_data(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30) -> dict:
+    """抓幣安合約公開大戶數據（免金鑰，全部用 fapi 公開端點）。
+
+    回傳最近 limit 根 period K 線的：大戶帳戶多空比 / 大戶持倉多空比 /
+    全市場多空比 / 主動買賣比 / 未平倉合約歷史（小時級）。
+    """
+    import json, urllib.request
+
+    BASE = "https://fapi.binance.com/futures/data"
+
+    def _get(path, params):
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{BASE}/{path}?{qs}"
+        try:
+            with urllib.request.urlopen(url, timeout=8) as r:
+                return json.loads(r.read())
+        except Exception:
+            return []
+
+    def _pct(v):
+        try: return round(float(v) * 100, 1)
+        except Exception: return None
+
+    def _f(v, n=4):
+        try: return round(float(v), n)
+        except Exception: return None
+
+    def _series_ls(lst):
+        return [{"ts": int(r["timestamp"]),
+                 "long": _pct(r.get("longAccount")),
+                 "short": _pct(r.get("shortAccount"))} for r in lst]
+
+    top_acct = _get("topLongShortAccountRatio", {"symbol": symbol, "period": period, "limit": limit})
+    top_pos  = _get("topLongShortPositionRatio", {"symbol": symbol, "period": period, "limit": limit})
+    global_acct = _get("globalLongShortAccountRatio", {"symbol": symbol, "period": period, "limit": limit})
+    taker    = _get("takerlongshortRatio",        {"symbol": symbol, "period": period, "limit": limit})
+    oi       = _get("openInterestHist",           {"symbol": symbol, "period": "1h",   "limit": 24})
+
+    la = top_acct[-1] if top_acct else {}
+    lg = global_acct[-1] if global_acct else {}
+    lt = taker[-1] if taker else {}
+    lo = oi[-1] if oi else {}
+
+    return {
+        "symbol": symbol, "period": period,
+        "snapshot": {
+            "top_long_pct":    _pct(la.get("longAccount")),
+            "top_short_pct":   _pct(la.get("shortAccount")),
+            "top_ls_ratio":    _f(la.get("longShortRatio"), 2),
+            "global_long_pct": _pct(lg.get("longAccount")),
+            "global_short_pct":_pct(lg.get("shortAccount")),
+            "global_ls_ratio": _f(lg.get("longShortRatio"), 2),
+            "taker_ratio":     _f(lt.get("buySellRatio"), 2),
+            "taker_buy_vol":   _f(lt.get("buyVol"), 1),
+            "taker_sell_vol":  _f(lt.get("sellVol"), 1),
+            "oi_usdt":         _f(lo.get("sumOpenInterestValue"), 0),
+            "oi_btc":          _f(lo.get("sumOpenInterest"), 1),
+        },
+        "top_acct_series": _series_ls(top_acct),
+        "top_pos_series":  _series_ls(top_pos),
+        "global_series":   _series_ls(global_acct),
+        "taker_series": [{"ts": int(r["timestamp"]), "ratio": _f(r.get("buySellRatio"), 2)} for r in taker],
+        "oi_series":    [{"ts": int(r["timestamp"]), "usdt":  _f(r.get("sumOpenInterestValue"), 0)} for r in oi],
+    }
+
+
 def read_trades(limit: int = 50, mode: str | None = None,
                 db_path: str = "trades.db") -> list[dict]:
     import os

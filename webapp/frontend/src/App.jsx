@@ -4,13 +4,15 @@ import Backtest from './components/Backtest.jsx'
 import Explain from './components/Explain.jsx'
 import Optimize from './components/Optimize.jsx'
 import Journal from './components/Journal.jsx'
+import Whales from './components/Whales.jsx'
 
 const TABS = [
-  { key: 'live', label: '即時監控', el: <Live /> },
-  { key: 'backtest', label: '回測', el: <Backtest /> },
-  { key: 'explain', label: '決策流程', el: <Explain /> },
+  { key: 'live',     label: '即時監控',   el: <Live /> },
+  { key: 'whales',   label: '大戶籌碼',   el: <Whales /> },
+  { key: 'backtest', label: '回測',        el: <Backtest /> },
+  { key: 'explain',  label: '決策流程',   el: <Explain /> },
   { key: 'optimize', label: '參數最佳化', el: <Optimize /> },
-  { key: 'journal', label: '交易日誌', el: <Journal /> },
+  { key: 'journal',  label: '交易日誌',   el: <Journal /> },
 ]
 
 export default function App() {
