@@ -1,0 +1,29 @@
+# 金鑰：絕對不打包進映像（雲端用 Railway 環境變數注入）
+.env
+
+# 虛擬環境 / 套件
+.venv/
+venv/
+node_modules/
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+
+# 執行期產出 / 狀態 / 快取（雲端會自己重新產生）
+.run/
+bot_state*.json
+*.db
+*.csv
+*.png
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 雲端 bot 用不到的東西，縮小映像
+tests/
+docs/
+.github/
+
+# 版控 / OS
+.git/
+.gitignore
+.DS_Store

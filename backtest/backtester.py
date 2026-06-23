@@ -1,0 +1,216 @@
+"""回測工程師 /backtester — 歷史回測、績效分析。
+
+把策略 + 風控套到歷史 K 線上，逐根模擬，算出績效指標。
+重點是「誠實」：含手續費、用收盤後信號、不偷看未來。
+
+⚠️ 回測漂亮 ≠ 實盤會賺。Threads 上 _xjhox 的提醒是對的：
+   - 樣本要夠多（跨牛熊、上千筆交易），統計才有意義
+   - 小心過度擬合（參數調到剛好貼合歷史）
+   下面的 metrics 只是檢查最低門檻，不是賺錢保證。
+"""
+from dataclasses import dataclass, field
+import numpy as np
+import pandas as pd
+from core.quant_researcher import Strategy
+from core.risk_officer import RiskOfficer
+
+
+@dataclass
+class BacktestResult:
+    equity_curve: pd.Series
+    trades: list = field(default_factory=list)
+
+    @property
+    def total_return(self) -> float:
+        e = self.equity_curve
+        return e.iloc[-1] / e.iloc[0] - 1 if len(e) else 0.0
+
+    @property
+    def max_drawdown(self) -> float:
+        e = self.equity_curve
+        peak = e.cummax()
+        return float(((e - peak) / peak).min()) if len(e) else 0.0
+
+    @property
+    def win_rate(self) -> float:
+        wins = [t for t in self.trades if t["pnl"] > 0]
+        return len(wins) / len(self.trades) if self.trades else 0.0
+
+    @property
+    def sharpe(self) -> float:
+        e = self.equity_curve
+        if len(e) < 3:
+            return 0.0
+        ret = e.pct_change().dropna()
+        if ret.std() == 0:
+            return 0.0
+        # 以每根 K 線報酬估，年化僅供相對比較
+        return float(ret.mean() / ret.std() * np.sqrt(len(ret)))
+
+    def summary(self) -> str:
+        return (
+            f"交易筆數 : {len(self.trades)}\n"
+            f"總報酬   : {self.total_return:+.2%}\n"
+            f"最大回撤 : {self.max_drawdown:.2%}\n"
+            f"勝率     : {self.win_rate:.1%}\n"
+            f"Sharpe   : {self.sharpe:.2f}"
+        )
+
+
+def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
+                 trace: list | None = None) -> BacktestResult:
+    """逐根模擬。支援多/空：策略回傳目標倉位（+1/0/-1），引擎自動進出場。
+
+    僅做多策略（allow_short=False、只回 0/＋1）的路徑與舊版逐行等價。
+    現金帳含雙邊手續費，故權益曲線（總報酬/回撤/Sharpe）對多空皆正確。
+
+    trace：可選。傳入一個 list 時，逐根附上「決策軌跡」（指標/信號/風控/動作），
+    供前端攤開每個位置的決策。此 hook 只讀值與 append，不影響任何計算或結果
+    （trace=None 時與未加 hook 完全等價）。
+    """
+    df = strategy.prepare(df).dropna()
+    equity = cfg.start_equity
+    cash = equity
+    position = 0          # +1 多 / -1 空 / 0 空手
+    qty = 0.0             # 絕對數量（base asset）
+    entry_price = 0.0
+    sl = tp = 0.0
+    highest = lowest = 0.0   # 進場後極值（Chandelier 追蹤停損用）
+    chand_mult = getattr(cfg, "chand_mult", None)
+    fee = cfg.fee_rate
+    slip = getattr(cfg, "slippage", 0.0)   # 滑點：成交價往不利方向偏。預設 0＝不改既有結果
+    allow_short = getattr(strategy, "allow_short", False)
+    curve, trades = [], []
+
+    def close_position(px, side, ts):
+        """以 px（含滑點）平掉目前倉位，記一筆交易，回到空手。"""
+        nonlocal cash, position, qty, entry_price
+        if position == 1:
+            fill = px * (1 - slip)                           # 賣出滑點：成交更差
+            proceeds = qty * fill * (1 - fee)
+            pnl = proceeds - qty * entry_price * (1 + fee)   # 含進場+出場手續費，與空單對稱
+            cash += proceeds
+        else:  # position == -1，回補空單
+            fill = px * (1 + slip)                           # 買回滑點：成交更差
+            cost = qty * fill * (1 + fee)
+            pnl = qty * entry_price * (1 - fee) - cost       # 多空對稱、含雙邊手續費
+            cash -= cost
+        trades.append({"ts": ts, "side": side, "price": fill,
+                       "qty": qty, "pnl": pnl, "dir": position})
+        position = 0
+        qty = 0.0
+
+    _IND = ("ema_fast", "ema_slow", "rsi", "atr", "zscore")
+
+    for ts, row in df.iterrows():
+        price = row["close"]
+        # 每根推進：以當日首根的總權益為單日熔斷基準
+        risk.mark_bar(ts, cash + position * qty * price)
+
+        step = None
+        if trace is not None:                          # 決策軌跡 hook（只讀值，不影響計算）
+            step = {"ts": str(ts), "close": round(float(price), 2),
+                    "high": round(float(row["high"]), 2), "low": round(float(row["low"]), 2),
+                    "volume": round(float(row["volume"]), 2) if "volume" in row else None,
+                    "ind": {k: (None if pd.isna(row[k]) else round(float(row[k]), 4))
+                            for k in _IND if k in row},
+                    "pos_before": int(position), "risk": None, "actions": []}
+
+        # 1) 先檢查持倉的停損/停利（用本根高低價判斷有沒有被觸發）
+        if position != 0:
+            if position == 1:
+                hit_sl, hit_tp = row["low"] <= sl, row["high"] >= tp
+            else:
+                hit_sl, hit_tp = row["high"] >= sl, row["low"] <= tp
+            exit_price = sl if hit_sl else (tp if hit_tp else None)
+            if exit_price is not None:
+                close_position(exit_price, "exit_sltp", ts)
+                if step is not None:
+                    step["actions"].append({"act": "exit_sltp", "price": round(float(exit_price), 2),
+                                            "hit": "sl" if hit_sl else "tp"})
+
+        # 2) 策略目標倉位（吃已收完這根；position 已反映停損後狀態）
+        target = strategy.signal(row, position)
+        if target == -1 and not allow_short:
+            target = 0     # 安全網：不支援做空的策略，-1 一律當平倉
+        if step is not None:
+            step["target"] = int(target)
+
+        # 3) 對齊目標倉位：先平反向倉，再開到目標方向
+        if target != position:
+            if position != 0:
+                close_position(price, "exit_signal", ts)
+                if step is not None:
+                    step["actions"].append({"act": "exit_signal", "price": round(float(price), 2)})
+            # 進場用「這根已收盤」的 ATR 設停損停利與部位大小（缺 atr 欄→None→退回固定百分比）
+            atr_val = row["atr"] if "atr" in row else None
+            if target == 1:
+                decision = risk.check_entry(cash, price, ts, direction=1, atr=atr_val)
+                if step is not None:
+                    step["risk"] = {"allow": bool(decision.allow),
+                                    "qty": round(float(decision.quantity), 6), "reason": decision.reason}
+                if decision.allow:
+                    buy_qty = decision.quantity
+                    fill = price * (1 + slip)                  # 買進滑點
+                    cost = buy_qty * fill * (1 + fee)
+                    if cost <= cash and buy_qty > 0:
+                        cash -= cost
+                        position, qty, entry_price = 1, buy_qty, fill
+                        highest = float(row["high"])      # Chandelier 進場後最高高價起點
+                        sl, tp = risk.exit_levels(fill, direction=1, atr=atr_val)
+                        trades.append({"ts": ts, "side": "entry", "price": fill,
+                                       "qty": qty, "pnl": 0.0, "dir": 1})
+                        if step is not None:
+                            step["actions"].append({"act": "entry", "price": round(float(fill), 2),
+                                                    "qty": round(float(qty), 6),
+                                                    "sl": round(float(sl), 2), "tp": round(float(tp), 2)})
+            elif target == -1 and allow_short:
+                decision = risk.check_entry(cash, price, ts, direction=-1, atr=atr_val)
+                if step is not None:
+                    step["risk"] = {"allow": bool(decision.allow),
+                                    "qty": round(float(decision.quantity), 6), "reason": decision.reason}
+                if decision.allow and decision.quantity > 0:
+                    sell_qty = decision.quantity
+                    fill = price * (1 - slip)                  # 放空滑點
+                    cash += sell_qty * fill * (1 - fee)        # 放空收到（虛擬）價金
+                    position, qty, entry_price = -1, sell_qty, fill
+                    lowest = float(row["low"])        # Chandelier 進場後最低低價起點
+                    sl, tp = risk.exit_levels(fill, direction=-1, atr=atr_val)
+                    trades.append({"ts": ts, "side": "entry_short", "price": fill,
+                                   "qty": qty, "pnl": 0.0, "dir": -1})
+                    if step is not None:
+                        step["actions"].append({"act": "entry_short", "price": round(float(fill), 2),
+                                                "qty": round(float(qty), 6),
+                                                "sl": round(float(sl), 2), "tp": round(float(tp), 2)})
+
+        # 4) Chandelier 追蹤停損：用「這根已收盤」的極值與 ATR 更新停損，供「下一根」判定觸發
+        #    （只升不降/只降不升、用上一根算出的 stop 判定本根，故無 look-ahead）。
+        if position != 0 and chand_mult is not None and "atr" in row and not pd.isna(row["atr"]):
+            atr_now = float(row["atr"])
+            if position == 1:
+                highest = max(highest, float(row["high"]))
+                sl = risk.update_trailing_stop(sl, highest, atr_now, 1)
+            else:
+                lowest = min(lowest, float(row["low"]))
+                sl = risk.update_trailing_stop(sl, lowest, atr_now, -1)
+
+        equity = cash + position * qty * price
+        if step is not None:
+            if not step["actions"]:
+                step["actions"].append({"act": "hold" if position != 0 else "flat"})
+            step["pos_after"] = int(position)
+            step["equity"] = round(float(equity), 2)
+            trace.append(step)
+        curve.append((ts, equity))
+
+    # 收尾：最後若還有持倉，以最後價平倉。並用平倉後的「已實現現金」修正權益曲線末點——
+    # 否則末點停在迴圈內以市值計、未扣出場手續費的浮動值，會讓 total_return/Sharpe 系統性高估。
+    if position != 0:
+        close_position(df["close"].iloc[-1], "exit_final", df.index[-1])
+        if curve:
+            curve[-1] = (curve[-1][0], cash)   # position 已歸 0，cash 即已實現權益
+
+    eq = pd.Series([v for _, v in curve], index=[t for t, _ in curve])
+    # 只保留真正平倉的交易來算勝率（entry / entry_short 不算）
+    closed = [t for t in trades if t["side"].startswith("exit")]
+    return BacktestResult(equity_curve=eq, trades=closed)

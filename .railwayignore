@@ -1,0 +1,29 @@
+# Railway 上傳時要排除的東西（此目錄非 git repo，.gitignore 不一定被 railway CLI 採用，
+# 故另列 .railwayignore 確保大型/敏感檔不會被上傳，加速 snapshot/build）。
+
+# 金鑰：絕不上傳（雲端用 Variables 注入）
+.env
+
+# 虛擬環境 / 前端套件（最肥、雲端用不到）
+.venv/
+venv/
+node_modules/
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+
+# 執行期產物 / 狀態 / 快取
+.run/
+bot_state*.json
+*.db
+*.csv
+*.png
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 雲端 bot 用不到
+tests/
+docs/
+.github/
+.git/
+.DS_Store

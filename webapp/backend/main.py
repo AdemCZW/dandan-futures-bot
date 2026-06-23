@@ -1,0 +1,104 @@
+"""FastAPI 後端入口。
+
+啟動（從專案根目錄）：
+    .venv/bin/uvicorn webapp.backend.main:app --reload --port 8000
+
+所有運算邏輯在 service.py；這裡只負責路由、請求驗證、CORS、錯誤碼。
+"""
+from __future__ import annotations
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from webapp.backend import service
+
+app = FastAPI(title="丹丹交易團隊 API", version="1.0")
+
+# 本機開發：放行所有來源（前端 vite 預設跑在 :5173）。正式部署請收斂白名單。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class BacktestReq(BaseModel):
+    strategy: str = "ema_cross"
+    symbol: str = "BTCUSDT"
+    interval: str = "5m"
+    params: dict | None = None
+    source: str = "synthetic"        # synthetic（離線）| testnet（公開行情）
+    limit: int = 1000
+
+
+class ExplainReq(BaseModel):
+    strategy: str = "ema_cross"
+    symbol: str = "BTCUSDT"
+    interval: str = "5m"
+    params: dict | None = None
+    source: str = "synthetic"
+    limit: int = 1000
+    only_decisions: bool = True
+
+
+class OptimizeReq(BaseModel):
+    strategy: str = "ema_cross"
+    source: str = "synthetic"
+    objective: str = "sharpe"
+    train: int = 2000
+    test: int = 500
+    limit: int = 1000
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/strategies")
+def strategies():
+    return service.list_strategies()
+
+
+@app.post("/api/backtest")
+def backtest(req: BacktestReq):
+    try:
+        return service.run_backtest_api(req.strategy, req.symbol, req.interval,
+                                        req.params, req.source, req.limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.post("/api/explain")
+def explain(req: ExplainReq):
+    try:
+        return service.run_explain_api(req.strategy, req.symbol, req.interval,
+                                       req.params, req.source, req.limit, req.only_decisions)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.post("/api/optimize")
+def optimize(req: OptimizeReq):
+    try:
+        return service.run_optimize_api(req.strategy, req.source, req.objective,
+                                        req.train, req.test, req.limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/api/trades")
+def trades(limit: int = 50, mode: str | None = None):
+    return service.read_trades(limit=limit, mode=mode)
+
+
+@app.get("/api/live")
+def live():
+    return service.live_status()
