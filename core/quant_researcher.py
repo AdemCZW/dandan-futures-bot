@@ -350,12 +350,48 @@ class DonchianBreakoutStrategy(Strategy):
         return 0
 
 
+class OrderFlowMomentumStrategy(Strategy):
+    """CVD 訂單流動量（多空雙向，短線用）。
+
+    主訊號＝CVD（累積主動買賣量差）的快/慢 EMA 交叉（MACD-on-CVD）：
+    買盤動量轉強(of_fast>of_slow)做多、賣盤動量轉強做空。這是「以訂單流本身為
+    主訊號」而非價格 TA，理論上是短週期微結構訊號。缺 taker_base（合成資料）→
+    of_fast/of_slow 為 NaN → 維持現狀（優雅退化）。
+    """
+    name = "of_momentum"
+    defaults = {"cvd_fast": 10, "cvd_slow": 30}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        cvd_s = se.cvd(out)                                # 缺 taker_base → 全 NaN
+        out["cvd"] = cvd_s
+        out["of_fast"] = se.ema(cvd_s, int(self.params["cvd_fast"]))
+        out["of_slow"] = se.ema(cvd_s, int(self.params["cvd_slow"]))
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(out)
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        of_fast = row.get("of_fast") if hasattr(row, "get") else row["of_fast"]
+        of_slow = row.get("of_slow") if hasattr(row, "get") else row["of_slow"]
+        for v in (of_fast, of_slow):
+            if v is None or (isinstance(v, float) and math.isnan(v)):
+                return position                           # 訂單流未暖機 → 維持現狀
+        if float(of_fast) > float(of_slow):
+            return 1
+        if float(of_fast) < float(of_slow):
+            return -1
+        return position
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
     ZScoreLongShortStrategy.name: ZScoreLongShortStrategy,
     SupertrendStrategy.name: SupertrendStrategy,
     DonchianBreakoutStrategy.name: DonchianBreakoutStrategy,
+    OrderFlowMomentumStrategy.name: OrderFlowMomentumStrategy,
     FibRetracementStrategy.name: FibRetracementStrategy,
 }
 

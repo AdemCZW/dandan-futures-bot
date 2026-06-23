@@ -51,6 +51,10 @@ GRIDS = {
         "entry_period": [10, 20, 55],
         "exit_period": [5, 10, 20],
     },
+    "of_momentum": {                     # CVD 訂單流動量（allow_short=True）；短線用
+        "cvd_fast": [5, 10, 20],
+        "cvd_slow": [30, 50, 100],
+    },
 }
 
 

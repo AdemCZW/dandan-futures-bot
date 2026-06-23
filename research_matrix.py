@@ -47,6 +47,7 @@ def get_data(interval, months):
 
 # 各 interval 用相稱的 train/test（高框架資料根數少，窗要縮小）
 TF = {
+    "5m":  {"months": 6, "train": 4000, "test": 1500},
     "15m": {"months": 9, "train": 3000, "test": 1000},
     "1h":  {"months": 12, "train": 1500, "test": 500},
     "4h":  {"months": 18, "train": 600,  "test": 200},

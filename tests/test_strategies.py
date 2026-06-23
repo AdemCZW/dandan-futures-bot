@@ -163,9 +163,9 @@ def test_build_strategy_passes_params():
     assert strat.params["window"] == 30
 
 
-def test_strategies_registry_has_six_keys():
+def test_strategies_registry_has_seven_keys():
     assert set(STRATEGIES) == {"ema_cross", "zscore_revert", "zscore_ls",
-                               "fib_retracement", "supertrend", "donchian"}
+                               "fib_retracement", "supertrend", "donchian", "of_momentum"}
     assert STRATEGIES["ema_cross"] is EMACrossStrategy
     assert STRATEGIES["zscore_revert"] is ZScoreRevertStrategy
     assert STRATEGIES["zscore_ls"] is ZScoreLongShortStrategy
@@ -585,3 +585,64 @@ def test_donchian_structure_gate_blocks_fresh_breakout_long():
 
 def test_donchian_in_strategies_registry():
     assert "donchian" in STRATEGIES
+
+
+# --------------------------------------------------------------------------- #
+# OrderFlowMomentumStrategy（CVD 訂單流動量，多空雙向，短線用）
+#   主訊號＝CVD 的快/慢 EMA 交叉（MACD-on-CVD）：買盤動量強做多、賣盤動量強做空。
+#   缺 taker_base（合成資料）→ of_fast/of_slow 為 NaN → 維持現狀（優雅退化）。
+# --------------------------------------------------------------------------- #
+from core.quant_researcher import OrderFlowMomentumStrategy
+
+
+def _ofm_row(of_fast, of_slow):
+    return pd.Series({"close": 100.0, "of_fast": of_fast, "of_slow": of_slow})
+
+
+def test_ofm_allows_short():
+    assert OrderFlowMomentumStrategy.allow_short is True
+
+
+def test_ofm_long_when_flow_momentum_up():
+    strat = OrderFlowMomentumStrategy()
+    assert strat.signal(_ofm_row(120.0, 100.0), 0) == 1      # 買盤動量 → 做多
+
+
+def test_ofm_short_when_flow_momentum_down():
+    strat = OrderFlowMomentumStrategy()
+    assert strat.signal(_ofm_row(80.0, 100.0), 0) == -1      # 賣盤動量 → 做空
+
+
+def test_ofm_nan_holds_position():
+    strat = OrderFlowMomentumStrategy()
+    assert strat.signal(_ofm_row(float("nan"), 100.0), 1) == 1
+    assert strat.signal(_ofm_row(50.0, float("nan")), -1) == -1
+
+
+def test_ofm_prepare_adds_flow_emas_when_taker_present():
+    n = 120
+    px = np.linspace(100, 110, n)
+    # 前半買盤主導(taker 高)、後半賣盤主導(taker 低) → CVD 先升後降
+    taker = np.r_[np.full(n // 2, 9.0), np.full(n - n // 2, 1.0)]
+    df = pd.DataFrame({"open": px, "high": px + 1, "low": px - 1, "close": px,
+                       "volume": np.full(n, 10.0), "taker_base": taker})
+    out = OrderFlowMomentumStrategy().prepare(df)
+    assert "of_fast" in out.columns and "of_slow" in out.columns
+    # 末段賣盤主導 → CVD 下行 → of_fast < of_slow（做空傾向）
+    assert out["of_fast"].iloc[-1] < out["of_slow"].iloc[-1]
+
+
+def test_ofm_graceful_without_taker_column():
+    """合成資料無 taker_base → of_fast/of_slow 全 NaN → signal 維持現狀。"""
+    n = 60
+    px = np.linspace(100, 110, n)
+    df = pd.DataFrame({"open": px, "high": px + 1, "low": px - 1, "close": px,
+                       "volume": np.ones(n)})
+    out = OrderFlowMomentumStrategy().prepare(df)
+    assert out["of_fast"].isna().all()
+    for pos in (-1, 0, 1):
+        assert OrderFlowMomentumStrategy().signal(out.iloc[-1], pos) == pos
+
+
+def test_ofm_in_strategies_registry():
+    assert "of_momentum" in STRATEGIES
