@@ -347,14 +347,16 @@ def _start_state_server() -> None:
 def main():
     cfg = Config()
     ap = argparse.ArgumentParser(description="合約測試網模擬盤（多/空，可做空）。")
-    ap.add_argument("--strategy", default=cfg.strategy, help="建議用 fib_retracement / zscore_ls 支援做空")
-    ap.add_argument("--symbol", default=cfg.symbol)
-    ap.add_argument("--interval", default=cfg.interval)
-    ap.add_argument("--leverage", type=int, default=cfg.futures_leverage)
-    ap.add_argument("--poll", type=int, default=cfg.poll_seconds)
-    ap.add_argument("--budget", type=float, default=None,
-                    help="每筆最大倉位（USDT）。例如 --budget 100 則每筆上限 100U，"
-                         "由帳戶餘額動態算出 max_position_pct。不設則用 config 預設（30%%）。")
+    # 預設值從環境變數讀取（雲端多服務用 BOT_* 變數區分；不依賴 shell 對 startCommand 的插值，
+    # 因 Railway 不一定會展開 ${VAR}）。CLI 參數仍可覆蓋環境變數。
+    ap.add_argument("--strategy", default=os.getenv("BOT_STRATEGY", "supertrend"),
+                    help="建議用 supertrend / donchian / fib_retracement / zscore_ls（支援做空）")
+    ap.add_argument("--symbol", default=os.getenv("BOT_SYMBOL", "BTCUSDT"))
+    ap.add_argument("--interval", default=os.getenv("BOT_INTERVAL", "4h"))
+    ap.add_argument("--leverage", type=int, default=int(os.getenv("BOT_LEV", "3")))
+    ap.add_argument("--poll", type=int, default=int(os.getenv("BOT_POLL", "30")))
+    ap.add_argument("--budget", type=float, default=float(os.getenv("BOT_BUDGET", "500")),
+                    help="每筆最大倉位（USDT）。由帳戶餘額動態算出 max_position_pct。")
     args = ap.parse_args()
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
     cfg.futures_leverage, cfg.poll_seconds = args.leverage, args.poll
