@@ -364,26 +364,34 @@ def main():
               "並在 .env 填入 BINANCE_FUTURES_TESTNET_API_KEY / _SECRET。")
         return
 
-    client = make_client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
-    execu = FuturesExecutionEngineer(client, cfg.symbol, leverage=cfg.futures_leverage)
-
-    # --budget：從真實餘額動態算出 max_position_pct，把每筆倉位釘在指定 USDT 上限
-    balance = execu.balance(cfg.quote_asset)
-    if args.budget is not None and balance > 0:
-        cfg.max_position_pct = min(args.budget / balance, 1.0)
-
-    strat = build_strategy(cfg.strategy, **cfg.strategy_params)
-    risk = RiskOfficer(cfg)
-    journal = TradeJournal(db_path="trades.db", csv_path="trades_futures.csv",
-                           mode="live_futures_testnet", symbol=cfg.symbol, strategy=cfg.strategy)
-    trader = FuturesLiveTrader(cfg, client, strat, risk, execu, journal)
-
-    budget_msg = f" | 預算上限 {args.budget:.0f}U/筆（max_pos={cfg.max_position_pct:.1%}）" if args.budget else ""
-    print(f"[啟動] 合約測試網模擬盤（多/空）| {cfg.symbol} {cfg.interval} | "
-          f"策略 {cfg.strategy} | 槓桿 {cfg.futures_leverage}x{budget_msg}")
-    print(f"合約 USDT 餘額：{balance:.2f}")
+    # 健康/狀態 HTTP 伺服器「最先」啟動：不等任何幣安 API（exchange_info/leverage/balance），
+    # 確保雲端 healthcheck 在啟動初期就能通過，交易初始化的延遲/錯誤不會讓整個服務被判失敗。
     _start_state_server()
-    trader.restore()
+
+    try:
+        client = make_client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+        execu = FuturesExecutionEngineer(client, cfg.symbol, leverage=cfg.futures_leverage)
+
+        # --budget：從真實餘額動態算出 max_position_pct，把每筆倉位釘在指定 USDT 上限
+        balance = execu.balance(cfg.quote_asset)
+        if args.budget is not None and balance > 0:
+            cfg.max_position_pct = min(args.budget / balance, 1.0)
+
+        strat = build_strategy(cfg.strategy, **cfg.strategy_params)
+        risk = RiskOfficer(cfg)
+        journal = TradeJournal(db_path="trades.db", csv_path="trades_futures.csv",
+                               mode="live_futures_testnet", symbol=cfg.symbol, strategy=cfg.strategy)
+        trader = FuturesLiveTrader(cfg, client, strat, risk, execu, journal)
+
+        budget_msg = f" | 預算上限 {args.budget:.0f}U/筆（max_pos={cfg.max_position_pct:.1%}）" if args.budget else ""
+        print(f"[啟動] 合約測試網模擬盤（多/空）| {cfg.symbol} {cfg.interval} | "
+              f"策略 {cfg.strategy} | 槓桿 {cfg.futures_leverage}x{budget_msg}")
+        print(f"合約 USDT 餘額：{balance:.2f}")
+        trader.restore()
+    except Exception:                          # 交易初始化失敗：印出原因並保持存活（healthcheck 通過、便於診斷）
+        print("[致命] 交易初始化失敗（保持存活供診斷）：\n" + traceback.format_exc())
+        while True:
+            time.sleep(30)
 
     last_bar = None
     while True:
