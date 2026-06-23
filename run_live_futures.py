@@ -152,7 +152,9 @@ class FuturesLiveTrader:
         # 信號工程師：擷取本根指標供 SOP 面板顯示（含 regime 閘門判斷依據）
         ind = {}
         for k in ("fib_pos", "fib_382", "fib_618", "rsi", "atr", "ema_fast", "ema_slow",
-                  "ema_trend", "zscore", "er", "chop", "adx"):
+                  "ema_trend", "zscore", "er", "chop", "adx",
+                  "st_dir", "supertrend", "taker_ratio_s",
+                  "dc_upper", "dc_lower", "dc_exit_long", "dc_exit_short"):
             if k in row.index:
                 v = row[k]
                 ind[k] = None if pd.isna(v) else round(float(v), 4)

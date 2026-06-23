@@ -307,6 +307,118 @@ function GaugePlaceholder({ label }) {
   return <div style={{ color: 'var(--muted-dim)', fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'center', padding: 16 }}>// {label} 無資料</div>
 }
 
+/* ── Supertrend：趨勢方向 + 趨勢線 + 距翻轉距離 ───────── */
+function SupertrendCard({ stDir, supertrend, price, atr }) {
+  if (stDir == null || supertrend == null || price == null) return <GaugePlaceholder label="Supertrend" />
+  const up = Number(stDir) > 0
+  const line = Number(supertrend), p = Number(price)
+  const gap = p - line                                   // 多頭時為正（價在線上）
+  const atrUnits = atr ? Math.abs(gap) / Number(atr) : null
+  const color = up ? 'var(--green)' : 'var(--red)'
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 34, lineHeight: 1, color }}>{up ? '↑' : '↓'}</div>
+      <div className="display" style={{ fontSize: 16, fontWeight: 700, color }}>
+        {up ? '做多趨勢' : '做空趨勢'}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
+        翻轉價 <span className="num">{line.toFixed(1)}</span>
+      </div>
+      <div style={{ fontSize: 12, color, fontWeight: 600 }}>
+        距翻轉 <span className="num">{atrUnits != null ? atrUnits.toFixed(2) : (Math.abs(gap)).toFixed(1)}</span>
+        {atrUnits != null ? ' ATR' : ''}
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--muted)' }}>
+        {up ? '跌破翻轉價 → 轉空' : '突破翻轉價 → 轉多'}
+      </div>
+    </div>
+  )
+}
+
+/* ── Donchian：價格在通道中的位置 + 距突破/出場 ──────── */
+function DonchianCard({ upper, lower, exitLong, exitShort, price, inPos, direction }) {
+  if (upper == null || lower == null || price == null) return <GaugePlaceholder label="Donchian" />
+  const u = Number(upper), l = Number(lower), p = Number(price)
+  const span = Math.max(u - l, 1e-9)
+  const pct = Math.min(Math.max((p - l) / span, 0), 1) * 100
+  return (
+    <div style={{ width: '100%' }}>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 8 }}>
+        價格於通道位置（下軌 → 上軌）
+      </div>
+      <div style={{ position: 'relative', height: 20, borderRadius: 'var(--radius)',
+        background: 'var(--border)', overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', left: `${Math.min(pct, 99)}%`, top: 0,
+          width: 3, height: '100%', background: 'var(--accent)', transform: 'translateX(-50%)' }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10,
+        color: 'var(--muted)', marginTop: 4 }}>
+        <span style={{ color: 'var(--red)' }}>跌破 <span className="num">{l.toFixed(0)}</span> 做空</span>
+        <span style={{ color: 'var(--green)' }}>突破 <span className="num">{u.toFixed(0)}</span> 做多</span>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
+        現價 <span className="num">{p.toFixed(1)}</span>
+        {inPos && (direction === 1 ? exitLong != null : exitShort != null) && (
+          <> · 出場線 <span className="num">{Number(direction === 1 ? exitLong : exitShort).toFixed(1)}</span></>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* ── 訂單流：主動買盤佔比 ────────────────────────────── */
+function OrderFlowCard({ takerRatio }) {
+  if (takerRatio == null) return <GaugePlaceholder label="訂單流" />
+  const r = Number(takerRatio)
+  const pct = Math.min(Math.max(r, 0), 1) * 100
+  const buy = r >= 0.5
+  const color = buy ? 'var(--green)' : 'var(--red)'
+  return (
+    <div style={{ width: '100%' }}>
+      <div style={{ textAlign: 'center', marginBottom: 8 }}>
+        <span className="display num" style={{ fontSize: 22, fontWeight: 700, color }}>
+          {(r * 100).toFixed(0)}%
+        </span>
+        <div style={{ fontSize: 10, color: 'var(--muted)' }}>主動買盤佔比（平滑）</div>
+      </div>
+      <div style={{ position: 'relative', height: 14, borderRadius: 'var(--radius)',
+        background: 'var(--red-soft)', overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', left: 0, width: `${pct}%`, height: '100%',
+          background: 'var(--green-soft)' }} />
+        <div style={{ position: 'absolute', left: '50%', top: 0, width: 1, height: '100%',
+          background: 'var(--border-strong)' }} />
+      </div>
+      <div style={{ fontSize: 11, color, fontWeight: 600, textAlign: 'center', marginTop: 6 }}>
+        {buy ? '買盤主導' : '賣盤主導'}
+      </div>
+    </div>
+  )
+}
+
+/* ── 趨勢策略訊號總結（supertrend / donchian） ────────── */
+function TrendSignalSummary({ stDir, dcBreak, target, inPos, direction }) {
+  const sig = target === 1 ? 'LONG' : target === -1 ? 'SHORT' : 'FLAT'
+  const sigColor = sig === 'LONG' ? 'var(--green)' : sig === 'SHORT' ? 'var(--red)' : 'var(--muted)'
+  const posLabel = inPos ? (direction === 1 ? '持多' : '持空') : '空手'
+  return (
+    <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div style={{ textAlign: 'center', minWidth: 80 }}>
+        <div className="display signal-glow" style={{
+          fontSize: 28, fontWeight: 900, color: sigColor,
+          ...(sig === 'FLAT' ? { textShadow: 'none' } : {}),
+        }}>{sig}</div>
+        <div style={{ fontSize: 10, color: 'var(--muted)' }}>本根目標</div>
+      </div>
+      <div style={{ flex: 1, fontSize: 12, color: 'var(--muted)', lineHeight: 1.9 }}>
+        <div>目前部位：<b style={{ color: 'var(--text)' }}>{posLabel}</b></div>
+        {stDir != null && <div>Supertrend 方向：{Number(stDir) > 0
+          ? <b style={{ color: 'var(--green)' }}>多</b> : <b style={{ color: 'var(--red)' }}>空</b>}</div>}
+        <div style={{ fontSize: 11 }}>趨勢策略順勢操作：跟隨方向翻轉進出，不逆勢接刀。</div>
+      </div>
+    </div>
+  )
+}
+
 /* ── 區塊小標（HUD 風 mono uppercase + 短豎條） ──────── */
 function SectionLabel({ children }) {
   return (
@@ -336,6 +448,13 @@ export default function TechPanel({ lastDecision, price, inPos, direction, entry
   const chop     = ind.chop     != null ? Number(ind.chop)     : null
   const adx      = ind.adx      != null ? Number(ind.adx)      : null
 
+  // 依本根出現的指標欄位，自動判別策略型態（趨勢 / 均值回歸）
+  const hasST  = ind.st_dir != null
+  const hasDC  = ind.dc_upper != null
+  const hasFib = ind.fib_pos != null
+  const hasOF  = ind.taker_ratio_s != null
+  const isTrend = hasST || hasDC
+
   const card = (title, children) => (
     <div className="card" style={{ flex: 1, minWidth: 180, display: 'block' }}>
       <SectionLabel>{title}</SectionLabel>
@@ -347,35 +466,62 @@ export default function TechPanel({ lastDecision, price, inPos, direction, entry
     <div className="panel">
       <h3 style={{ marginTop: 0, marginBottom: 16 }}>技術分析訊號視覺化</h3>
 
-      {/* 訊號總結 */}
+      {/* 訊號總結（趨勢策略 / 均值回歸策略 各自呈現） */}
       <div className={`card ${inPos ? (direction === 1 ? 'is-long' : 'is-short') : ''}`}
         style={{ display: 'block', marginBottom: 12 }}>
         <SectionLabel>訊號總結</SectionLabel>
-        <SignalSummary ind={ind} target={lastDecision.target} direction={direction} />
+        {isTrend
+          ? <TrendSignalSummary stDir={ind.st_dir} target={lastDecision.target}
+              inPos={inPos} direction={direction} />
+          : <SignalSummary ind={ind} target={lastDecision.target} direction={direction} />}
       </div>
 
-      {/* 指標卡片列 */}
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        {card('Regime 市場狀態',
-          <RegimerVote er={er} chop={chop} adx={adx} regime={ind.regime} />
-        )}
-        {card('RSI 相對強弱',
-          <RsiGauge rsi={rsi} />
-        )}
-        {card('EMA 200 趨勢',
-          <EmaTrend price={price} emaTrend={emaTrend} />
-        )}
-      </div>
+      {/* 趨勢策略：Supertrend / Donchian 卡片 */}
+      {isTrend && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {hasST && card('Supertrend 趨勢',
+            <SupertrendCard stDir={ind.st_dir} supertrend={ind.supertrend} price={price} atr={atr} />
+          )}
+          {hasDC && card('Donchian 通道',
+            <DonchianCard upper={ind.dc_upper} lower={ind.dc_lower}
+              exitLong={ind.dc_exit_long} exitShort={ind.dc_exit_short}
+              price={price} inPos={inPos} direction={direction} />
+          )}
+          {card('ATR 波動度 & 風險',
+            <AtrPanel atr={atr} price={price} sl={sl} tp={tp}
+              entryPrice={entryPrice} inPos={inPos} direction={direction} />
+          )}
+        </div>
+      )}
 
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 10 }}>
-        {card('Fibonacci 位置',
-          <FibBar fibPos={fib_pos} fib382={fib_382} fib618={fib_618} price={price} />
-        )}
-        {card('ATR 波動度 & 風險',
-          <AtrPanel atr={atr} price={price} sl={sl} tp={tp}
-            entryPrice={entryPrice} inPos={inPos} direction={direction} />
-        )}
-      </div>
+      {/* 均值回歸策略（fib）：Regime / RSI / EMA / Fib 卡片 */}
+      {hasFib && (
+        <>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            {card('Regime 市場狀態',
+              <RegimerVote er={er} chop={chop} adx={adx} regime={ind.regime} />
+            )}
+            {card('RSI 相對強弱', <RsiGauge rsi={rsi} />)}
+            {card('EMA 200 趨勢', <EmaTrend price={price} emaTrend={emaTrend} />)}
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 10 }}>
+            {card('Fibonacci 位置',
+              <FibBar fibPos={fib_pos} fib382={fib_382} fib618={fib_618} price={price} />
+            )}
+            {card('ATR 波動度 & 風險',
+              <AtrPanel atr={atr} price={price} sl={sl} tp={tp}
+                entryPrice={entryPrice} inPos={inPos} direction={direction} />
+            )}
+          </div>
+        </>
+      )}
+
+      {/* 訂單流（任何帶 taker_ratio_s 的策略都顯示） */}
+      {hasOF && (
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 10 }}>
+          {card('訂單流 主動買賣', <OrderFlowCard takerRatio={ind.taker_ratio_s} />)}
+        </div>
+      )}
     </div>
   )
 }
