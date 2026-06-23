@@ -141,6 +141,37 @@ def fib_retracement(df: pd.DataFrame, lookback: int = 50,
     return out
 
 
+def taker_buy_ratio(df: pd.DataFrame, smooth: int = 1) -> pd.Series:
+    """主動買盤佔比 = taker_base / volume ∈ [0,1]（訂單流失衡）。
+
+    taker_base 是「吃 ask 的主動買進量」（K 線自帶欄位），>0.5 代表主動買盤
+    壓過主動賣盤。每根只用當根量能，天然 causal、不含未來。
+      - 缺 taker_base 欄（合成資料/舊快取）→ 回全 NaN，讓上層優雅退化。
+      - volume=0 → 該根 NaN，避免除零。
+      - smooth>1：對比值做 EMA 平滑（仍 causal）。
+    """
+    if "taker_base" not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    vol = df["volume"].replace(0, np.nan)
+    ratio = df["taker_base"] / vol
+    if smooth and smooth > 1:
+        ratio = ratio.ewm(span=int(smooth), adjust=False).mean()
+    return ratio
+
+
+def cvd(df: pd.DataFrame) -> pd.Series:
+    """累積量差 Cumulative Volume Delta = Σ(主動買量 − 主動賣量)。
+
+    每根量差 = taker_base − (volume − taker_base) = 2·taker_base − volume。
+    累積後反映「主動買賣的淨流向」：上升＝買盤累積、下降＝賣盤累積。
+    缺 taker_base 欄 → 全 NaN（優雅退化）。只用過去與當根，causal。
+    """
+    if "taker_base" not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    delta = 2.0 * df["taker_base"] - df["volume"]
+    return delta.cumsum()
+
+
 def regime(df: pd.DataFrame, er_period: int = 14, er_trend: float = 0.30,
            chop_period: int = 14, chop_trend: float = 38.2,
            adx_period: int = 14, adx_trend: float = 25.0,

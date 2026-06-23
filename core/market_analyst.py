@@ -27,11 +27,12 @@ def fetch_klines(client: Client, symbol: str, interval: str, limit: int = 500,
             "close_time", "quote_volume", "trades",
             "taker_base", "taker_quote", "ignore"]
     df = pd.DataFrame(raw, columns=cols)
-    for c in ["open", "high", "low", "close", "volume"]:
+    for c in ["open", "high", "low", "close", "volume", "taker_base"]:
         df[c] = df[c].astype(float)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
     df = df.set_index("open_time")
-    return df[["open", "high", "low", "close", "volume"]]
+    # taker_base＝主動買進量（吃 ask），供訂單流指標（taker_buy_ratio/cvd）使用。
+    return df[["open", "high", "low", "close", "volume", "taker_base"]]
 
 
 def detect_anomaly(df: pd.DataFrame, lookback: int = 50, z_threshold: float = 4.0) -> bool:
@@ -61,10 +62,11 @@ def fetch_historical_klines(client: Client, symbol: str, interval: str,
             "close_time", "quote_volume", "trades",
             "taker_base", "taker_quote", "ignore"]
     df = pd.DataFrame(raw, columns=cols)
-    for c in ["open", "high", "low", "close", "volume"]:
+    for c in ["open", "high", "low", "close", "volume", "taker_base"]:
         df[c] = df[c].astype(float)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-    return df.set_index("open_time")[["open", "high", "low", "close", "volume"]]
+    # taker_base＝主動買進量，供訂單流指標使用（walk-forward 才有完整歷史可驗證）。
+    return df.set_index("open_time")[["open", "high", "low", "close", "volume", "taker_base"]]
 
 
 def save_klines(df: pd.DataFrame, path: str) -> None:

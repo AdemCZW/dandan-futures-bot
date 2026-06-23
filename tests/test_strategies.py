@@ -407,3 +407,74 @@ def test_ema_cross_exit_uses_bare_cross_hysteresis():
     strat = EMACrossStrategy()
     assert strat.signal(_ema_row(99.9, 100.0, rsi=60.0), 1) == 0    # 死叉 → 平
     assert strat.signal(_ema_row(100.2, 100.0, rsi=60.0), 1) == 1   # 仍金叉（分離不足）→ 續抱
+
+
+# --------------------------------------------------------------------------- #
+# 市場結構（訂單流）確認閘門 _structure_ok
+#   taker_ratio_s = 平滑後主動買盤佔比 ∈ [0,1]。
+#   多單：買盤須 ≥ of_long_min（不逆著賣壓做多）；
+#   空單：買盤須 ≤ of_short_max（不逆著買盤做空）。
+#   缺欄/NaN/use_structure=False → 一律放行（優雅退化、向後相容）。
+# --------------------------------------------------------------------------- #
+def _struct_row(taker_ratio_s):
+    return pd.Series({"close": 100.0, "taker_ratio_s": taker_ratio_s})
+
+
+def test_structure_gate_off_by_default_is_backward_compatible():
+    """預設 use_structure=False → 任何訂單流值都放行（不改既有行為）。"""
+    strat = FibRetracementStrategy()
+    assert strat.params.get("use_structure", False) is False
+    assert strat._structure_ok(_struct_row(0.01), direction=1) is True
+    assert strat._structure_ok(_struct_row(0.99), direction=-1) is True
+
+
+def test_structure_gate_missing_column_passes():
+    """缺 taker_ratio_s 欄（合成資料）→ 放行，即使閘門開啟。"""
+    strat = FibRetracementStrategy(use_structure=True)
+    assert strat._structure_ok(pd.Series({"close": 100.0}), direction=1) is True
+
+
+def test_structure_gate_nan_passes():
+    strat = FibRetracementStrategy(use_structure=True)
+    assert strat._structure_ok(_struct_row(float("nan")), direction=1) is True
+
+
+def test_structure_gate_blocks_long_into_selling():
+    """開啟閘門：主動買盤過低（賣壓重）→ 擋掉做多。"""
+    strat = FibRetracementStrategy(use_structure=True, of_long_min=0.45)
+    assert strat._structure_ok(_struct_row(0.30), direction=1) is False
+    assert strat._structure_ok(_struct_row(0.50), direction=1) is True
+
+
+def test_structure_gate_blocks_short_into_buying():
+    """開啟閘門：主動買盤過高（買壓重）→ 擋掉做空。"""
+    strat = FibRetracementStrategy(use_structure=True, of_short_max=0.55)
+    assert strat._structure_ok(_struct_row(0.70), direction=-1) is False
+    assert strat._structure_ok(_struct_row(0.50), direction=-1) is True
+
+
+def test_structure_prepare_adds_smoothed_ratio_when_taker_present():
+    """prepare() 在有 taker_base 時加入 taker_ratio_s 欄供 signal/前端使用。"""
+    n = 80
+    px = np.linspace(100.0, 120.0, n)
+    df = pd.DataFrame({
+        "open": px, "high": px + 1, "low": px - 1, "close": px,
+        "volume": np.full(n, 10.0), "taker_base": np.full(n, 7.0),
+    })
+    out = FibRetracementStrategy(use_structure=True).prepare(df)
+    assert "taker_ratio_s" in out.columns
+    # 7/10 買盤 → 平滑後仍 ≈ 0.7
+    assert out["taker_ratio_s"].dropna().iloc[-1] == pytest.approx(0.7, abs=1e-6)
+
+
+def test_structure_gate_blocks_a_long_fib_would_otherwise_take():
+    """整合：fib 想做多的列，疊上重賣壓訂單流後變成不進場。"""
+    strat = FibRetracementStrategy(use_structure=True, of_long_min=0.45)
+    # 在多單黃金支撐區、RSI 未過熱、上升趨勢、盤整盤 → 純 TA 會回 1
+    base = {"fib_pos": 0.20, "rsi": 45.0, "close": 101.0, "ema_trend": 100.0,
+            "regime": "range"}
+    assert strat.signal(pd.Series(base), 0) == 1                       # 無訂單流欄 → 放行
+    blocked = pd.Series({**base, "taker_ratio_s": 0.25})               # 重賣壓
+    assert strat.signal(blocked, 0) == 0                               # 被訂單流閘門擋下
+    allowed = pd.Series({**base, "taker_ratio_s": 0.60})               # 買盤支持
+    assert strat.signal(allowed, 0) == 1

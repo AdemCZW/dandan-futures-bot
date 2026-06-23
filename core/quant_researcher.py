@@ -32,6 +32,15 @@ class Strategy:
         "regime_confirm_bars": 2,
     }
 
+    # 市場結構（訂單流）確認閘門共用參數（可被 self.params 覆蓋）。
+    # use_structure 預設 False＝向後相容、不改既有行為；經 walk-forward 驗證有效後才開啟。
+    STRUCTURE_DEFAULTS = {
+        "use_structure": False,   # 閘門總開關
+        "of_smooth": 20,          # 主動買盤佔比的 EMA 平滑根數
+        "of_long_min": 0.45,      # 做多需主動買盤佔比 ≥ 此值（不逆賣壓做多）
+        "of_short_max": 0.55,     # 做空需主動買盤佔比 ≤ 此值（不逆買盤做空）
+    }
+
     def __init__(self, **params):
         # 使用者傳入的值覆蓋預設值
         self.params = {**self.defaults, **params}
@@ -68,6 +77,36 @@ class Strategy:
         if reg is None or (isinstance(reg, float) and math.isnan(reg)):
             return True
         return reg == self.regime_pref
+
+    def _prepare_structure(self, out: pd.DataFrame) -> pd.DataFrame:
+        """把訂單流欄位（taker_ratio_s 平滑買盤佔比）算進 DataFrame。
+
+        缺 taker_base（合成資料/舊快取）→ se.taker_buy_ratio 回全 NaN，
+        欄位仍加入但全 NaN，_structure_ok 會優雅放行。
+        """
+        p = {**self.STRUCTURE_DEFAULTS, **self.params}
+        out["taker_ratio_s"] = se.taker_buy_ratio(out, smooth=int(p["of_smooth"]))
+        return out
+
+    def _structure_ok(self, row: pd.Series, direction: int) -> bool:
+        """空手想開新倉時呼叫：訂單流與進場方向不衝突才放行。
+
+        use_structure=False（預設）/ 缺 taker_ratio_s 欄 / 值為 NaN → 一律放行
+        （向後相容、優雅退化）。開啟後：做多需買盤佔比 ≥ of_long_min、
+        做空需買盤佔比 ≤ of_short_max，避免逆著主動成交流進場。
+        """
+        p = {**self.STRUCTURE_DEFAULTS, **self.params}
+        if not p["use_structure"]:
+            return True
+        val = row.get("taker_ratio_s") if hasattr(row, "get") else None
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return True
+        val = float(val)
+        if direction == 1:
+            return val >= p["of_long_min"]
+        if direction == -1:
+            return val <= p["of_short_max"]
+        return True
 
 
 class EMACrossStrategy(Strategy):
@@ -193,7 +232,7 @@ class FibRetracementStrategy(Strategy):
         out["rsi"] = se.rsi(out["close"], int(self.params["rsi_period"]))
         out["atr"] = se.atr(out, 14)
         out["ema_trend"] = se.ema(out["close"], int(self.params["ema_trend_period"]))
-        return self._prepare_regime(out)
+        return self._prepare_structure(self._prepare_regime(out))
 
     def signal(self, row: pd.Series, position: int) -> int:
         fib_pos = row.get("fib_pos") if hasattr(row, "get") else row["fib_pos"]
@@ -224,10 +263,10 @@ class FibRetracementStrategy(Strategy):
                        and not pd.isna(close) and not pd.isna(ema_trend))
         uptrend = (not trend_known) or float(close) > float(ema_trend)
         downtrend = (not trend_known) or float(close) < float(ema_trend)
-        if fib_pos < 0.382 and rsi < 55 and uptrend:
-            return 1                        # 上升趨勢 + 黃金支撐區 + RSI 未過熱 → 順勢買回調
-        if fib_pos > 0.618 and rsi < 50 and downtrend:
-            return -1                       # 下降趨勢 + 黃金阻力區 + RSI 動能轉弱 → 順勢空反彈
+        if fib_pos < 0.382 and rsi < 55 and uptrend and self._structure_ok(row, 1):
+            return 1                        # 上升趨勢 + 黃金支撐區 + RSI 未過熱 + 訂單流不逆 → 順勢買回調
+        if fib_pos > 0.618 and rsi < 50 and downtrend and self._structure_ok(row, -1):
+            return -1                       # 下降趨勢 + 黃金阻力區 + RSI 動能轉弱 + 訂單流不逆 → 順勢空反彈
         return 0
 
 

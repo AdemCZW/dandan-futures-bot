@@ -540,3 +540,75 @@ def test_regime_is_causal_no_lookahead():
         ra = full["regime"].iloc[:k].where(full["regime"].iloc[:k].notna(), "NA").tolist()
         rb = prefix["regime"].where(prefix["regime"].notna(), "NA").tolist()
         assert ra == rb
+
+
+# --------------------------------------------------------------------------- #
+# 訂單流：taker 買盤佔比 / CVD（累積量差）
+#   taker_base = 主動買進成交量（吃 ask）；volume = 總量。
+#   taker_buy_ratio = taker_base / volume ∈ [0,1]；CVD = Σ(2*taker_base - volume)。
+#   全部 causal（只用當根與過去），缺欄/零量回 NaN 不爆。
+# --------------------------------------------------------------------------- #
+def _flow_df(taker, vol):
+    """造一個含 taker_base/volume 的 OHLCV，價格不影響訂單流指標。"""
+    n = len(vol)
+    px = np.linspace(100.0, 110.0, n)
+    return pd.DataFrame({
+        "open": px, "high": px + 1, "low": px - 1, "close": px,
+        "volume": np.asarray(vol, dtype=float),
+        "taker_base": np.asarray(taker, dtype=float),
+    })
+
+
+def test_taker_buy_ratio_basic_values():
+    df = _flow_df(taker=[10, 5, 0], vol=[10, 10, 10])
+    r = se.taker_buy_ratio(df)
+    assert r.iloc[0] == pytest.approx(1.0)   # 全買
+    assert r.iloc[1] == pytest.approx(0.5)   # 半買半賣
+    assert r.iloc[2] == pytest.approx(0.0)   # 全賣
+
+
+def test_taker_buy_ratio_zero_volume_is_nan():
+    df = _flow_df(taker=[0, 3], vol=[0, 6])
+    r = se.taker_buy_ratio(df)
+    assert np.isnan(r.iloc[0])               # 零量 → NaN，不除零
+    assert r.iloc[1] == pytest.approx(0.5)
+
+
+def test_taker_buy_ratio_missing_column_returns_all_nan():
+    """缺 taker_base 欄（合成資料/舊快取）→ 全 NaN，讓上層優雅退化。"""
+    px = np.linspace(1, 2, 5)
+    df = pd.DataFrame({"open": px, "high": px, "low": px, "close": px,
+                       "volume": np.ones(5)})
+    r = se.taker_buy_ratio(df)
+    assert len(r) == 5 and r.isna().all()
+
+
+def test_taker_buy_ratio_smoothing_is_ema_and_causal():
+    df = _flow_df(taker=[10, 0, 10, 0, 10, 0, 10, 0],
+                  vol=[10, 10, 10, 10, 10, 10, 10, 10])
+    raw = se.taker_buy_ratio(df, smooth=1)
+    sm = se.taker_buy_ratio(df, smooth=4)
+    # 平滑後值域仍在 [0,1]、且不等於原始（被 EMA 抹平）
+    assert (sm.dropna() >= 0).all() and (sm.dropna() <= 1).all()
+    assert not np.allclose(raw.values, sm.values)
+    # causal：前綴重算在重疊區一致
+    pref = se.taker_buy_ratio(df.iloc[:5], smooth=4)
+    np.testing.assert_allclose(sm.iloc[:5].values, pref.values, rtol=1e-9)
+
+
+def test_cvd_accumulates_signed_volume():
+    # 全買 → 每根 +volume；CVD 單調遞增
+    up = _flow_df(taker=[10, 10, 10], vol=[10, 10, 10])
+    c = se.cvd(up)
+    assert list(c.values) == pytest.approx([10, 20, 30])
+    # 全賣 → 每根 -volume；CVD 單調遞減
+    dn = _flow_df(taker=[0, 0, 0], vol=[10, 10, 10])
+    assert list(se.cvd(dn).values) == pytest.approx([-10, -20, -30])
+
+
+def test_cvd_missing_column_returns_all_nan():
+    px = np.linspace(1, 2, 4)
+    df = pd.DataFrame({"open": px, "high": px, "low": px, "close": px,
+                       "volume": np.ones(4)})
+    c = se.cvd(df)
+    assert len(c) == 4 and c.isna().all()
