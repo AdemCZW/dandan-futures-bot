@@ -187,6 +187,23 @@ def run_optimize_api(strategy: str, source: str = "synthetic",
 _RAILWAY_BOT_URL = os.getenv("RAILWAY_BOT_URL", "").rstrip("/")
 
 
+def _fetch_railway_trades(limit: int = 50, mode: str | None = None) -> list[dict]:
+    """從 Railway bot /trades 端點抓近期成交（Railway bot 部署後才有效）。"""
+    import json, urllib.request
+    if not _RAILWAY_BOT_URL:
+        return []
+    try:
+        qs = f"limit={limit}"
+        if mode:
+            qs += f"&mode={mode}"
+        url = f"{_RAILWAY_BOT_URL}/trades?{qs}"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.loads(r.read())
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
 def live_status(state_path: str = None) -> dict:
     """即時監控：自動選用最近活躍的 bot（paper / futures testnet）狀態，回傳權益與 SOP。
 
@@ -297,6 +314,11 @@ def live_status(state_path: str = None) -> dict:
             age = None
 
     trades_mode = "live_futures_testnet" if mode == "futures" else "paper"
+    # 若有 Railway URL，近期成交從雲端抓；否則讀本機 DB
+    if _RAILWAY_BOT_URL and mode == "futures":
+        recent = _fetch_railway_trades(limit=15, mode=trades_mode)
+    else:
+        recent = read_trades(limit=15, mode=trades_mode, db_path="trades.db")
     return {
         "active": bool(st),
         "mode": mode,
@@ -309,7 +331,7 @@ def live_status(state_path: str = None) -> dict:
         "unrealized_pnl": round(unreal, 2) if unreal is not None else None,
         "updated_at": updated, "age_seconds": age, "poll": st.get("poll"),
         "last_decision": st.get("last_decision"),
-        "recent_trades": read_trades(limit=15, mode=trades_mode, db_path="trades.db"),
+        "recent_trades": recent,
     }
 
 
@@ -333,4 +355,4 @@ def read_trades(limit: int = 50, mode: str | None = None,
         rows = []
     finally:
         conn.close()
-    return list(reversed(rows))
+    return rows  # ORDER BY id DESC → 最新在最前

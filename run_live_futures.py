@@ -273,6 +273,33 @@ class FuturesLiveTrader:
             pass
 
 
+def _read_trades_json(path: str) -> bytes:
+    """GET /trades?limit=N&mode=M → 從 Railway 本機 trades.db 讀近期交易，回傳 JSON bytes。"""
+    import sqlite3
+    import urllib.parse
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    limit = int(qs.get("limit", ["50"])[0])
+    mode = qs.get("mode", [None])[0]
+    db = "trades.db"
+    if not os.path.exists(db):
+        return b"[]"
+    try:
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        q = "SELECT ts, mode, symbol, strategy, side, price, qty, pnl FROM trades"
+        args: list = []
+        if mode:
+            q += " WHERE mode = ?"
+            args.append(mode)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+        conn.close()
+        return json.dumps(rows, default=str).encode()
+    except Exception:
+        return b"[]"
+
+
 def _start_state_server() -> None:
     """Railway 注入 $PORT 時，在該 port 開 HTTP 狀態端點供本機前端讀取。
     本機開發不設 PORT → 跳過，不影響原有流程。"""
@@ -294,6 +321,8 @@ def _start_state_server() -> None:
                         body = f.read()
                 except FileNotFoundError:
                     body = b"{}"
+            elif self.path.startswith("/trades"):
+                body = _read_trades_json(self.path)
             else:
                 self.send_response(404)
                 self.end_headers()
