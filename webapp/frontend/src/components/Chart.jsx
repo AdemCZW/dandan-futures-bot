@@ -4,61 +4,62 @@ import { api } from '../api'
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 const TFS = ['1h', '4h', '1d']
-const AUTO_OPTS = [
-  { label: '關閉', sec: 0 },
-  { label: '3s',   sec: 3 },
-  { label: '10s',  sec: 10 },
-  { label: '30s',  sec: 30 },
-]
+const AUTO_OPTS = [{ label: '關閉', sec: 0 }, { label: '3s', sec: 3 }, { label: '10s', sec: 10 }, { label: '30s', sec: 30 }]
 
+// indicator catalogue — only ST + EMA200 on by default
 const OVERLAYS = [
-  { key: 'supertrend_bull', label: 'ST 多頭', color: '#26a69a', width: 2, style: 0 },
-  { key: 'supertrend_bear', label: 'ST 空頭', color: '#ef5350', width: 2, style: 0 },
-  { key: 'ema_fast',        label: 'EMA 9',   color: '#f0a500', width: 1, style: 0 },
-  { key: 'ema_slow',        label: 'EMA 21',  color: '#7b61ff', width: 1, style: 0 },
-  { key: 'ema_trend',       label: 'EMA 200', color: '#5d9cec', width: 2, style: 0 },
-  { key: 'donchian_upper',  label: 'DC 上軌', color: '#78909c', width: 1, style: 2 },
-  { key: 'donchian_lower',  label: 'DC 下軌', color: '#78909c', width: 1, style: 2 },
+  { key: 'supertrend_bull', label: 'Supertrend ↑', color: '#3fb950', width: 2, style: 0, defOn: true,  group: '趨勢' },
+  { key: 'supertrend_bear', label: 'Supertrend ↓', color: '#f85149', width: 2, style: 0, defOn: true,  group: '趨勢' },
+  { key: 'ema_trend',       label: 'EMA 200',       color: '#58a6ff', width: 2, style: 0, defOn: true,  group: '趨勢' },
+  { key: 'ema_slow',        label: 'EMA 21',        color: '#d2a8ff', width: 1, style: 0, defOn: false, group: '均線' },
+  { key: 'ema_fast',        label: 'EMA 9',         color: '#ffa657', width: 1, style: 0, defOn: false, group: '均線' },
+  { key: 'donchian_upper',  label: 'DC 上軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
+  { key: 'donchian_lower',  label: 'DC 下軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
 ]
 
 const ALL_KEYS = OVERLAYS.map(o => o.key)
-const initVis = Object.fromEntries(ALL_KEYS.map(k => [k, true]))
+const initVis = Object.fromEntries(OVERLAYS.map(o => [o.key, o.defOn]))
 
 export default function Chart() {
   const containerRef = useRef(null)
-  const chartRef = useRef(null)
-  const seriesRef = useRef({})
-  const dataRef = useRef({})
+  const chartRef     = useRef(null)
+  const seriesRef    = useRef({})
+  const dataRef      = useRef({})
 
-  const [symbol, setSymbol] = useState('BTCUSDT')
-  const [tf, setTf] = useState('4h')
-  const [loading, setLoading] = useState(false)
-  const [errMsg, setErrMsg] = useState(null)
-  const [vis, setVis] = useState(initVis)
-  const [lastTs, setLastTs] = useState(null)
+  const [symbol,    setSymbol]    = useState('BTCUSDT')
+  const [tf,        setTf]        = useState('4h')
+  const [loading,   setLoading]   = useState(false)
+  const [errMsg,    setErrMsg]    = useState(null)
+  const [vis,       setVis]       = useState(initVis)
+  const [lastTs,    setLastTs]    = useState(null)
   const [livePrice, setLivePrice] = useState(null)
-  const [autoSec, setAutoSec] = useState(3)
+  const [prevPrice, setPrevPrice] = useState(null)
+  const [autoSec,   setAutoSec]   = useState(3)
   const [countdown, setCountdown] = useState(0)
-  const [refresh, setRefresh] = useState(0)
+  const [refresh,   setRefresh]   = useState(0)
 
-  // create chart once
+  // ── chart init ──────────────────────────────────────────────────────
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
     const chart = createChart(el, {
-      layout: { background: { color: 'transparent' }, textColor: '#b0b8c8' },
-      grid: { vertLines: { color: '#1e2535' }, horzLines: { color: '#1e2535' } },
+      layout: { background: { color: 'transparent' }, textColor: '#8b949e' },
+      grid:   { vertLines: { color: '#161b22' }, horzLines: { color: '#161b22' } },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: '#2a3045' },
-      timeScale: { borderColor: '#2a3045', timeVisible: true, secondsVisible: false },
-      width: el.clientWidth,
-      height: 480,
+      rightPriceScale: { borderColor: '#21262d', textColor: '#8b949e' },
+      timeScale: {
+        borderColor: '#21262d', timeVisible: true, secondsVisible: false,
+        rightOffset: 8, barSpacing: 8,
+      },
+      width: el.clientWidth, height: 460,
     })
+
     seriesRef.current.candles = chart.addSeries(CandlestickSeries, {
-      upColor: '#26a69a', downColor: '#ef5350',
-      borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-      wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+      upColor:        '#3fb950', downColor:       '#f85149',
+      borderUpColor:  '#3fb950', borderDownColor: '#f85149',
+      wickUpColor:    '#3fb950', wickDownColor:   '#f85149',
     })
+
     OVERLAYS.forEach(({ key, color, width, style }) => {
       const s = chart.addSeries(LineSeries, {
         color, lineWidth: width, lineStyle: style,
@@ -67,13 +68,14 @@ export default function Chart() {
       s.setData([])
       seriesRef.current[key] = s
     })
+
     chartRef.current = chart
     const ro = new ResizeObserver(([e]) => chart.applyOptions({ width: e.contentRect.width }))
     ro.observe(el)
     return () => { ro.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = {} }
   }, [])
 
-  // full reload when symbol / tf / manual refresh changes
+  // ── full klines load ─────────────────────────────────────────────────
   useEffect(() => {
     if (!chartRef.current) return
     setLoading(true)
@@ -91,44 +93,29 @@ export default function Chart() {
       .catch(e => { setErrMsg(e.message); setLoading(false) })
   }, [symbol, tf, refresh]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // auto-update: poll mark price every autoSec seconds
+  // ── live price poll ──────────────────────────────────────────────────
   useEffect(() => {
     if (autoSec === 0) { setCountdown(0); return }
     setCountdown(autoSec)
     const tick = () => {
-      api.price(symbol)
-        .then(d => {
-          if (!d.price) return
-          setLivePrice(d.price)
-          const candles = dataRef.current.candles
-          if (!candles?.length) return
-          const last = candles[candles.length - 1]
-          const updated = {
-            time: last.time,
-            open: last.open,
-            high: Math.max(last.high, d.price),
-            low: Math.min(last.low, d.price),
-            close: d.price,
-          }
-          seriesRef.current.candles?.update(updated)
-          // update in-memory so next tick uses latest high/low
-          dataRef.current.candles[candles.length - 1] = updated
-          setLastTs(d.ts)
-        })
-        .catch(() => {})
+      api.price(symbol).then(d => {
+        if (!d.price) return
+        setPrevPrice(p => { return p ?? d.price })
+        setLivePrice(prev => { setPrevPrice(prev); return d.price })
+        const candles = dataRef.current.candles
+        if (!candles?.length) return
+        const last = candles[candles.length - 1]
+        const upd = { time: last.time, open: last.open,
+          high: Math.max(last.high, d.price), low: Math.min(last.low, d.price), close: d.price }
+        seriesRef.current.candles?.update(upd)
+        dataRef.current.candles[candles.length - 1] = upd
+        setLastTs(d.ts)
+      }).catch(() => {})
     }
-
-    const ivPrice = setInterval(tick, autoSec * 1000)
-
-    // countdown display (1-second tick)
+    const ivP = setInterval(tick, autoSec * 1000)
     let cd = autoSec
-    const ivCount = setInterval(() => {
-      cd -= 1
-      if (cd <= 0) cd = autoSec
-      setCountdown(cd)
-    }, 1000)
-
-    return () => { clearInterval(ivPrice); clearInterval(ivCount) }
+    const ivC = setInterval(() => { cd -= 1; if (cd <= 0) cd = autoSec; setCountdown(cd) }, 1000)
+    return () => { clearInterval(ivP); clearInterval(ivC) }
   }, [autoSec, symbol]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = useCallback(key => {
@@ -139,91 +126,105 @@ export default function Chart() {
     })
   }, [])
 
-  const btn = {
-    padding: '4px 10px', borderRadius: 4, border: 'none',
-    cursor: 'pointer', fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-display)',
-  }
+  const priceUp  = livePrice != null && prevPrice != null && livePrice >= prevPrice
+  const priceClr = livePrice == null ? '#8b949e' : priceUp ? '#3fb950' : '#f85149'
+
+  const chip = (active, color = 'var(--accent)') => ({
+    padding: '3px 10px', borderRadius: 20, border: 'none', cursor: 'pointer',
+    fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-display)',
+    background: active ? `${color}25` : 'transparent',
+    color:      active ? color : '#484f58',
+    outline:    active ? `1px solid ${color}55` : '1px solid #21262d',
+    transition: 'all 0.15s',
+  })
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
-      {/* live price bar */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 26, fontWeight: 700, fontFamily: 'var(--font-display)', color: '#e8eaf6' }}>
-          {livePrice != null ? livePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
-        </span>
-        <span style={{ fontSize: 12, color: 'var(--muted)', fontFamily: 'var(--font-display)' }}>USDT</span>
-        {autoSec > 0 && (
-          <span style={{ fontSize: 11, color: '#26a69a', fontFamily: 'var(--font-display)' }}>
-            ● 即時  {countdown}s 後更新
-          </span>
-        )}
-        {lastTs && (
-          <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto', fontFamily: 'var(--font-display)' }}>
-            K棒：{new Date(lastTs * 1000).toLocaleString('zh-TW', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' })}
-          </span>
-        )}
+      {/* ── price header ── */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 11, color: '#484f58', fontFamily: 'var(--font-display)', marginBottom: 2 }}>
+            {symbol} · {tf} · Binance Futures
+          </div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 32, fontWeight: 700, fontFamily: 'var(--font-display)', color: priceClr, letterSpacing: '-0.5px' }}>
+              {livePrice != null
+                ? livePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                : '—'}
+            </span>
+            <span style={{ fontSize: 13, color: '#484f58', fontFamily: 'var(--font-display)' }}>USDT</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 4, marginLeft: 8 }}>
+          {autoSec > 0 && (
+            <span style={{ fontSize: 10, color: '#3fb950', fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#3fb950', display: 'inline-block', animation: 'pulse 1.5s infinite' }} />
+              LIVE · {countdown}s
+            </span>
+          )}
+          {lastTs && (
+            <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-display)' }}>
+              K棒：{new Date(lastTs * 1000).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* toolbar */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {/* ── controls row ── */}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         {/* symbol */}
-        <div style={{ display: 'flex', gap: 4 }}>
-          {SYMBOLS.map(s => (
-            <button key={s} onClick={() => setSymbol(s)} style={{
-              ...btn, background: symbol === s ? 'var(--accent)' : 'var(--panel2)',
-              color: symbol === s ? '#fff' : 'var(--muted)',
-            }}>{s.replace('USDT', '')}</button>
-          ))}
-        </div>
+        {SYMBOLS.map(s => (
+          <button key={s} onClick={() => setSymbol(s)} style={chip(symbol === s, '#58a6ff')}>
+            {s.replace('USDT', '')}
+          </button>
+        ))}
+        <div style={{ width: 1, height: 16, background: '#21262d', margin: '0 2px' }} />
         {/* timeframe */}
-        <div style={{ display: 'flex', gap: 4 }}>
-          {TFS.map(t => (
-            <button key={t} onClick={() => setTf(t)} style={{
-              ...btn, background: tf === t ? 'var(--accent)' : 'var(--panel2)',
-              color: tf === t ? '#fff' : 'var(--muted)',
-            }}>{t}</button>
-          ))}
-        </div>
+        {TFS.map(t => (
+          <button key={t} onClick={() => setTf(t)} style={chip(tf === t, '#58a6ff')}>
+            {t}
+          </button>
+        ))}
+        <div style={{ width: 1, height: 16, background: '#21262d', margin: '0 2px' }} />
         {/* auto-refresh */}
-        <div style={{ display: 'flex', gap: 4, marginLeft: 4 }}>
-          {AUTO_OPTS.map(o => (
-            <button key={o.sec} onClick={() => setAutoSec(o.sec)} style={{
-              ...btn, fontSize: 11,
-              background: autoSec === o.sec ? '#26a69a33' : 'var(--panel2)',
-              color: autoSec === o.sec ? '#26a69a' : 'var(--muted)',
-              border: `1px solid ${autoSec === o.sec ? '#26a69a' : 'transparent'}`,
-            }}>{o.label}</button>
-          ))}
-        </div>
+        {AUTO_OPTS.map(o => (
+          <button key={o.sec} onClick={() => setAutoSec(o.sec)} style={chip(autoSec === o.sec, '#3fb950')}>
+            {o.label}
+          </button>
+        ))}
         {/* manual refresh */}
-        <button onClick={() => setRefresh(r => r + 1)} disabled={loading} style={{
-          ...btn, background: 'var(--panel2)', color: 'var(--accent)',
-          border: '1px solid var(--accent)', opacity: loading ? 0.5 : 1,
-        }}>{loading ? '…' : '↻'}</button>
+        <button onClick={() => setRefresh(r => r + 1)} disabled={loading}
+          style={{ ...chip(false), color: loading ? '#484f58' : '#8b949e', padding: '3px 8px' }}>
+          {loading ? '…' : '↻'}
+        </button>
       </div>
 
-      {/* indicator toggles */}
-      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+      {/* ── indicator toggles ── */}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {OVERLAYS.map(({ key, label, color }) => (
-          <button key={key} onClick={() => toggle(key)} style={{
-            padding: '3px 8px', borderRadius: 4, cursor: 'pointer',
-            fontSize: 11, fontFamily: 'var(--font-display)',
-            border: `1px solid ${vis[key] ? color : 'var(--muted)'}`,
-            background: vis[key] ? `${color}22` : 'transparent',
-            color: vis[key] ? color : 'var(--muted)',
-          }}>{label}</button>
+          <button key={key} onClick={() => toggle(key)} style={chip(vis[key], color)}>
+            {label}
+          </button>
         ))}
       </div>
 
-      {/* chart */}
+      {/* ── chart ── */}
       <div ref={containerRef} style={{
-        borderRadius: 8, overflow: 'hidden', minHeight: 480,
-        border: '1px solid var(--border, #2a3045)',
-        background: 'var(--panel, #0d1117)',
+        borderRadius: 10, overflow: 'hidden',
+        border: '1px solid #21262d',
+        background: '#0d1117',
+        minHeight: 460,
       }} />
 
-      {errMsg && <div style={{ color: '#ef5350', fontSize: 12 }}>無法載入：{errMsg}</div>}
+      {errMsg && <div style={{ fontSize: 11, color: '#f85149' }}>⚠ {errMsg}</div>}
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1 }
+          50%       { opacity: 0.3 }
+        }
+      `}</style>
     </div>
   )
 }
