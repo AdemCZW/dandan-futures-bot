@@ -429,6 +429,179 @@ def hyperliquid_leaderboard(top_n: int = 30) -> dict:
     }
 
 
+_bn_ct_cache: dict = {"ts": 0.0, "data": None}
+_BN_CT_TTL = 90  # 秒
+
+
+def binance_copytrading(limit: int = 20) -> dict:
+    """幣安帶單排行榜（7 日 ROI 降序）。
+
+    使用幣安公開 BFF API（不需 API key）。外網不通時退化為空清單。
+    每筆補抓 baseInfo（勝率 / PnL）— ThreadPoolExecutor 平行，快取 90 秒。
+    """
+    import json, time, urllib.request
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _post(url, body):
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+
+    now = time.time()
+    if now - _bn_ct_cache["ts"] > _BN_CT_TTL or _bn_ct_cache["data"] is None:
+        try:
+            raw = _post(
+                "https://www.binance.com/bapi/futures/v3/public/future/leaderboard/getLeaderboardRank",
+                {"isShared": True, "isTrader": True,
+                 "periodType": "WEEKLY", "rankType": "ROI",
+                 "statisticsType": "FUTURES", "traderType": "REGULAR"},
+            )
+            rank_list = (raw.get("data") or {}).get("rankList") or []
+        except Exception:
+            rank_list = []
+        _bn_ct_cache["ts"] = now
+        _bn_ct_cache["data"] = rank_list
+
+    rank_list = _bn_ct_cache["data"] or []
+    top = rank_list[:limit]
+
+    def _base_info(uid):
+        try:
+            raw = _post(
+                "https://www.binance.com/bapi/futures/v1/public/future/leaderboard/getOtherLeaderboardBaseInfo",
+                {"encryptedUid": uid, "tradeType": "PERPETUAL"},
+            )
+            d = raw.get("data") or {}
+            return {
+                "pnl_7d": round(float(d.get("pnlValue", 0)), 2),
+                "roi_7d": round(float(d.get("roi", 0)) * 100, 2),
+                "win_rate": round(float(d.get("winRate", 0)) * 100, 1),
+            }
+        except Exception:
+            return {"pnl_7d": None, "roi_7d": None, "win_rate": None}
+
+    def _entry(row):
+        uid = row.get("encryptedUid", "")
+        info = _base_info(uid)
+        return {
+            "uid": uid,
+            "nickname": row.get("nickName") or row.get("encryptedUid", "")[:8] + "…",
+            "followers": int(row.get("followerCount", 0)),
+            "position_shared": bool(row.get("positionShared", False)),
+            "rank_roi": round(float(row.get("value", 0)) * 100, 2),
+            **info,
+        }
+
+    results = [None] * len(top)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(_entry, row): i for i, row in enumerate(top)}
+        for fut in as_completed(futs):
+            results[futs[fut]] = fut.result()
+
+    traders = [r for r in results if r]
+    traders.sort(key=lambda t: t.get("roi_7d") or 0, reverse=True)
+    return {"traders": traders, "source": "Binance Copy Trading"}
+
+
+def binance_copytrader_positions(uid: str) -> dict:
+    """抓特定帶單者當前持倉（公開端點，免 API key）。
+
+    uid 為空或帶單者未分享持倉時回傳空清單。
+    """
+    import json, urllib.request
+
+    if not uid:
+        return {"positions": []}
+
+    def _post(url, body):
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return json.loads(r.read())
+
+    try:
+        raw = _post(
+            "https://www.binance.com/bapi/futures/v2/public/future/leaderboard/getOtherPosition",
+            {"encryptedUid": uid, "tradeType": "PERPETUAL"},
+        )
+        pos_list = (raw.get("data") or {}).get("otherPositionRetList") or []
+    except Exception:
+        pos_list = []
+
+    def _side(amount):
+        try:
+            return "long" if float(amount) > 0 else "short"
+        except Exception:
+            return "unknown"
+
+    positions = []
+    for p in pos_list:
+        try:
+            amount = float(p.get("amount", 0))
+            positions.append({
+                "symbol": p.get("symbol", ""),
+                "direction": _side(amount),
+                "size": round(abs(amount), 4),
+                "entry_price": round(float(p.get("entryPrice", 0)), 4),
+                "mark_price": round(float(p.get("markPrice", 0)), 4),
+                "upnl": round(float(p.get("pnl", 0)), 2),
+                "roe": round(float(p.get("roe", 0)) * 100, 2),
+                "leverage": int(p.get("leverage", 1)),
+            })
+        except Exception:
+            continue
+
+    return {"positions": positions, "uid": uid}
+
+
+def binance_large_trades(symbol: str = "BTCUSDT", min_usdt: float = 500_000,
+                         limit: int = 100) -> dict:
+    """幣安合約最近大單（免金鑰，用 fapi aggTrades）。
+
+    m=True → maker 是買方，即主動賣出（sell aggressor）。
+    過濾名義價值 >= min_usdt 的成交，依大小降序。
+    """
+    import json, urllib.request
+
+    url = (f"https://fapi.binance.com/fapi/v1/aggTrades"
+           f"?symbol={symbol}&limit={min(limit, 1000)}")
+    try:
+        with urllib.request.urlopen(url, timeout=8) as r:
+            raw = json.loads(r.read())
+    except Exception:
+        raw = []
+
+    trades = []
+    for t in raw:
+        try:
+            price = float(t["p"])
+            qty   = float(t["q"])
+            usdt  = price * qty
+            if usdt < min_usdt:
+                continue
+            trades.append({
+                "time":  int(t["T"]),
+                "side":  "sell" if t.get("m") else "buy",
+                "price": round(price, 2),
+                "qty":   round(qty, 4),
+                "usdt":  round(usdt, 0),
+            })
+        except Exception:
+            continue
+
+    trades.sort(key=lambda x: x["usdt"], reverse=True)
+    return {"trades": trades, "symbol": symbol, "min_usdt": min_usdt}
+
+
 def whale_data(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30) -> dict:
     """抓幣安合約公開大戶數據（免金鑰，全部用 fapi 公開端點）。
 

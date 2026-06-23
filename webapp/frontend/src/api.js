@@ -35,6 +35,10 @@ export const api = {
   klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
     get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
   price: (symbol = 'BTCUSDT') => get(`/api/price?symbol=${symbol}`),
+  copytraders: (limit = 20) => get(`/api/copytraders?limit=${limit}`),
+  copytraderPositions: (uid) => get(`/api/copytrader-positions?uid=${encodeURIComponent(uid)}`),
+  largeTrades: (symbol = 'BTCUSDT', minUsdt = 500000, limit = 100) =>
+    get(`/api/large-trades?symbol=${symbol}&min_usdt=${minUsdt}&limit=${limit}`),
 }
 
 export const pct = (x) => `${(x * 100).toFixed(2)}%`

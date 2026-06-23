@@ -6,12 +6,14 @@ import Optimize from './components/Optimize.jsx'
 import Journal from './components/Journal.jsx'
 import Whales from './components/Whales.jsx'
 import Chart from './components/Chart.jsx'
+import CopyTrading from './components/CopyTrading.jsx'
 
 const TABS = [
-  { key: 'live',     label: '即時監控',   el: <Live /> },
-  { key: 'chart',    label: 'K 線圖表',   el: <Chart /> },
-  { key: 'whales',   label: '大戶籌碼',   el: <Whales /> },
-  { key: 'backtest', label: '回測',        el: <Backtest /> },
+  { key: 'live',        label: '即時監控',   el: <Live /> },
+  { key: 'chart',       label: 'K 線圖表',   el: <Chart /> },
+  { key: 'whales',      label: '大戶籌碼',   el: <Whales /> },
+  { key: 'copytrading', label: '帶單追蹤',   el: <CopyTrading /> },
+  { key: 'backtest',    label: '回測',        el: <Backtest /> },
   { key: 'explain',  label: '決策流程',   el: <Explain /> },
   { key: 'optimize', label: '參數最佳化', el: <Optimize /> },
   { key: 'journal',  label: '交易日誌',   el: <Journal /> },

@@ -142,3 +142,27 @@ def klines(symbol: str = "BTCUSDT", interval: str = "4h",
 @app.get("/api/price")
 def price(symbol: str = "BTCUSDT"):
     return service.mark_price(symbol)
+
+
+@app.get("/api/copytraders")
+def copytraders(limit: int = 20):
+    try:
+        return service.binance_copytrading(limit=limit)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/api/copytrader-positions")
+def copytrader_positions(uid: str = ""):
+    try:
+        return service.binance_copytrader_positions(uid=uid)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/api/large-trades")
+def large_trades(symbol: str = "BTCUSDT", min_usdt: float = 500_000, limit: int = 100):
+    try:
+        return service.binance_large_trades(symbol=symbol, min_usdt=min_usdt, limit=limit)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
