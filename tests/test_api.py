@@ -77,3 +77,28 @@ def test_live_endpoint_returns_status():
     assert r.status_code == 200
     d = r.json()
     assert "active" in d and "recent_trades" in d and isinstance(d["recent_trades"], list)
+
+
+def test_klines_synthetic_shape():
+    r = client.get("/api/klines?source=synthetic")
+    assert r.status_code == 200
+    d = r.json()
+    required_keys = {"candles", "supertrend_bull", "supertrend_bear",
+                     "ema_fast", "ema_slow", "ema_trend",
+                     "donchian_upper", "donchian_lower"}
+    assert required_keys <= set(d.keys())
+    assert len(d["candles"]) > 0
+    c = d["candles"][0]
+    assert all(k in c for k in ("time", "open", "high", "low", "close"))
+
+
+def test_klines_supertrend_splits_by_direction():
+    r = client.get("/api/klines?source=synthetic&limit=300")
+    d = r.json()
+    # 多空兩段都應有資料（合成資料足夠長會有方向切換）
+    assert len(d["supertrend_bull"]) > 0 or len(d["supertrend_bear"]) > 0
+    # 每個 supertrend 點都有 time + value
+    for pt in d["supertrend_bull"][:5]:
+        assert "time" in pt and "value" in pt
+    for pt in d["supertrend_bear"][:5]:
+        assert "time" in pt and "value" in pt

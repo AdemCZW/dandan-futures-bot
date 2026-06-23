@@ -32,6 +32,8 @@ export const api = {
   whales: (symbol = 'BTCUSDT', period = '5m', limit = 30) =>
     get(`/api/whales?symbol=${symbol}&period=${period}&limit=${limit}`),
   hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),
+  klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
+    get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
 }
 
 export const pct = (x) => `${(x * 100).toFixed(2)}%`

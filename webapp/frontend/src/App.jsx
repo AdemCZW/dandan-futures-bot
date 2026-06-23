@@ -5,9 +5,11 @@ import Explain from './components/Explain.jsx'
 import Optimize from './components/Optimize.jsx'
 import Journal from './components/Journal.jsx'
 import Whales from './components/Whales.jsx'
+import Chart from './components/Chart.jsx'
 
 const TABS = [
   { key: 'live',     label: '即時監控',   el: <Live /> },
+  { key: 'chart',    label: 'K 線圖表',   el: <Chart /> },
   { key: 'whales',   label: '大戶籌碼',   el: <Whales /> },
   { key: 'backtest', label: '回測',        el: <Backtest /> },
   { key: 'explain',  label: '決策流程',   el: <Explain /> },

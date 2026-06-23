@@ -128,3 +128,12 @@ def whales(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30):
         return service.whale_data(symbol=symbol, period=period, limit=limit)
     except Exception as e:                                   # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/api/klines")
+def klines(symbol: str = "BTCUSDT", interval: str = "4h",
+           limit: int = 200, source: str = "testnet"):
+    try:
+        return service.klines_data(symbol, interval, limit, source)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")

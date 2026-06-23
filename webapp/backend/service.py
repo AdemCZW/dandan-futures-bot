@@ -516,3 +516,92 @@ def read_trades(limit: int = 50, mode: str | None = None,
     finally:
         conn.close()
     return rows  # ORDER BY id DESC → 最新在最前
+
+
+def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
+                limit: int = 200, source: str = "testnet") -> dict:
+    """K 線 + 指標資料 — 供前端 TradingView 式圖表使用。
+
+    source="synthetic" 離線合成（測試用）；source="testnet" 抓幣安期貨公開 K 線（免金鑰）。
+    回傳 lightweight-charts 格式：{time: unix_sec, open/high/low/close} 蠟燭 +
+    supertrend_bull / supertrend_bear（依方向分色）/ ema_fast / ema_slow /
+    ema_trend / donchian_upper / donchian_lower。
+    """
+    import json, urllib.request
+    import pandas as pd
+    from core import signal_engineer as se
+
+    if source == "synthetic":
+        df = make_synthetic(limit)
+    else:
+        url = (f"https://fapi.binance.com/fapi/v1/klines"
+               f"?symbol={symbol}&interval={interval}&limit={limit}")
+        with urllib.request.urlopen(url, timeout=10) as r:
+            raw = json.loads(r.read())
+        cols = ["open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_volume", "trades", "taker_buy_base",
+                "taker_buy_quote", "ignore"]
+        df = pd.DataFrame(raw, columns=cols)
+        for c in ("open", "high", "low", "close", "volume"):
+            df[c] = pd.to_numeric(df[c])
+        df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms")
+        df = df.set_index("timestamp")
+
+    st = se.supertrend(df, period=10, multiplier=3.0)
+    df["st_dir"] = st["st_dir"]
+    df["supertrend"] = st["supertrend"]
+    df["ema_fast"] = se.ema(df["close"], 9)
+    df["ema_slow"] = se.ema(df["close"], 21)
+    df["ema_trend"] = se.ema(df["close"], 200)
+    don = se.donchian(df, entry_period=20, exit_period=10)
+    df["dc_upper"] = don["dc_upper"]
+    df["dc_lower"] = don["dc_lower"]
+
+    def _ts(idx):
+        return int(idx.timestamp())
+
+    def _f(v):
+        try:
+            x = float(v)
+            return None if (x != x) else x  # NaN check without math import
+        except Exception:
+            return None
+
+    candles, st_bull, st_bear = [], [], []
+    ema_fast, ema_slow, ema_trend = [], [], []
+    dc_upper, dc_lower = [], []
+
+    for idx, row in df.iterrows():
+        t = _ts(idx)
+        o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
+        if None in (o, h, lo, c):
+            continue
+        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+        st_val = _f(row["supertrend"])
+        if st_val is not None:
+            st_dir = _f(row["st_dir"])
+            if st_dir is not None and st_dir > 0:
+                st_bull.append({"time": t, "value": st_val})
+            else:
+                st_bear.append({"time": t, "value": st_val})
+        if (v := _f(row["ema_fast"])) is not None:
+            ema_fast.append({"time": t, "value": v})
+        if (v := _f(row["ema_slow"])) is not None:
+            ema_slow.append({"time": t, "value": v})
+        if (v := _f(row["ema_trend"])) is not None:
+            ema_trend.append({"time": t, "value": v})
+        if (v := _f(row["dc_upper"])) is not None:
+            dc_upper.append({"time": t, "value": v})
+        if (v := _f(row["dc_lower"])) is not None:
+            dc_lower.append({"time": t, "value": v})
+
+    return {
+        "candles": candles,
+        "supertrend_bull": st_bull,
+        "supertrend_bear": st_bear,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "ema_trend": ema_trend,
+        "donchian_upper": dc_upper,
+        "donchian_lower": dc_lower,
+    }
