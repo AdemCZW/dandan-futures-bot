@@ -5,7 +5,7 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python -u run_live_futures.py --strategy fib_retracement --interval 1m --poll 15 --budget 500 --leverage 10",
+    "startCommand": "python -u run_live_futures.py --strategy supertrend --interval 4h --poll 30 --budget 500 --leverage 3",
     "healthcheckPath": "/health",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10,
