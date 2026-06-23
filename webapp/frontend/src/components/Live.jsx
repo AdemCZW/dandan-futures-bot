@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, cls } from '../api'
+import TechPanel from './TechPanel.jsx'
 
 const TLBL = { 1: '做多 (+1)', 0: '空手 (0)', '-1': '做空 (-1)' }
 const ALBL = {
@@ -89,6 +90,16 @@ export default function Live() {
               </div>
             </div>
           )}
+
+          <TechPanel
+            lastDecision={d.last_decision}
+            price={d.price}
+            inPos={d.in_position}
+            direction={d.direction}
+            entryPrice={d.entry_price}
+            sl={d.sl}
+            tp={d.tp}
+          />
 
           {d.in_position && (
             <div className="panel">
