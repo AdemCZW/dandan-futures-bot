@@ -361,14 +361,15 @@ def main():
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
     cfg.futures_leverage, cfg.poll_seconds = args.leverage, args.poll
 
+    # 健康/狀態 HTTP 伺服器「最先」啟動：不等任何幣安 API（exchange_info/leverage/balance），
+    # 確保雲端 healthcheck 在啟動初期就能通過；金鑰缺失或交易初始化失敗都不能讓 process 結束。
+    _start_state_server()
+
     if not cfg.futures_api_key or not cfg.futures_api_secret:
         print("找不到合約測試網金鑰。請到 https://testnet.binancefuture.com 產生，"
               "並在 .env 填入 BINANCE_FUTURES_TESTNET_API_KEY / _SECRET。")
-        return
-
-    # 健康/狀態 HTTP 伺服器「最先」啟動：不等任何幣安 API（exchange_info/leverage/balance），
-    # 確保雲端 healthcheck 在啟動初期就能通過，交易初始化的延遲/錯誤不會讓整個服務被判失敗。
-    _start_state_server()
+        while True:          # 保持存活，healthcheck 仍通過，便於在 Railway console 診斷
+            time.sleep(30)
 
     try:
         client = make_client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
