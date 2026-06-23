@@ -655,3 +655,36 @@ def test_supertrend_is_causal_prefix_matches():
         a, b = full["st_dir"].iloc[:k], pref["st_dir"]
         assert a.isna().equals(b.isna())
         np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Donchian 通道（Turtle 突破）：dc_upper/lower=進場通道、dc_exit_*=出場通道。
+#   全部用 .shift(1) 的滾動極值（只看「過去 N 根」），拿當根 close 比 → 無 look-ahead。
+# --------------------------------------------------------------------------- #
+def test_donchian_channels_are_prior_window_extremes():
+    px_h = np.array([1, 2, 3, 4, 5, 6], dtype=float)
+    px_l = px_h - 1.0
+    df = pd.DataFrame({"open": px_h, "high": px_h, "low": px_l, "close": px_h})
+    dc = se.donchian(df, entry_period=3, exit_period=2)
+    # dc_upper[i] = max(high[i-3..i-1])；前 3 根 NaN
+    assert dc["dc_upper"].iloc[:3].isna().all()
+    assert dc["dc_upper"].iloc[3] == pytest.approx(3.0)
+    assert dc["dc_upper"].iloc[5] == pytest.approx(5.0)
+    assert dc["dc_lower"].iloc[3] == pytest.approx(0.0)
+    assert dc["dc_lower"].iloc[5] == pytest.approx(2.0)
+    # 出場通道用較短窗
+    assert dc["dc_exit_long"].iloc[2] == pytest.approx(0.0)
+    assert dc["dc_exit_short"].iloc[2] == pytest.approx(2.0)
+
+
+def test_donchian_is_causal_prefix_matches():
+    rng = np.random.default_rng(3)
+    px = 100 + np.cumsum(rng.normal(0, 1, 80))
+    df = pd.DataFrame({"open": px, "high": px + 0.5, "low": px - 0.5, "close": px})
+    full = se.donchian(df, 20, 10)
+    for k in (40, 60, 75):
+        pref = se.donchian(df.iloc[:k], 20, 10)
+        for col in ("dc_upper", "dc_lower", "dc_exit_long", "dc_exit_short"):
+            a, b = full[col].iloc[:k], pref[col]
+            assert a.isna().equals(b.isna())
+            np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)

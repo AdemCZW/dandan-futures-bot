@@ -302,11 +302,60 @@ class SupertrendStrategy(Strategy):
         return target if self._structure_ok(row, target) else 0
 
 
+class DonchianBreakoutStrategy(Strategy):
+    """Donchian 通道突破（海龜系統，多空雙向）。
+
+    收盤突破過去 entry_period 根高點 → 做多；跌破低點 → 做空。
+    出場用較短的 exit_period 通道（多單跌破 exit_long、空單突破 exit_short → 平倉）。
+    經典海龜 System 1：entry=20 / exit=10。趨勢策略，regime_pref='any'。
+    訂單流閘門只擋「新開倉」，既有倉由出場通道決定何時平。
+    """
+    name = "donchian"
+    defaults = {"entry_period": 20, "exit_period": 10}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        dc = se.donchian(out, entry_period=int(self.params["entry_period"]),
+                         exit_period=int(self.params["exit_period"]))
+        for c in ("dc_upper", "dc_lower", "dc_exit_long", "dc_exit_short"):
+            out[c] = dc[c]
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_structure(out)
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        close = g("close")
+        upper, lower = g("dc_upper"), g("dc_lower")
+        exit_long, exit_short = g("dc_exit_long"), g("dc_exit_short")
+        if close is None or any(v is None or (isinstance(v, float) and math.isnan(v))
+                                for v in (upper, lower)):
+            return position                       # 通道未暖機 → 維持現狀
+        close = float(close)
+
+        if position == 1:                         # 持多：跌破出場下軌才平
+            if exit_long is not None and not pd.isna(exit_long) and close < float(exit_long):
+                return 0
+            return 1
+        if position == -1:                        # 持空：突破出場上軌才平
+            if exit_short is not None and not pd.isna(exit_short) and close > float(exit_short):
+                return 0
+            return -1
+        # 空手：突破進場通道 → 開倉（訂單流不可逆向）
+        if close > float(upper) and self._structure_ok(row, 1):
+            return 1
+        if close < float(lower) and self._structure_ok(row, -1):
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
     ZScoreLongShortStrategy.name: ZScoreLongShortStrategy,
     SupertrendStrategy.name: SupertrendStrategy,
+    DonchianBreakoutStrategy.name: DonchianBreakoutStrategy,
     FibRetracementStrategy.name: FibRetracementStrategy,
 }
 

@@ -172,6 +172,26 @@ def cvd(df: pd.DataFrame) -> pd.Series:
     return delta.cumsum()
 
 
+def donchian(df: pd.DataFrame, entry_period: int = 20, exit_period: int = 10) -> pd.DataFrame:
+    """Donchian 通道（Turtle 海龜突破）。
+
+    進場通道＝過去 entry_period 根的高/低；出場通道＝過去 exit_period 根的高/低。
+    全用 high/low.shift(1)（只看「已收完的過去 N 根」），由策略拿當根 close 去比，
+    故突破判定不含當根自身 → causal、不 repaint。
+
+    回傳 DataFrame：
+        dc_upper / dc_lower         — 進場通道（突破上軌做多、跌破下軌做空）
+        dc_exit_long / dc_exit_short — 出場通道（多單跌破 exit_long 出、空單突破 exit_short 出）
+    """
+    high, low = df["high"], df["low"]
+    return pd.DataFrame({
+        "dc_upper": high.shift(1).rolling(entry_period).max(),
+        "dc_lower": low.shift(1).rolling(entry_period).min(),
+        "dc_exit_long": low.shift(1).rolling(exit_period).min(),
+        "dc_exit_short": high.shift(1).rolling(exit_period).max(),
+    }, index=df.index)
+
+
 def supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
     """Supertrend — ATR 通道趨勢跟蹤（BTC 最常被引用的穩健趨勢策略核心）。
 

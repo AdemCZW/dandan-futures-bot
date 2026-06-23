@@ -163,9 +163,9 @@ def test_build_strategy_passes_params():
     assert strat.params["window"] == 30
 
 
-def test_strategies_registry_has_five_keys():
+def test_strategies_registry_has_six_keys():
     assert set(STRATEGIES) == {"ema_cross", "zscore_revert", "zscore_ls",
-                               "fib_retracement", "supertrend"}
+                               "fib_retracement", "supertrend", "donchian"}
     assert STRATEGIES["ema_cross"] is EMACrossStrategy
     assert STRATEGIES["zscore_revert"] is ZScoreRevertStrategy
     assert STRATEGIES["zscore_ls"] is ZScoreLongShortStrategy
@@ -531,3 +531,57 @@ def test_supertrend_nan_direction_holds_position():
 
 def test_supertrend_in_strategies_registry():
     assert "supertrend" in STRATEGIES
+
+
+# --------------------------------------------------------------------------- #
+# DonchianBreakoutStrategy（海龜突破，多空雙向）
+#   收盤突破進場通道上軌做多/下軌做空；跌破出場通道平倉。訂單流閘門擋新開倉。
+# --------------------------------------------------------------------------- #
+from core.quant_researcher import DonchianBreakoutStrategy
+
+
+def _dc_row(close, upper, lower, exit_long, exit_short, taker_ratio_s=None):
+    d = {"close": close, "dc_upper": upper, "dc_lower": lower,
+         "dc_exit_long": exit_long, "dc_exit_short": exit_short}
+    if taker_ratio_s is not None:
+        d["taker_ratio_s"] = taker_ratio_s
+    return pd.Series(d)
+
+
+def test_donchian_strategy_allows_short():
+    assert DonchianBreakoutStrategy.allow_short is True
+
+
+def test_donchian_breakout_long_on_upper_break():
+    strat = DonchianBreakoutStrategy()
+    # close 突破上軌 110 → 做多
+    assert strat.signal(_dc_row(111, 110, 90, 95, 105), 0) == 1
+
+
+def test_donchian_breakout_short_on_lower_break():
+    strat = DonchianBreakoutStrategy()
+    # close 跌破下軌 90 → 做空
+    assert strat.signal(_dc_row(89, 110, 90, 95, 105), 0) == -1
+
+
+def test_donchian_no_signal_inside_channel():
+    strat = DonchianBreakoutStrategy()
+    assert strat.signal(_dc_row(100, 110, 90, 95, 105), 0) == 0
+
+
+def test_donchian_long_exits_on_exit_channel_break():
+    strat = DonchianBreakoutStrategy()
+    # 持多，close 跌破 exit_long 95 → 平倉
+    assert strat.signal(_dc_row(94, 110, 90, 95, 105), 1) == 0
+    # 仍在通道內 → 續抱
+    assert strat.signal(_dc_row(100, 110, 90, 95, 105), 1) == 1
+
+
+def test_donchian_structure_gate_blocks_fresh_breakout_long():
+    strat = DonchianBreakoutStrategy(use_structure=True, of_long_min=0.45)
+    assert strat.signal(_dc_row(111, 110, 90, 95, 105, taker_ratio_s=0.25), 0) == 0
+    assert strat.signal(_dc_row(111, 110, 90, 95, 105, taker_ratio_s=0.60), 0) == 1
+
+
+def test_donchian_in_strategies_registry():
+    assert "donchian" in STRATEGIES

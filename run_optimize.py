@@ -47,6 +47,10 @@ GRIDS = {
         "period": [7, 10, 14],
         "multiplier": [2.0, 2.5, 3.0],
     },
+    "donchian": {                        # 海龜通道突破（allow_short=True）；經典 20/10、55/20
+        "entry_period": [10, 20, 55],
+        "exit_period": [5, 10, 20],
+    },
 }
 
 
