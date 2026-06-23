@@ -276,9 +276,16 @@ class SupertrendStrategy(Strategy):
     跟隨 st_dir：轉多做多、轉空做空。趨勢策略本身即定義趨勢，不另外套 regime 閘門
     （regime_pref='any'）。訂單流閘門只擋「新開倉/翻倉」，既有同向倉不強制平出。
     這是 BTC 上文獻最常引用的穩健趨勢策略（Supertrend ATR=10、mult=3 為經典值）。
+
+    HTF（高時框）趨勢過濾器（use_htf_filter=False 預設關閉）：
+    開啟後，只在 close > ema_trend 時做多，close < ema_trend 時做空，
+    避免逆大趨勢入場。既有倉位不被此閘門強制平出。
+    靈感來自 QuantPedia 研究：日線趨勢確認使 1h MACD Sharpe 從 0.33 → 1.07，
+    以及 AdaptiveTrend (arXiv 2602.11708) 在 H4 的 OOS Sharpe 2.08。
     """
     name = "supertrend"
-    defaults = {"period": 10, "multiplier": 3.0}
+    defaults = {"period": 10, "multiplier": 3.0,
+                "use_htf_filter": False, "htf_ema_period": 200}
     allow_short = True
     regime_pref = "any"
 
@@ -289,7 +296,28 @@ class SupertrendStrategy(Strategy):
         out["st_dir"] = st["st_dir"]
         out["supertrend"] = st["supertrend"]
         out["atr"] = se.atr(out, 14)
+        out["ema_trend"] = se.ema(out["close"], int(self.params["htf_ema_period"]))
         return self._prepare_structure(out)
+
+    def _htf_ok(self, row: pd.Series, direction: int) -> bool:
+        """HTF 趨勢閘門：close 須在 ema_trend 正確一側才開新倉。
+
+        use_htf_filter=False / ema_trend 為 NaN（暖機）→ 一律放行。
+        只在新開倉時呼叫，不強制平出既有倉位。
+        """
+        if not self.params.get("use_htf_filter", False):
+            return True
+        ema_t = row.get("ema_trend") if hasattr(row, "get") else None
+        close = row.get("close") if hasattr(row, "get") else None
+        if ema_t is None or close is None:
+            return True
+        if pd.isna(float(ema_t)) or pd.isna(float(close)):
+            return True
+        if direction == 1:
+            return float(close) > float(ema_t)
+        if direction == -1:
+            return float(close) < float(ema_t)
+        return True
 
     def signal(self, row: pd.Series, position: int) -> int:
         st_dir = row.get("st_dir") if hasattr(row, "get") else row["st_dir"]
@@ -297,9 +325,11 @@ class SupertrendStrategy(Strategy):
             return position                       # 方向未定（warmup）→ 維持現狀
         target = 1 if float(st_dir) > 0 else -1
         if target == position:
-            return position                       # 同向 → 續抱（不被訂單流閘門踢出）
-        # 新開倉/翻倉：訂單流不可逆向，否則退回空手（仍平掉反向倉）
-        return target if self._structure_ok(row, target) else 0
+            return position                       # 同向 → 續抱（不被閘門踢出）
+        # 新開倉/翻倉：訂單流 + HTF 趨勢兩關都通過才進場，否則退回空手
+        if self._structure_ok(row, target) and self._htf_ok(row, target):
+            return target
+        return 0
 
 
 class DonchianBreakoutStrategy(Strategy):

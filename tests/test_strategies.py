@@ -646,3 +646,76 @@ def test_ofm_graceful_without_taker_column():
 
 def test_ofm_in_strategies_registry():
     assert "of_momentum" in STRATEGIES
+
+
+# --------------------------------------------------------------------------- #
+# HTF（高時框）趨勢過濾器 — SupertrendStrategy
+#   use_htf_filter=False 預設關閉（向後相容）。
+#   開啟後：close > ema_trend → 只做多；close < ema_trend → 只做空。
+#   既有倉位不被 HTF 閘門強制平出（與訂單流閘門設計相同）。
+#   ema_trend 為 NaN（暖機期）→ 優雅放行。
+# --------------------------------------------------------------------------- #
+
+def _st_row_htf(st_dir, close, ema_trend, taker_ratio_s=None):
+    d = {"close": close, "st_dir": st_dir, "ema_trend": ema_trend}
+    if taker_ratio_s is not None:
+        d["taker_ratio_s"] = taker_ratio_s
+    return pd.Series(d)
+
+
+def test_supertrend_htf_filter_off_by_default():
+    """預設 use_htf_filter=False → HTF 不過濾，做多皆通過（向後相容）。"""
+    strat = SupertrendStrategy()
+    assert strat.signal(_st_row_htf(1.0, close=90.0, ema_trend=100.0), 0) == 1
+
+
+def test_supertrend_htf_filter_blocks_long_in_downtrend():
+    """開啟 use_htf_filter + close < ema_trend（下降趨勢）→ 擋掉做多。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(1.0, close=90.0, ema_trend=100.0), 0) == 0
+
+
+def test_supertrend_htf_filter_blocks_short_in_uptrend():
+    """開啟 use_htf_filter + close > ema_trend（上升趨勢）→ 擋掉做空。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(-1.0, close=110.0, ema_trend=100.0), 0) == 0
+
+
+def test_supertrend_htf_filter_allows_long_in_uptrend():
+    """開啟 use_htf_filter + close > ema_trend → 放行做多。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(1.0, close=110.0, ema_trend=100.0), 0) == 1
+
+
+def test_supertrend_htf_filter_allows_short_in_downtrend():
+    """開啟 use_htf_filter + close < ema_trend → 放行做空。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(-1.0, close=90.0, ema_trend=100.0), 0) == -1
+
+
+def test_supertrend_htf_filter_does_not_force_exit_existing_long():
+    """持多倉 + HTF 下降趨勢 → 不強制平倉（只擋新開倉）。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(1.0, close=90.0, ema_trend=100.0), 1) == 1
+
+
+def test_supertrend_htf_filter_does_not_force_exit_existing_short():
+    """持空倉 + HTF 上升趨勢 → 不強制平倉（只擋新開倉）。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(-1.0, close=110.0, ema_trend=100.0), -1) == -1
+
+
+def test_supertrend_htf_nan_ema_passes_through():
+    """ema_trend 為 NaN（暖機期）→ HTF 閘門不阻擋（優雅退化）。"""
+    strat = SupertrendStrategy(use_htf_filter=True)
+    assert strat.signal(_st_row_htf(1.0, close=100.0, ema_trend=float("nan")), 0) == 1
+
+
+def test_supertrend_htf_prepare_adds_ema_trend():
+    """prepare() 一律計算 ema_trend 欄位。"""
+    n = 220
+    px = np.linspace(100.0, 200.0, n)
+    df = pd.DataFrame({"open": px, "high": px + 1, "low": px - 1, "close": px})
+    out = SupertrendStrategy(use_htf_filter=True, htf_ema_period=50).prepare(df)
+    assert "ema_trend" in out.columns
+    assert not out["ema_trend"].isna().all()

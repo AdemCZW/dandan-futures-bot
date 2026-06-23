@@ -32,7 +32,7 @@
 
 | 策略名 | 類型 | 做空 | OOS 邊際（4h BTC） | 說明 |
 |--------|------|------|--------------------|------|
-| `supertrend` | 趨勢跟蹤 | ✅ | **+1.12%/fold ✅** | ATR 帶 Supertrend，`period=10, mult=3.0`；4h 唯一驗證有 edge 的主力策略 |
+| `supertrend` | 趨勢跟蹤 | ✅ | **+1.12%/fold ✅** | ATR 帶 Supertrend，`period=10, mult=3.0`；4h 唯一驗證有 edge 的主力策略；HTF 過濾器（`use_htf_filter=True`）可進一步降低逆趨勢損失 |
 | `donchian` | 通道突破 | ✅ | +0.24%/fold ✅ | Donchian 通道（Turtle 系統），進場 20 根、出場 10 根 |
 | `fib_retracement` | 均值回歸 | ✅ | ~0（4h 持平） | Fibonacci 回調 + swing pivot + Regime 過濾 + 訂單流閘門 |
 | `zscore_ls` | 均值回歸 | ✅ | OOS 負 | z-score 雙向；5m/15m/1h 全虧，過度交易 |
@@ -60,6 +60,7 @@
 | Donchian Channel | `shift(1)` 前窗滾動高低，因果通道突破 |
 | CVD（累積成交量差） | 主動買量 − 主動賣量，`taker_base` 來源 |
 | taker_buy_ratio | 主動買量 / 總量，EMA 平滑 |
+| HTF 趨勢過濾器 | `use_htf_filter=True`：只在 `close > ema_trend` 做多、`close < ema_trend` 做空，降低逆大趨勢入場；靈感來自 QuantPedia + arXiv 2602.11708 |
 
 ---
 
