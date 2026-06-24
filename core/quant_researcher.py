@@ -223,7 +223,8 @@ class FibRetracementStrategy(Strategy):
     # pivot_left/right：用已確認 swing 擺動點界定波段（取代固定 lookback 盒子極值）。
     # ema_trend_period：長線趨勢過濾，把逆勢均回改為順勢回調（上升趨勢買支撐、下降趨勢空阻力）。
     defaults = {"lookback": 50, "rsi_period": 14,
-                "pivot_left": 3, "pivot_right": 3, "ema_trend_period": 200}
+                "pivot_left": 3, "pivot_right": 2, "ema_trend_period": 200,
+                "er_trend": 0.25, "regime_confirm_bars": 1}
     allow_short = True
     regime_pref = "range"          # 回調進出場：只在盤整盤開倉
 
@@ -688,8 +689,8 @@ class SmcStructureStrategy(Strategy):
     regime_pref='trend'：只在趨勢盤操作，避免盤整盤假突破。
     """
     name = "smc_structure"
-    defaults = {"pivot_left": 5, "pivot_right": 5, "atr_period": 14,
-                "require_fvg": True}
+    defaults = {"pivot_left": 5, "pivot_right": 3, "atr_period": 14,
+                "require_fvg": False, "regime_confirm_bars": 1}
     allow_short = True
     regime_pref = "trend"
 
@@ -731,8 +732,9 @@ class FibChannelStrategy(Strategy):
     出場：到達對面出場區或突破通道外側。
     """
     name = "fib_channel"
-    defaults = {"pivot_left": 5, "pivot_right": 5, "atr_period": 14,
-                "atr_mult": 3.0, "entry_zone": 0.30, "exit_zone": 0.80}
+    defaults = {"pivot_left": 5, "pivot_right": 3, "atr_period": 14,
+                "atr_mult": 3.0, "entry_zone": 0.30, "exit_zone": 0.80,
+                "regime_confirm_bars": 1}
     allow_short = True
     regime_pref = "trend"
 
