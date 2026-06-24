@@ -12,6 +12,7 @@
     python -m backtest.tournament --csv btc_5m_futures_6mo.csv --fee 0.0005 --objective expectancy
 """
 from __future__ import annotations
+import itertools
 import json
 
 from backtest.backtester import run_backtest
@@ -26,6 +27,9 @@ _SCORE_KEY = {
     "return": "total_return",
     "total_return": "total_return",
     "win_rate": "win_rate",
+    # walk-forward（樣本外）目標
+    "oos_expectancy": "oos_expectancy",
+    "oos_profit_factor": "oos_profit_factor_raw",
 }
 
 
@@ -50,15 +54,16 @@ def evaluate(df, name: str, cfg, params: dict | None = None) -> dict:
 
 
 def rank(results: list[dict], objective: str = "expectancy",
-         min_trades: int = 20) -> list[dict]:
+         min_trades: int = 20, trades_key: str = "trades") -> list[dict]:
     """依 objective 遞減排序；交易數 < min_trades 者分數沉底（eligible=False）。
 
     每筆附上 'eligible' 與 'score'。score 為排序用分數（不合格 → -inf）。
+    trades_key：判定合格用的交易數欄位（walk-forward 用 'oos_trades'）。
     """
-    skey = _SCORE_KEY.get(objective, "expectancy")
+    skey = _SCORE_KEY.get(objective, objective)
     out = []
     for r in results:
-        eligible = r.get("trades", 0) >= min_trades
+        eligible = r.get(trades_key, 0) >= min_trades
         raw = r.get(skey)
         if raw is None:
             raw = float("-inf")
@@ -89,6 +94,125 @@ def run_tournament(df, cfg, names: list[str] | None = None, min_trades: int = 20
     ranked = rank(results, objective, min_trades)
     champion = next((r for r in ranked if r["eligible"]), None)
     return {"objective": objective, "min_trades": min_trades,
+            "n_strategies": len(names), "ranked": ranked, "champion": champion}
+
+
+# =========================================================================== #
+# Walk-forward（樣本外）驗證 — 區分「真 edge vs 過擬合」。
+#   訓練窗選參數 → 鎖定 → 只在後續未見過的測試窗評分 → 跨 fold 彙總 OOS 交易。
+#   default 參數的 walk-forward 測「時間穩健性」；給 grid 則測「參數過擬合」。
+# =========================================================================== #
+def _fold_bounds(n: int, train_bars: int, test_bars: int) -> list[tuple]:
+    """回傳 [(train_start, train_end=test_start, test_end), ...]，測試窗不重疊前推。"""
+    bounds, start = [], 0
+    while start + train_bars + test_bars <= n:
+        bounds.append((start, start + train_bars, start + train_bars + test_bars))
+        start += test_bars
+    return bounds
+
+
+def _metrics_from_pnls(pnls: list[float]) -> dict:
+    """從一串平倉 pnl 算 trades / win_rate / expectancy / profit_factor（與回測引擎同義）。"""
+    n = len(pnls)
+    if n == 0:
+        return {"trades": 0, "win_rate": 0.0, "expectancy": 0.0,
+                "profit_factor": 0.0, "profit_factor_raw": 0.0}
+    wins = [p for p in pnls if p > 0]
+    gross_profit = sum(wins)
+    gross_loss = -sum(p for p in pnls if p < 0)
+    if gross_loss == 0:
+        pf = float("inf") if gross_profit > 0 else 0.0
+    else:
+        pf = gross_profit / gross_loss
+    return {"trades": n, "win_rate": len(wins) / n, "expectancy": sum(pnls) / n,
+            "profit_factor": (None if pf == float("inf") else pf),
+            "profit_factor_raw": pf}
+
+
+def _param_combos(space: dict) -> list[dict]:
+    keys = list(space)
+    return [dict(zip(keys, vals)) for vals in itertools.product(*(space[k] for k in keys))]
+
+
+def walk_forward_eval(df, name: str, cfg, grid: dict | None = None,
+                      train_bars: int = 1500, test_bars: int = 500,
+                      min_trades_train: int = 10) -> dict:
+    """單一策略的 walk-forward 樣本外評估。
+
+    每個 fold：在訓練窗用 grid 選最佳參數（grid=None → 用預設參數），鎖定後只在
+    「未見過的」測試窗回測，蒐集測試窗的平倉交易。跨所有 fold 彙總 OOS 指標——
+    這才是「真 edge」的試金石：訓練窗挑的東西在樣本外還賺不賺。
+    """
+    bounds = _fold_bounds(len(df), train_bars, test_bars)
+    oos_pnls: list[float] = []
+    fold_records, fold_rets = [], []
+    for a, b, c in bounds:
+        train, test = df.iloc[a:b], df.iloc[b:c]
+        params: dict = {}
+        if grid:
+            cand = []
+            for p in _param_combos(grid):
+                try:
+                    cand.append(evaluate(train, name, cfg, p))
+                except Exception:                              # noqa: BLE001
+                    continue
+            best = next((r for r in rank(cand, "expectancy", min_trades_train)
+                         if r["eligible"]), None)
+            params = best["params"] if best else {}
+        try:
+            res = run_backtest(test.copy(), build_strategy(name, **params),
+                               RiskOfficer(cfg), cfg)
+        except Exception:                                      # noqa: BLE001
+            continue
+        pnls = [t["pnl"] for t in res.trades]
+        oos_pnls.extend(pnls)
+        fold_rets.append(res.total_return)
+        fold_records.append({"test_start": str(test.index[0]),
+                             "test_end": str(test.index[-1]), "params": params,
+                             "oos_trades": len(pnls),
+                             "oos_return": round(res.total_return, 4)})
+    m = _metrics_from_pnls(oos_pnls)
+    comp = 1.0
+    for r in fold_rets:
+        comp *= (1.0 + r)
+    return {
+        "strategy": name, "folds": len(fold_records),
+        "oos_trades": m["trades"], "oos_win_rate": round(m["win_rate"], 4),
+        "oos_expectancy": round(m["expectancy"], 4),
+        "oos_profit_factor": (None if m["profit_factor_raw"] == float("inf")
+                              else round(m["profit_factor_raw"], 4)),
+        "oos_profit_factor_raw": m["profit_factor_raw"],
+        "oos_return_compounded": round(comp - 1.0, 4),
+        "fold_records": fold_records,
+    }
+
+
+def run_walkforward_tournament(df, cfg, names: list[str] | None = None,
+                               grids: dict | None = None,
+                               train_bars: int = 1500, test_bars: int = 500,
+                               min_trades_oos: int = 30,
+                               min_trades_train: int = 10) -> dict:
+    """全策略 walk-forward 錦標賽：依【OOS 期望值】排序，挑出樣本外最穩健者。
+
+    grids：{strategy_name: param_space}，有給的策略才做每-fold 參數搜尋，其餘用預設。
+    champion = OOS 排序後第一個（OOS 交易數達標的）合格者；全不達標 → None。
+    """
+    names = names or list(STRATEGIES)
+    grids = grids or {}
+    results = []
+    for name in names:
+        try:
+            results.append(walk_forward_eval(df, name, cfg, grids.get(name),
+                                             train_bars, test_bars, min_trades_train))
+        except Exception as e:                                 # noqa: BLE001
+            results.append({"strategy": name, "oos_trades": 0,
+                            "error": f"{type(e).__name__}: {e}",
+                            "oos_expectancy": float("-inf")})
+    ranked = rank(results, objective="oos_expectancy",
+                  min_trades=min_trades_oos, trades_key="oos_trades")
+    champion = next((r for r in ranked if r["eligible"]), None)
+    return {"objective": "oos_expectancy", "min_trades_oos": min_trades_oos,
+            "train_bars": train_bars, "test_bars": test_bars,
             "n_strategies": len(names), "ranked": ranked, "champion": champion}
 
 

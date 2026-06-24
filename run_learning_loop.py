@@ -26,11 +26,12 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from config import Config
-from backtest.tournament import run_tournament, evaluate, rank
+from backtest.tournament import run_tournament, run_walkforward_tournament, evaluate, rank
 
 FAPI = "https://fapi.binance.com/fapi/v1/klines"
 LOG_PATH = "learning_log.jsonl"
-BEST_PATH = "learning_best.json"
+BEST_PATH = "learning_best.json"           # 樣本內最佳（當前熱門，過擬合風險）
+OOS_BEST_PATH = "learning_oos_best.json"   # walk-forward 樣本外最佳（可信、應據此操作）
 
 # 本輪最佳策略會被丟進對應小網格再搜尋一次（只掃一個策略，控制每輪時間）。
 SWEEP_GRIDS = {
@@ -66,6 +67,22 @@ def _grid(space: dict) -> list[dict]:
     return [dict(zip(keys, vals)) for vals in itertools.product(*(space[k] for k in keys))]
 
 
+def _fold_sizes(n: int) -> tuple[int, int]:
+    """依資料長度自動配置 walk-forward 訓練/測試窗（讓 fold 數合理）。"""
+    test = max(60, n // 8)
+    train = max(250, n // 3)
+    return train, test
+
+
+def _slim_wf(r: dict | None) -> dict | None:
+    """精簡 walk-forward OOS 結果（只留可信指標）。"""
+    if not r:
+        return None
+    return {k: r.get(k) for k in ("strategy", "folds", "oos_trades", "oos_win_rate",
+                                  "oos_expectancy", "oos_profit_factor",
+                                  "oos_return_compounded")}
+
+
 def param_search(df, cfg, name: str, min_trades: int) -> dict | None:
     """對單一策略跑小網格參數搜尋，回傳依期望值最佳的合格組合（無則 None）。"""
     space = SWEEP_GRIDS.get(name)
@@ -83,10 +100,11 @@ def param_search(df, cfg, name: str, min_trades: int) -> dict | None:
 
 
 def one_cycle(symbols, timeframes, fee, min_trades, limit) -> dict:
-    """跑一輪：每個 (symbol, tf) 錦標賽 + 本輪最佳策略的參數搜尋。"""
+    """跑一輪：每個 (symbol, tf) 樣本內錦標賽 + 參數搜尋 + walk-forward 樣本外驗證。"""
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     scans = []
-    overall_best = None        # (expectancy, record) 跨 sym/tf 的最佳正期望 champion
+    overall_best = None        # (expectancy, record) 樣本內最佳（當前熱門）
+    overall_best_oos = None    # (oos_expectancy, record) 樣本外最佳（可信）
 
     for sym in symbols:
         for tf in timeframes:
@@ -116,11 +134,30 @@ def one_cycle(symbols, timeframes, fee, min_trades, limit) -> dict:
                     rec = {"symbol": sym, "tf": tf, "fee": fee, **_slim(cand), "ts": stamp}
                     if overall_best is None or cand["expectancy"] > overall_best[0]:
                         overall_best = (cand["expectancy"], rec)
+
+            # walk-forward 樣本外驗證（預設參數、跨多 fold）——區分真 edge vs 過擬合
+            try:
+                tr, te = _fold_sizes(len(df))
+                wf = run_walkforward_tournament(df, cfg, train_bars=tr, test_bars=te,
+                                                min_trades_oos=max(20, min_trades // 2))
+                wf_champ = wf["champion"]
+                scan["wf_champion"] = _slim_wf(wf_champ)
+                scan["n_oos_positive"] = sum(
+                    1 for r in wf["ranked"]
+                    if r.get("eligible") and (r.get("oos_expectancy") or -9e9) > 0)
+                if wf_champ and wf_champ["oos_expectancy"] > 0:
+                    rec = {"symbol": sym, "tf": tf, "fee": fee,
+                           **_slim_wf(wf_champ), "ts": stamp}
+                    if overall_best_oos is None or wf_champ["oos_expectancy"] > overall_best_oos[0]:
+                        overall_best_oos = (wf_champ["oos_expectancy"], rec)
+            except Exception as e:                              # noqa: BLE001
+                scan["wf_error"] = f"{type(e).__name__}: {e}"
+
             scans.append(scan)
 
-    cycle = {"ts": stamp, "fee": fee, "min_trades": min_trades, "scans": scans,
-             "best_this_cycle": overall_best[1] if overall_best else None}
-    return cycle
+    return {"ts": stamp, "fee": fee, "min_trades": min_trades, "scans": scans,
+            "best_this_cycle": overall_best[1] if overall_best else None,
+            "best_oos_this_cycle": overall_best_oos[1] if overall_best_oos else None}
 
 
 def _slim(r: dict | None) -> dict | None:
@@ -131,22 +168,21 @@ def _slim(r: dict | None) -> dict | None:
                                   "max_drawdown", "sharpe")}
 
 
-def _update_best(cycle: dict) -> dict | None:
-    """把本輪最佳與歷來最佳（learning_best.json）比較，保留期望值最高者。"""
+def _update_best(cand: dict | None, path: str, key: str) -> dict | None:
+    """把候選與歷來最佳（path）比較，保留 key 最高者，回傳目前最佳。"""
     best = None
-    if os.path.exists(BEST_PATH):
+    if os.path.exists(path):
         try:
-            with open(BEST_PATH) as fh:
+            with open(path) as fh:
                 best = json.load(fh)
         except (json.JSONDecodeError, OSError):
             best = None
-    cand = cycle.get("best_this_cycle")
-    if cand and (best is None or cand["expectancy"] > best.get("expectancy", -9e9)):
+    if cand and (best is None or cand.get(key, -9e9) > best.get(key, -9e9)):
         best = cand
-        tmp = BEST_PATH + ".tmp"
+        tmp = path + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(best, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, BEST_PATH)
+        os.replace(tmp, path)
     return best
 
 
@@ -177,20 +213,23 @@ def main():
         try:
             cycle = one_cycle(symbols, timeframes, args.fee, args.min_trades, args.limit)
             _append_log(cycle)
-            best = _update_best(cycle)
-            btc = cycle.get("best_this_cycle")
+            best = _update_best(cycle.get("best_this_cycle"), BEST_PATH, "expectancy")
+            best_oos = _update_best(cycle.get("best_oos_this_cycle"), OOS_BEST_PATH, "oos_expectancy")
             line = (f"[#{cycle_i} {cycle['ts']}] " +
                     "; ".join(f"{s['symbol']}/{s['tf']}:"
                               f"{(s.get('champion') or {}).get('strategy','—')}"
-                              f"({s.get('n_positive',0)}+/{s.get('n_eligible',0)})"
+                              f"(IS{s.get('n_positive',0)}+/OOS{s.get('n_oos_positive',0)}+)"
                               for s in cycle["scans"] if "error" not in s))
             print(line, flush=True)
-            if btc:
-                print(f"    本輪最佳: {btc['symbol']}/{btc['tf']} {btc['strategy']} "
-                      f"E={btc['expectancy']} PF={btc['profit_factor']} win={btc['win_rate']}", flush=True)
-            if best:
-                print(f"    歷來最佳: {best['symbol']}/{best['tf']} {best['strategy']} "
-                      f"E={best['expectancy']} PF={best['profit_factor']} win={best['win_rate']}", flush=True)
+            bo = cycle.get("best_oos_this_cycle")
+            if bo:
+                print(f"    本輪OOS最佳: {bo['symbol']}/{bo['tf']} {bo['strategy']} "
+                      f"OOS_E={bo['oos_expectancy']} PF={bo['oos_profit_factor']} "
+                      f"win={bo['oos_win_rate']} ({bo['folds']}folds)", flush=True)
+            if best_oos:
+                print(f"    歷來OOS最佳★: {best_oos['symbol']}/{best_oos['tf']} {best_oos['strategy']} "
+                      f"OOS_E={best_oos['oos_expectancy']} PF={best_oos['oos_profit_factor']} "
+                      f"win={best_oos['oos_win_rate']}", flush=True)
         except Exception:                                       # noqa: BLE001
             print("[錯誤]", traceback.format_exc(), flush=True)
 

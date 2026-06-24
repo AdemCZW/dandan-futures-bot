@@ -43,3 +43,4 @@ learning_log.jsonl
 learning_best.json
 learning_loop.out
 tournament_result.json
+learning_oos_best.json

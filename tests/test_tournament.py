@@ -6,6 +6,7 @@
 """
 import numpy as np
 import pandas as pd
+import pytest
 
 from backtest.tournament import evaluate, rank, run_tournament
 from config import Config
@@ -99,3 +100,74 @@ def test_run_tournament_survives_strategy_error():
                          names=["ema_cross", "donchian"], min_trades=0)
     names = {r["strategy"] for r in res["ranked"]}
     assert names == {"ema_cross", "donchian"}
+
+
+# =========================================================================== #
+# Walk-forward（樣本外）驗證 — 區分「真 edge vs 過擬合」。
+#   訓練窗選參數 → 鎖定 → 只在後續未見過的測試窗評分 → 跨 fold 彙總 OOS。
+# =========================================================================== #
+from backtest.tournament import (
+    _fold_bounds, _metrics_from_pnls, walk_forward_eval, run_walkforward_tournament,
+)
+
+
+def test_fold_bounds_non_overlapping_test_windows():
+    # n=300, train=120, test=40 → 測試窗不重疊、前推一個測試窗、訓練永遠在測試之前
+    bounds = _fold_bounds(300, 120, 40)
+    assert bounds == [(0, 120, 160), (40, 160, 200), (80, 200, 240), (120, 240, 280)]
+    for a, b, c in bounds:
+        assert a < b < c          # 訓練 [a,b) 在測試 [b,c) 之前（無 look-ahead）
+
+
+def test_fold_bounds_empty_when_too_short():
+    assert _fold_bounds(100, 120, 40) == []
+
+
+def test_metrics_from_pnls_basic():
+    m = _metrics_from_pnls([10.0, -5.0, 20.0, -3.0])
+    assert m["trades"] == 4
+    assert m["win_rate"] == 0.5
+    assert m["expectancy"] == pytest.approx(5.5)
+    assert m["profit_factor_raw"] == pytest.approx(30.0 / 8.0)
+
+
+def test_metrics_from_pnls_empty_and_all_wins():
+    empty = _metrics_from_pnls([])
+    assert empty["trades"] == 0 and empty["expectancy"] == 0.0 and empty["profit_factor_raw"] == 0.0
+    allwin = _metrics_from_pnls([5.0, 10.0])
+    assert allwin["profit_factor_raw"] == float("inf")
+
+
+def test_walk_forward_eval_returns_oos_summary():
+    df = _synth_df(n=400)
+    wf = walk_forward_eval(df, "ema_cross", Config(interval="5m"),
+                           grid=None, train_bars=120, test_bars=40)
+    required = {"strategy", "folds", "oos_trades", "oos_win_rate", "oos_expectancy",
+                "oos_profit_factor", "oos_profit_factor_raw", "oos_return_compounded",
+                "fold_records"}
+    assert required <= set(wf)
+    assert wf["folds"] >= 1
+    assert wf["strategy"] == "ema_cross"
+    # OOS 交易總數 = 各 fold 測試窗交易數之和
+    assert wf["oos_trades"] == sum(f["oos_trades"] for f in wf["fold_records"])
+
+
+def test_walk_forward_eval_with_grid_picks_params_per_fold():
+    df = _synth_df(n=400)
+    wf = walk_forward_eval(df, "supertrend", Config(interval="5m"),
+                           grid={"period": [7, 10], "multiplier": [2.0, 3.0]},
+                           train_bars=120, test_bars=40, min_trades_train=1)
+    # 每個 fold 都鎖定了一組（在訓練窗選出的）參數
+    assert all("params" in f for f in wf["fold_records"])
+
+
+def test_run_walkforward_tournament_ranks_by_oos_expectancy():
+    df = _synth_df(n=400)
+    res = run_walkforward_tournament(df, Config(interval="5m"),
+                                     names=["ema_cross", "donchian", "supertrend"],
+                                     train_bars=120, test_bars=40, min_trades_oos=0)
+    assert len(res["ranked"]) == 3
+    scores = [r["score"] for r in res["ranked"]]
+    assert scores == sorted(scores, reverse=True)
+    if res["champion"]:
+        assert res["champion"]["strategy"] == res["ranked"][0]["strategy"]
