@@ -83,6 +83,18 @@ def fetch_market_klines(source: str, symbol: str, interval: str,
     return fetch_klines(client, symbol, interval, limit)
 
 
+def _apply_trailing_long(sl: float, highest: float, bar_high: float,
+                         atr, risk) -> tuple:
+    """每根 K 線更新多單 Chandelier 追蹤停損（只升不降）。
+
+    Returns (new_sl, new_highest).
+    atr=None 或 atr<=0 時停損不更新（ATR 缺值 fallback）。
+    """
+    new_highest = max(highest, bar_high)
+    new_sl = risk.update_trailing_stop(sl, new_highest, atr, 1)
+    return new_sl, new_highest
+
+
 def _save(state: dict) -> None:
     tmp = STATE_PATH + ".tmp"
     with open(tmp, "w") as fh:
@@ -135,6 +147,7 @@ def main():
 
     in_position = False
     entry_price = sl = tp = 0.0
+    highest = 0.0               # 進場後最高高價（Chandelier 追蹤停損用）
     last_bar = None
     last_decision = None        # 最近一根的逐關 SOP 決策（供即時監控顯示）
 
@@ -145,11 +158,12 @@ def main():
         broker.base = st.get("base", broker.base)
         in_position = st.get("in_position", False)
         entry_price, sl, tp = st.get("entry_price", 0.0), st.get("sl", 0.0), st.get("tp", 0.0)
+        highest = st.get("highest", entry_price if in_position else 0.0)
         print(f"[還原] 現金 {broker.cash:.2f} / 持幣 {broker.base:.6f} / 持倉 {in_position}")
 
     def persist(price=None):
         _save({"cash": broker.cash, "base": broker.base, "in_position": in_position,
-               "entry_price": entry_price, "sl": sl, "tp": tp,
+               "entry_price": entry_price, "sl": sl, "tp": tp, "highest": highest,
                "symbol": cfg.symbol, "strategy": cfg.strategy, "interval": cfg.interval,
                "last_price": price, "poll": args.poll, "last_decision": last_decision,
                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
@@ -190,8 +204,17 @@ def main():
                 journal.log("exit_sltp", r["fill"], r["qty"], (r["fill"] - entry_price) * r["qty"], ts=bar_time)
                 acts.append({"act": "exit_sltp", "price": round(r["fill"], 2)})
                 in_position = False
+                highest = 0.0
                 stopped = True
                 print(f"[{bar_time}] 停損/停利出場 @ {r['fill']:.2f} | 權益 {broker.equity(price):.2f}")
+
+            # Chandelier 追蹤停損：每根新 K 線更新（只升不降），讓停損隨行情移動
+            if in_position:
+                atr_bar = float(row["atr"]) if "atr" in row and not pd.isna(row["atr"]) else None
+                prev_sl = sl
+                sl, highest = _apply_trailing_long(sl, highest, float(row["high"]), atr_bar, risk)
+                if sl != prev_sl:
+                    print(f"[{bar_time}] 追蹤停損上移 {prev_sl:.2f} → {sl:.2f}（最高 {highest:.2f}，ATR {atr_bar}）")
 
             if anomaly:                                  # 暴量：只抑制「新進場/信號進出」，不碰上面的保護性停損
                 acts.append({"act": "skip_anomaly"})
@@ -210,6 +233,7 @@ def main():
                         r = broker.market_buy(decision.quantity, price)
                         entry_price = r["fill"]
                         sl, tp = risk.exit_levels(entry_price, atr=atr_val)
+                        highest = float(row["high"])   # Chandelier 起點：進場根的最高價
                         in_position = True
                         journal.log("entry", entry_price, r["qty"], 0.0, ts=bar_time)
                         acts.append({"act": "entry", "price": round(entry_price, 2), "qty": round(r["qty"], 6), "sl": round(sl, 2), "tp": round(tp, 2)})
@@ -223,6 +247,7 @@ def main():
                     journal.log("exit_signal", r["fill"], r["qty"], (r["fill"] - entry_price) * r["qty"], ts=bar_time)
                     acts.append({"act": "exit_signal", "price": round(r["fill"], 2)})
                     in_position = False
+                    highest = 0.0
                     print(f"[{bar_time}] 信號出場 @ {r['fill']:.2f} | 權益 {broker.equity(price):.2f}")
                 else:
                     acts.append({"act": "hold" if in_position else "flat"})
