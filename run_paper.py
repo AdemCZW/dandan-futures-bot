@@ -28,6 +28,60 @@ from core.trade_journal import TradeJournal
 
 STATE_PATH = "bot_state_paper.json"
 
+# 各時框的合理輪詢間隔（秒）：時框越長、輪詢越疏（4h 不需每 30 秒打 API）
+POLL_BY_TF = {"1m": 15, "5m": 30, "15m": 60, "30m": 120, "1h": 120, "4h": 300, "1d": 600}
+
+
+def load_champion(path: str = "learning_oos_best.json",
+                  fallback_strategy: str = "of_momentum",
+                  fallback_interval: str = "4h") -> dict:
+    """讀 learning_oos_best.json（walk-forward 樣本外最佳），回傳前進驗證要用的配置。
+
+    檔案不存在/損毀/格式不符 → 退回 fallback（of_momentum / 4h 是 OOS 最穩健者）。
+    回傳 {strategy, interval, params, symbol, source, oos}。
+    """
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if not isinstance(data, dict) or "strategy" not in data:
+        return {"strategy": fallback_strategy, "interval": fallback_interval,
+                "params": {}, "symbol": "BTCUSDT", "source": "fallback", "oos": {}}
+    return {
+        "strategy": data["strategy"],
+        "interval": data.get("tf", fallback_interval),
+        "params": data.get("params") or {},
+        "symbol": data.get("symbol", "BTCUSDT"),
+        "source": "learning_oos_best",
+        "oos": {k: data.get(k) for k in ("oos_expectancy", "oos_profit_factor",
+                                         "oos_win_rate", "folds")},
+    }
+
+
+def fetch_market_klines(source: str, symbol: str, interval: str,
+                        limit: int = 300, client=None):
+    """抓 K 線。source='mainnet' → 幣安公開【合約真實行情】（免金鑰、不下單）；
+    其餘 → 既有 testnet client 路徑。兩者欄位相同（含 taker_base，供訂單流策略用）。"""
+    if source == "mainnet":
+        import urllib.request
+        url = (f"https://fapi.binance.com/fapi/v1/klines"
+               f"?symbol={symbol}&interval={interval}&limit={min(limit, 1500)}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            raw = json.loads(r.read())
+        cols = ["open_time", "open", "high", "low", "close", "volume", "close_time",
+                "quote_volume", "trades", "taker_base", "taker_quote", "ignore"]
+        df = pd.DataFrame(raw, columns=cols)
+        for c in ("open", "high", "low", "close", "volume", "taker_base"):
+            df[c] = df[c].astype(float)
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+        return df.set_index("open_time")[["open", "high", "low", "close", "volume", "taker_base"]]
+    from core.market_analyst import fetch_klines
+    return fetch_klines(client, symbol, interval, limit)
+
 
 def _save(state: dict) -> None:
     tmp = STATE_PATH + ".tmp"
@@ -52,12 +106,27 @@ def main():
     ap.add_argument("--strategy", default=cfg.strategy)
     ap.add_argument("--symbol", default=cfg.symbol)
     ap.add_argument("--interval", default=cfg.interval)
-    ap.add_argument("--poll", type=int, default=cfg.poll_seconds)
+    ap.add_argument("--poll", type=int, default=None, help="輪詢秒數；未給則依時框自動")
     ap.add_argument("--equity", type=float, default=cfg.start_equity)
+    ap.add_argument("--source", choices=["testnet", "mainnet"], default="testnet",
+                    help="mainnet＝幣安公開合約真實行情（仍只本地模擬成交、不下單）")
+    ap.add_argument("--from-best", action="store_true",
+                    help="從 learning_oos_best.json 載入 walk-forward 驗證過的冠軍配置")
+    ap.add_argument("--max-iters", type=int, default=0, help="跑 N 圈後停（0＝無限，供煙霧測試）")
     args = ap.parse_args()
+
+    champ = None
+    if args.from_best:
+        champ = load_champion()
+        args.strategy, args.interval, args.symbol = champ["strategy"], champ["interval"], champ["symbol"]
+        cfg.strategy_params = champ["params"]
+        print(f"[冠軍] 採用 {champ['source']}：{champ['strategy']} @ {champ['interval']} "
+              f"params={champ['params']} OOS={champ.get('oos')}")
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
 
-    client = make_client("", "", testnet=True)        # 公開行情免金鑰
+    poll = args.poll if args.poll else POLL_BY_TF.get(cfg.interval, 30)
+    args.poll = poll
+    client = make_client("", "", testnet=True) if args.source == "testnet" else None
     strat = build_strategy(cfg.strategy, **cfg.strategy_params)
     risk = RiskOfficer(cfg)
     broker = PaperBroker(cfg, quote_start=args.equity)
@@ -85,13 +154,20 @@ def main():
                "last_price": price, "poll": args.poll, "last_decision": last_decision,
                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
 
-    print(f"[啟動] Paper 模擬盤（真實行情·本地成交·免金鑰） | {cfg.symbol} {cfg.interval} | "
-          f"策略 {cfg.strategy} | 起始 {broker.equity(0):.2f} {cfg.quote_asset}")
+    print(f"[啟動] Paper 模擬盤（{args.source} 真實行情·本地成交·免金鑰·零真錢） | "
+          f"{cfg.symbol} {cfg.interval} | 策略 {cfg.strategy} | poll {poll}s | "
+          f"起始 {broker.equity(0):.2f} {cfg.quote_asset}")
     persist()
 
+    iters = 0
     while True:
+        if args.max_iters and iters >= args.max_iters:
+            print(f"[結束] 達 max-iters={args.max_iters}")
+            break
+        iters += 1
         try:
-            df = strat.prepare(fetch_klines(client, cfg.symbol, cfg.interval, 200)).dropna()
+            df = strat.prepare(
+                fetch_market_klines(args.source, cfg.symbol, cfg.interval, 300, client)).dropna()
             bar_time = df.index[-2]
             if bar_time == last_bar:
                 persist(float(df["close"].iloc[-1]))   # 心跳：每次輪詢刷新現價+時間戳供即時監控

@@ -44,3 +44,5 @@ learning_best.json
 learning_loop.out
 tournament_result.json
 learning_oos_best.json
+paper_forward.out
+bot_state_paper.json.bak
