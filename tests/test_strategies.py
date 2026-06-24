@@ -998,10 +998,10 @@ def test_rsi2_nan_holds_position(pos):
 
 
 # --- 註冊表擴充為 12 個策略 -------------------------------------------------
-def test_strategies_registry_has_twelve_keys():
+def test_strategies_registry_has_fourteen_keys():
     assert set(STRATEGIES) == {
         "ema_cross", "zscore_revert", "zscore_ls", "fib_retracement",
         "supertrend", "donchian", "of_momentum",
         "vwap_band_reversion", "heikin_ashi_momo", "macd_scalp",
-        "bb_squeeze_breakout", "rsi2_connors",
+        "bb_squeeze_breakout", "rsi2_connors", "smc_structure", "fib_channel",
     }

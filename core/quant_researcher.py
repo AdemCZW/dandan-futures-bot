@@ -679,6 +679,99 @@ class Rsi2ConnorsStrategy(Strategy):
         return 0
 
 
+class SmcStructureStrategy(Strategy):
+    """Smart Money Concept — Break of Structure + Fair Value Gap（多空雙向）。
+
+    看漲 BOS（close 突破最近已確認 swing high）且有看漲 FVG → 做多；
+    看跌 BOS（close 跌破最近已確認 swing low）且有看跌 FVG → 做空；
+    反向 BOS 出現時平倉。
+    regime_pref='trend'：只在趨勢盤操作，避免盤整盤假突破。
+    """
+    name = "smc_structure"
+    defaults = {"pivot_left": 5, "pivot_right": 5, "atr_period": 14,
+                "require_fvg": True}
+    allow_short = True
+    regime_pref = "trend"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out = se.smc_levels(out, pivot_left=int(self.params["pivot_left"]),
+                            pivot_right=int(self.params["pivot_right"]))
+        out["atr"] = se.atr(out, int(self.params["atr_period"]))
+        return self._prepare_regime(out)
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        bos_bull = _num(g("bos_bull")) or 0.0
+        bos_bear = _num(g("bos_bear")) or 0.0
+        fvg_bull = _num(g("fvg_bull")) or 0.0
+        fvg_bear = _num(g("fvg_bear")) or 0.0
+        require_fvg = bool(self.params.get("require_fvg", True))
+
+        if position == 1:
+            return 0 if bos_bear else 1
+        if position == -1:
+            return 0 if bos_bull else -1
+
+        if not self._regime_ok(row):
+            return 0
+
+        if bos_bull and (fvg_bull or not require_fvg):
+            return 1
+        if bos_bear and (fvg_bear or not require_fvg):
+            return -1
+        return 0
+
+
+class FibChannelStrategy(Strategy):
+    """費波那契斜向通道順勢策略（多空雙向）。
+
+    基線：最近兩個確認 swing low 連線延伸；通道高度：兩 pivot 間 high 超出基線的最大值。
+    進場：收盤在下帶區（fib_ch_pos < entry_zone）做多、上帶區（>1-entry_zone）做空。
+    出場：到達對面出場區或突破通道外側。
+    """
+    name = "fib_channel"
+    defaults = {"pivot_left": 5, "pivot_right": 5, "atr_period": 14,
+                "atr_mult": 3.0, "entry_zone": 0.30, "exit_zone": 0.80}
+    allow_short = True
+    regime_pref = "trend"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = se.fib_channel_levels(df.copy(),
+                                    int(self.params["pivot_left"]),
+                                    int(self.params["pivot_right"]),
+                                    int(self.params["atr_period"]),
+                                    float(self.params["atr_mult"]))
+        out["atr"] = se.atr(out, int(self.params["atr_period"]))
+        return self._prepare_regime(out)
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        pos_in_ch = _num(g("fib_ch_pos"))
+
+        if pos_in_ch is None:
+            return 0 if position == 0 else position
+
+        entry_z = float(self.params.get("entry_zone", 0.30))
+        exit_z  = float(self.params.get("exit_zone",  0.80))
+
+        if position == 1:
+            # 持多：到上帶或跌破通道 → 平倉
+            return 0 if (pos_in_ch > exit_z or pos_in_ch < 0) else 1
+        if position == -1:
+            # 持空：回到下帶或突破通道 → 平倉
+            return 0 if (pos_in_ch < (1.0 - exit_z) or pos_in_ch > 1) else -1
+
+        if not self._regime_ok(row):
+            return 0
+
+        if pos_in_ch < entry_z:
+            return 1
+        if pos_in_ch > (1.0 - entry_z):
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -692,6 +785,8 @@ STRATEGIES = {
     MacdScalpStrategy.name: MacdScalpStrategy,
     BollingerSqueezeStrategy.name: BollingerSqueezeStrategy,
     Rsi2ConnorsStrategy.name: Rsi2ConnorsStrategy,
+    SmcStructureStrategy.name: SmcStructureStrategy,
+    FibChannelStrategy.name: FibChannelStrategy,
 }
 
 

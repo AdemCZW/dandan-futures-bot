@@ -28,6 +28,8 @@ class BotState:
     symbol: str = ""
     strategy: str = ""
     updated_at: str = ""
+    cb_consecutive_losses: int = 0    # Circuit Breaker：連續虧損計數
+    cb_paused_until: str = ""         # Circuit Breaker：暫停到期時間（ISO 字串，空=未暫停）
 
     def save(self, path: str) -> None:
         """原子寫入：先寫 .tmp 再 rename，避免崩潰時寫到一半留下半截檔。"""

@@ -15,6 +15,10 @@ const OVERLAYS = [
   { key: 'ema_fast',        label: 'EMA 9',         color: '#ffa657', width: 1, style: 0, defOn: false, group: '均線' },
   { key: 'donchian_upper',  label: 'DC 上軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
   { key: 'donchian_lower',  label: 'DC 下軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
+  { key: 'fib_ch_0',        label: 'FC 0%',          color: '#388bfd', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
+  { key: 'fib_ch_382',      label: 'FC 38.2%',       color: '#3fb950', width: 1, style: 1, defOn: false, group: 'Fib 通道' },
+  { key: 'fib_ch_618',      label: 'FC 61.8%',       color: '#ffa657', width: 1, style: 1, defOn: false, group: 'Fib 通道' },
+  { key: 'fib_ch_100',      label: 'FC 100%',        color: '#f85149', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
 ]
 
 const ALL_KEYS = OVERLAYS.map(o => o.key)

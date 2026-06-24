@@ -33,6 +33,7 @@ from core.risk_officer import RiskOfficer
 from core.futures_execution_engineer import FuturesExecutionEngineer
 from core.trade_journal import TradeJournal
 from core.bot_state import BotState
+from core.circuit_breaker import CircuitBreaker
 
 STATE_PATH = "bot_state_futures.json"
 
@@ -56,7 +57,8 @@ def parse_bot_params(raw: str | None) -> dict:
 class FuturesLiveTrader:
     """合約多/空決策 + 下單 + 狀態持久化。dir：+1 多 / -1 空 / 0 空手。可獨立測試。"""
 
-    def __init__(self, cfg, client, strat, risk, execu, journal):
+    def __init__(self, cfg, client, strat, risk, execu, journal,
+                 cb_max_losses: int = 3, cb_pause_hours: float = 24):
         self.cfg, self.client, self.strat = cfg, client, strat
         self.risk, self.execu, self.journal = risk, execu, journal
         self.dir = 0
@@ -64,11 +66,15 @@ class FuturesLiveTrader:
         self.qty = 0.0                      # 本地追蹤的持倉量（避免開倉後立刻讀帶號倉位的最終一致性問題）
         self._last_risk = None              # _open() 執行後暫存風控決策供 SOP 讀取
         self.peak = self.trough = 0.0       # 進場後極值（Chandelier 追蹤停損用）
+        self.cb = CircuitBreaker(max_losses=cb_max_losses, pause_hours=cb_pause_hours)
 
     def _save(self) -> None:
+        cb_dict = self.cb.to_dict()
         BotState(in_position=self.dir != 0, direction=self.dir, entry_price=self.entry_price,
                  sl=self.sl, tp=self.tp, qty=abs(self.qty),
-                 symbol=self.cfg.symbol, strategy=self.cfg.strategy).save(STATE_PATH)
+                 symbol=self.cfg.symbol, strategy=self.cfg.strategy,
+                 cb_consecutive_losses=cb_dict["consecutive_losses"],
+                 cb_paused_until=cb_dict["paused_until"] or "").save(STATE_PATH)
 
     def _latest_atr(self):
         """抓最近已收盤那根的 ATR（供 restore 重建停損用）；失敗則回 None 退回固定百分比。"""
@@ -107,6 +113,12 @@ class FuturesLiveTrader:
             self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
             self.peak = self.trough = 0.0
             msg = "空手啟動（合約無未平倉部位）"
+        # 從狀態檔還原 Circuit Breaker
+        st = BotState.load(STATE_PATH)
+        self.cb = CircuitBreaker.from_dict(
+            {"consecutive_losses": st.cb_consecutive_losses,
+             "paused_until": st.cb_paused_until or None},
+            max_losses=self.cb.max_losses, pause_hours=self.cb.pause_hours)
         self._save()
         print(f"[狀態] {msg}")
 
@@ -116,6 +128,7 @@ class FuturesLiveTrader:
             self.execu.close(abs(amt), self.dir)
             pnl = (price - self.entry_price) * amt    # amt 帶號 → 多空 pnl 方向自動正確
             self.journal.log(reason, price, abs(amt), pnl, ts=bar_time)
+            self.cb.record_trade(pnl)                 # Circuit Breaker 記錄本筆損益
             print(f"[{bar_time}] {reason} @ {price:.2f}")
         self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
         self.peak = self.trough = 0.0
@@ -153,6 +166,10 @@ class FuturesLiveTrader:
               f"(SL {self.sl:.2f} / TP {self.tp:.2f})")
 
     def on_bar_close(self, bar_time) -> None:
+        if self.cb.is_paused():
+            print(f"[{bar_time}] [熔斷] 暫停中，跳過本輪決策")
+            return
+
         cfg = self.cfg
         df = self.strat.prepare(
             fetch_klines(self.client, cfg.symbol, cfg.interval, 200, futures=True)).dropna()
@@ -375,6 +392,12 @@ def main():
                     help="每筆最大倉位（USDT）。由帳戶餘額動態算出 max_position_pct。")
     ap.add_argument("--params", default=os.getenv("BOT_PARAMS", ""),
                     help='策略參數 JSON，例如 \'{"use_htf_filter": true, "htf_ema_period": 200}\'')
+    ap.add_argument("--cb-max-losses", type=int,
+                    default=int(os.getenv("CB_MAX_LOSSES", "3")),
+                    help="Circuit Breaker：連續虧損幾筆後暫停（預設 3）")
+    ap.add_argument("--cb-pause-hours", type=float,
+                    default=float(os.getenv("CB_PAUSE_HOURS", "24")),
+                    help="Circuit Breaker：暫停幾小時（預設 24）")
     args = ap.parse_args()
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
     cfg.futures_leverage, cfg.poll_seconds = args.leverage, args.poll
@@ -403,7 +426,9 @@ def main():
         risk = RiskOfficer(cfg)
         journal = TradeJournal(db_path="trades.db", csv_path="trades_futures.csv",
                                mode="live_futures_testnet", symbol=cfg.symbol, strategy=cfg.strategy)
-        trader = FuturesLiveTrader(cfg, client, strat, risk, execu, journal)
+        trader = FuturesLiveTrader(cfg, client, strat, risk, execu, journal,
+                                   cb_max_losses=args.cb_max_losses,
+                                   cb_pause_hours=args.cb_pause_hours)
 
         budget_msg = f" | 預算上限 {args.budget:.0f}U/筆（max_pos={cfg.max_position_pct:.1%}）" if args.budget else ""
         print(f"[啟動] 合約測試網模擬盤（多/空）| {cfg.symbol} {cfg.interval} | "
