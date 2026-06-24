@@ -185,8 +185,8 @@ def run_optimize_api(strategy: str, source: str = "synthetic",
 
 
 _RAILWAY_BOT_URL = os.getenv("RAILWAY_BOT_URL", "").rstrip("/")
-# 第二台對照實驗 bot（短線 donchian 15m）的 Railway URL，供 /api/live2 顯示並行對照組。
 _RAILWAY_BOT_URL_2 = os.getenv("RAILWAY_BOT_URL_2", "").rstrip("/")
+_RAILWAY_BOT_URL_3 = os.getenv("RAILWAY_BOT_URL_3", "").rstrip("/")
 
 
 def _fetch_railway_trades(limit: int = 50, mode: str | None = None,

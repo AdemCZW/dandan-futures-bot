@@ -106,10 +106,20 @@ def live():
 
 @app.get("/api/live2")
 def live2():
-    """第二台 bot（短線 donchian 對照實驗）的即時狀態。未設定 RAILWAY_BOT_URL_2 → active=False。"""
+    """第二台 bot 的即時狀態。未設定 RAILWAY_BOT_URL_2 → configured=False。"""
     if not service._RAILWAY_BOT_URL_2:
         return {"active": False, "configured": False}
     out = service.live_status(railway_url=service._RAILWAY_BOT_URL_2)
+    out["configured"] = True
+    return out
+
+
+@app.get("/api/live3")
+def live3():
+    """第三台 bot 的即時狀態。未設定 RAILWAY_BOT_URL_3 → configured=False。"""
+    if not service._RAILWAY_BOT_URL_3:
+        return {"active": False, "configured": False}
+    out = service.live_status(railway_url=service._RAILWAY_BOT_URL_3)
     out["configured"] = True
     return out
 

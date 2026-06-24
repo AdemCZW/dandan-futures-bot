@@ -29,6 +29,7 @@ export const api = {
     get(`/api/trades?limit=${limit}${mode ? `&mode=${encodeURIComponent(mode)}` : ''}`),
   live: () => get('/api/live'),
   live2: () => get('/api/live2'),
+  live3: () => get('/api/live3'),
   whales: (symbol = 'BTCUSDT', period = '5m', limit = 30) =>
     get(`/api/whales?symbol=${symbol}&period=${period}&limit=${limit}`),
   hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),

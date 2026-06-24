@@ -46,28 +46,26 @@ function Stg({ n, role, children }) {
   )
 }
 
-function ExperimentStrip({ e }) {
+function ExperimentStrip({ e, label = '對照組', note = '', color = 'var(--accent2, #e0397a)' }) {
   if (!e || !e.configured || !e.active) return null
   const posLabel = e.in_position ? (e.direction === -1 ? '持空' : '持多') : '空手'
   const pnl = e.unrealized_pnl
   return (
-    <div className="panel" style={{ borderLeft: '3px solid var(--accent2, #e0397a)' }}>
+    <div className="panel" style={{ borderLeft: `3px solid ${color}` }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <span className="badge badge-flat" style={{ borderColor: 'var(--accent2,#e0397a)', color: 'var(--accent2,#e0397a)' }}>
-          對照實驗
+        <span className="badge badge-flat" style={{ borderColor: color, color }}>
+          Bot #{label}
         </span>
-        <h3 style={{ margin: 0 }}>短線對照組</h3>
+        <h3 style={{ margin: 0 }}>{e.strategy}</h3>
         <span className="muted" style={{ fontSize: 12 }}>
-          {e.strategy} · {e.symbol} {e.interval} · <span className="num">{posLabel}</span>
+          {e.symbol} {e.interval} · <span className="num">{posLabel}</span>
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 12 }} className="muted">
           權益 <span className="num">{e.equity != null ? e.equity.toFixed(2) : '—'}</span>
           {pnl != null && <> · 未實現 <span className={`num ${cls(pnl)}`}>{pnl >= 0 ? '+' : ''}{pnl}</span></>}
         </span>
       </div>
-      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-        ⚠ 已驗證【無 OOS edge】的短線策略，純為與上方長線 supertrend 4h 並行對照觀察（預期偏弱/虧損）。
-      </div>
+      {note && <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>{note}</div>}
     </div>
   )
 }
@@ -75,6 +73,7 @@ function ExperimentStrip({ e }) {
 export default function Live() {
   const [d, setD] = useState(null)
   const [e2, setE2] = useState(null)
+  const [e3, setE3] = useState(null)
   const [err, setErr] = useState('')
   const [tick, setTick] = useState(0)
   const timer = useRef(null)
@@ -82,7 +81,8 @@ export default function Live() {
   async function load() {
     try { setD(await api.live()); setErr('') }
     catch (e) { setErr(String(e.message || e)) }
-    try { setE2(await api.live2()) } catch { /* 對照組未設定時忽略 */ }
+    try { setE2(await api.live2()) } catch { /* 未設定時忽略 */ }
+    try { setE3(await api.live3()) } catch { /* 未設定時忽略 */ }
   }
 
   useEffect(() => {
@@ -119,7 +119,8 @@ export default function Live() {
         )}
       </div>
 
-      <ExperimentStrip e={e2} />
+      <ExperimentStrip e={e2} label="2" color="#e0397a" note="Bot 2 — 配置於 RAILWAY_BOT_URL_2" />
+      <ExperimentStrip e={e3} label="3" color="#9b59b6" note="Bot 3 — 配置於 RAILWAY_BOT_URL_3" />
 
       {d && d.active && (
         <>
