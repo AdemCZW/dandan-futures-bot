@@ -69,6 +69,10 @@ class FuturesLiveTrader:
         self._last_risk = None              # _open() 執行後暫存風控決策供 SOP 讀取
         self.peak = self.trough = 0.0       # 進場後極值（Chandelier 追蹤停損用）
         self.cb = CircuitBreaker(max_losses=cb_max_losses, pause_hours=cb_pause_hours)
+        # PortfolioGuard：跨 bot 同向暴露控制；max_notional 由 env 設定（預設 15000 USDT）
+        from core.portfolio_guard import PortfolioGuard
+        self._guard = PortfolioGuard()
+        self._guard_max = float(os.getenv("PORTFOLIO_MAX_NOTIONAL", "15000"))
         # ML Filter：若模型檔存在則載入；不存在則靜默跳過（不影響原有邏輯）
         self._ml_model    = None
         self._ml_threshold = ml_threshold
@@ -144,6 +148,7 @@ class FuturesLiveTrader:
             print(f"[{bar_time}] {reason} @ {price:.2f}")
         self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
         self.peak = self.trough = 0.0
+        self._guard.clear_position(self.cfg.strategy)
         self._save()
 
     def _kelly_pct(self) -> float | None:
@@ -164,6 +169,12 @@ class FuturesLiveTrader:
         kelly_pct = self._kelly_pct()
         decision = self.risk.check_entry(bal, price, bar_time, direction=direction, atr=atr,
                                          kelly_pct=kelly_pct)
+        if decision.allow:
+            notional = decision.quantity * price
+            ok, reason = self._guard.check_exposure(
+                self.cfg.strategy, direction, notional, self._guard_max)
+            if not ok:
+                decision = type(decision)(False, 0.0, reason)
         kelly_tag = f" Kelly={kelly_pct:.1%}" if kelly_pct is not None else ""
         self._last_risk = {"allow": bool(decision.allow),
                            "qty": round(float(decision.quantity), 6),
@@ -187,6 +198,8 @@ class FuturesLiveTrader:
         self.peak = self.trough = price             # Chandelier 進場後極值起點
         self.sl, self.tp = self.risk.exit_levels(price, direction, atr=atr)
         self.journal.log(side, price, decision.quantity, 0.0, ts=bar_time)
+        self._guard.upsert_position(self.cfg.strategy, self.cfg.symbol,
+                                    direction, decision.quantity, price)
         self._save()
         verb = "進場做多" if direction == 1 else "進場做空"
         print(f"[{bar_time}] {verb} ~{decision.quantity} @ {price:.2f} "
