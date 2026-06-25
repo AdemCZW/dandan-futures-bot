@@ -149,6 +149,15 @@ def klines(symbol: str = "BTCUSDT", interval: str = "4h",
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+@app.get("/api/trade-markers")
+def trade_markers(symbol: str = "BTCUSDT", interval: str = "4h", limit: int = 300):
+    """機器人實際下單點（進出場），對齊 K 棒時間桶、依 bot/strategy 分組供上色。"""
+    try:
+        return service.trade_markers(symbol=symbol, interval=interval, limit=limit)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.get("/api/price")
 def price(symbol: str = "BTCUSDT"):
     return service.mark_price(symbol)

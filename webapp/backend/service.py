@@ -47,6 +47,84 @@ def _equity_points(eq, max_points: int = 600) -> list[dict]:
     return pts
 
 
+_INTERVAL_SECONDS = {
+    "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "12h": 43200,
+    "1d": 86400, "1w": 604800,
+}
+
+
+def _interval_seconds(interval: str) -> int:
+    """K 線週期字串 → 秒；未知一律退回 1 小時。"""
+    return _INTERVAL_SECONDS.get(interval, 3600)
+
+
+def _parse_ts_unix(ts: str) -> int | None:
+    """交易時間字串 → UTC unix 秒。支援 'YYYY-MM-DD HH:MM:SS' 與 ISO8601；失敗回 None。"""
+    from datetime import datetime, timezone
+    s = str(ts).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)           # 同時吃 'YYYY-MM-DD HH:MM:SS' 與帶 tz 的 ISO
+    except ValueError:
+        return None
+    if dt.tzinfo is None:                        # 無時區視為 UTC（日誌一律 UTC 記錄）
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def build_trade_markers(trades: list[dict], symbol: str, interval: str) -> dict:
+    """把交易日誌列轉成 K 線標記。
+
+    - 只保留指定 symbol。
+    - ts 對齊到 interval 時間桶（floor），與 K 棒開盤時間一致，標記才畫得準。
+    - side 分類：entry（多 dir=+1 / 空 entry_short dir=−1）、exit（exit_* / scale_out）。
+    - 帶 strategy 欄位，供前端依 bot 上色。
+    - 標記依時間遞增排序（lightweight-charts 要求）。
+
+    回傳 {"markers": [...], "strategies": [distinct strategy 名]}。
+    """
+    bucket = _interval_seconds(interval)
+    markers: list[dict] = []
+    strategies: list[str] = []
+    seen_strat: set[str] = set()
+
+    for t in trades:
+        if t.get("symbol") and symbol and t["symbol"] != symbol:
+            continue
+        unix = _parse_ts_unix(t.get("ts", ""))
+        if unix is None:
+            continue
+        side_raw = str(t.get("side", ""))
+        if side_raw.startswith("entry"):
+            side, direction = "entry", (-1 if "short" in side_raw else 1)
+        else:                                    # exit_signal / exit_sltp / scale_out / ...
+            side, direction = "exit", 0
+        strat = str(t.get("strategy", "") or "—")
+        if strat not in seen_strat:
+            seen_strat.add(strat)
+            strategies.append(strat)
+        markers.append({
+            "time": (unix // bucket) * bucket,
+            "price": round(float(t.get("price", 0.0)), 2),
+            "side": side,
+            "dir": direction,
+            "strategy": strat,
+            "pnl": round(float(t.get("pnl", 0.0)), 2),
+        })
+
+    markers.sort(key=lambda m: m["time"])
+    return {"markers": markers, "strategies": strategies}
+
+
+def trade_markers(symbol: str = "BTCUSDT", interval: str = "4h",
+                  limit: int = 300, db_path: str = "trades.db") -> dict:
+    """讀交易日誌並轉成 K 線標記（依 symbol/interval）。"""
+    rows = read_trades_db(limit=limit, db_path=db_path)
+    return build_trade_markers(rows, symbol, interval)
+
+
 def _trades_out(trades: list[dict]) -> list[dict]:
     out = []
     for t in trades:

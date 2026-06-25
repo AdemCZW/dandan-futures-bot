@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { createChart, CrosshairMode, CandlestickSeries, LineSeries } from 'lightweight-charts'
+import { createChart, CrosshairMode, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { api } from '../api'
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 const TFS = ['1h', '4h', '1d']
+
+// 不同 bot（strategy）配不同顏色；超過長度則循環取用
+const BOT_PALETTE = ['#58a6ff', '#3fb950', '#ffa657', '#d2a8ff', '#39d3c3', '#f778ba', '#e3b341', '#ff7b72']
+const colorForBot = (list, strat) => BOT_PALETTE[Math.max(0, list.indexOf(strat)) % BOT_PALETTE.length]
 const AUTO_OPTS = [{ label: '關閉', sec: 0 }, { label: '3s', sec: 3 }, { label: '10s', sec: 10 }, { label: '30s', sec: 30 }]
 
 // indicator catalogue — only ST + EMA200 on by default
@@ -36,6 +40,11 @@ export default function Chart() {
   const chartRef     = useRef(null)
   const seriesRef    = useRef({})
   const dataRef      = useRef({})
+  const markersRef   = useRef(null)          // createSeriesMarkers plugin api
+  const markerDataRef = useRef([])           // 原始標記（後端回傳）
+
+  const [bots,        setBots]        = useState([])    // 出現過的 strategy 清單（圖例）
+  const [showMarkers, setShowMarkers] = useState(true)  // 交易點開關
 
   const [symbol,    setSymbol]    = useState('BTCUSDT')
   const [tf,        setTf]        = useState('4h')
@@ -70,6 +79,8 @@ export default function Chart() {
       borderUpColor:  '#3fb950', borderDownColor: '#f85149',
       wickUpColor:    '#3fb950', wickDownColor:   '#f85149',
     })
+    // 交易標記層（v5 plugin），附在 K 線 series 上
+    markersRef.current = createSeriesMarkers(seriesRef.current.candles, [])
 
     OVERLAYS.forEach(({ key, color, width, style }) => {
       const s = chart.addSeries(LineSeries, {
@@ -128,6 +139,38 @@ export default function Chart() {
     const ivC = setInterval(() => { cd -= 1; if (cd <= 0) cd = autoSec; setCountdown(cd) }, 1000)
     return () => { clearInterval(ivP); clearInterval(ivC) }
   }, [autoSec, symbol]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 交易標記：依 bot 配色 + 進出場形狀，套到 K 線 ───────────────────────
+  const applyMarkers = useCallback((raw, botList, show) => {
+    if (!markersRef.current) return
+    if (!show || !raw?.length) { markersRef.current.setMarkers([]); return }
+    const ms = raw.map(m => {
+      const color = colorForBot(botList, m.strategy)
+      if (m.side === 'entry') {
+        const short = m.dir < 0
+        return { time: m.time, position: short ? 'aboveBar' : 'belowBar',
+                 color, shape: short ? 'arrowDown' : 'arrowUp' }
+      }
+      return { time: m.time, position: 'aboveBar', color, shape: 'circle' }
+    })
+    markersRef.current.setMarkers(ms)
+  }, [])
+
+  // ── fetch 交易標記（換標的/週期/重整時）─────────────────────────────────
+  useEffect(() => {
+    api.tradeMarkers(symbol, tf, 300)
+      .then(d => {
+        markerDataRef.current = d.markers ?? []
+        setBots(d.strategies ?? [])
+        applyMarkers(d.markers ?? [], d.strategies ?? [], showMarkers)
+      })
+      .catch(() => { markerDataRef.current = []; setBots([]); applyMarkers([], [], false) })
+  }, [symbol, tf, refresh, applyMarkers]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 開關切換 → 重套標記 ──────────────────────────────────────────────
+  useEffect(() => {
+    applyMarkers(markerDataRef.current, bots, showMarkers)
+  }, [showMarkers, bots, applyMarkers])
 
   const toggle = useCallback(key => {
     setVis(prev => {
@@ -218,6 +261,33 @@ export default function Chart() {
             {label}
           </button>
         ))}
+      </div>
+
+      {/* ── 交易點：開關 + bot 圖例 ── */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button onClick={() => setShowMarkers(s => !s)} style={chip(showMarkers, '#e3b341')}>
+          ⚲ 交易點
+        </button>
+        {showMarkers && bots.length > 0 && (
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            {bots.map(b => (
+              <span key={b} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+                color: '#8b949e', fontFamily: 'var(--font-display)' }}>
+                <span style={{ width: 9, height: 9, borderRadius: '50%',
+                  background: colorForBot(bots, b), display: 'inline-block' }} />
+                {b}
+              </span>
+            ))}
+            <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-display)' }}>
+              ↑進多 ↓進空 ●出場
+            </span>
+          </div>
+        )}
+        {showMarkers && bots.length === 0 && (
+          <span style={{ fontSize: 11, color: '#484f58', fontFamily: 'var(--font-display)' }}>
+            此標的目前無交易紀錄
+          </span>
+        )}
       </div>
 
       {/* ── chart ── */}
