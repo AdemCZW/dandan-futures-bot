@@ -86,6 +86,58 @@ function calcBalances(pairs, realized) {
   return bals.reverse()
 }
 
+/** 迷你權益曲線 SVG sparkline。bals = 每筆成交後餘額（最新在前）。*/
+function EquitySpark({ bals, color, height = 48 }) {
+  const pts = [...bals].reverse().filter(b => b != null)
+  if (pts.length < 2) return null
+
+  const W = 300, H = height
+  const minV = Math.min(...pts)
+  const maxV = Math.max(...pts)
+  const range = maxV - minV || 1
+
+  const toX = i  => (i / (pts.length - 1)) * W
+  const toY = v  => H - ((v - minV) / range) * (H - 4) - 2
+
+  const polyline = pts.map((v, i) => `${toX(i)},${toY(v)}`).join(' ')
+  const area = [
+    `M ${toX(0)},${toY(pts[0])}`,
+    ...pts.slice(1).map((v, i) => `L ${toX(i + 1)},${toY(v)}`),
+    `L ${W},${H} L 0,${H} Z`,
+  ].join(' ')
+
+  const up = pts[pts.length - 1] >= pts[0]
+  const lineColor = up ? '#3fb950' : '#f85149'
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <div className="muted" style={{ fontSize: 10, marginBottom: 4, fontFamily: 'var(--font-display)' }}>
+        權益曲線
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}
+           style={{ display: 'block', overflow: 'visible' }}>
+        <defs>
+          <linearGradient id={`eq-fill-${color.replace(/\W/g, '')}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={lineColor} stopOpacity="0.3" />
+            <stop offset="100%" stopColor={lineColor} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {/* baseline */}
+        <line x1="0" y1={toY(INIT_CAPITAL)} x2={W} y2={toY(INIT_CAPITAL)}
+              stroke="var(--muted, #484f58)" strokeWidth="0.5" strokeDasharray="3 3" />
+        {/* fill */}
+        <path d={area} fill={`url(#eq-fill-${color.replace(/\W/g, '')})`} />
+        {/* line */}
+        <polyline points={polyline} fill="none" stroke={lineColor} strokeWidth="1.5"
+                  strokeLinejoin="round" strokeLinecap="round" />
+        {/* endpoint dot */}
+        <circle cx={toX(pts.length - 1)} cy={toY(pts[pts.length - 1])} r="3"
+                fill={lineColor} />
+      </svg>
+    </div>
+  )
+}
+
 
 // ── BotCard ─────────────────────────────────────────────────────────────────
 
@@ -171,6 +223,9 @@ function BotCard({ data, num, color }) {
           </span>
         )}
       </div>
+
+      {/* ── 權益曲線 ── */}
+      <EquitySpark bals={bals} color={color} />
 
       {/* ── 持倉 ── */}
       {data.in_position ? (
