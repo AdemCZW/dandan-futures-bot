@@ -792,7 +792,57 @@ STRATEGIES = {
 }
 
 
+class ConsensusStrategy:
+    """多策略共識過濾：N 個子策略投票，≥ min_agree 票同方向才進場。
+
+    prepare() 依序執行各子策略並合併欄位（後者覆蓋同名欄位）。
+    signal()  對各子策略取票：long_votes / short_votes，達門檻才回傳 1/-1，
+              否則回傳 0（不進場，但已持倉方向繼續持有由呼叫端決定）。
+
+    BOT_PARAMS 範例：
+      {"strategies": ["rsi2_connors", "fib_channel", "smc_structure"], "min_agree": 2}
+    """
+    name = "consensus"
+
+    def __init__(self, strategies=None, min_agree: int = 2, **_):
+        if strategies is None:
+            strategies = []
+        # 接受 strategy 物件清單或名稱字串清單
+        self._subs: list = []
+        for s in strategies:
+            if isinstance(s, str):
+                self._subs.append(build_strategy(s))
+            else:
+                self._subs.append(s)
+        self.min_agree = min_agree
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        result = df.copy()
+        for sub in self._subs:
+            prepared = sub.prepare(df)
+            for col in prepared.columns:
+                if col not in result.columns or col in prepared.columns:
+                    result[col] = prepared[col]
+        return result
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        long_v = short_v = 0
+        for sub in self._subs:
+            v = sub.signal(row, position)
+            if v == 1:
+                long_v += 1
+            elif v == -1:
+                short_v += 1
+        if long_v >= self.min_agree:
+            return 1
+        if short_v >= self.min_agree:
+            return -1
+        return 0
+
+
 def build_strategy(name: str, **params) -> Strategy:
+    if name == "consensus":
+        return ConsensusStrategy(**params)
     if name not in STRATEGIES:
-        raise ValueError(f"未知策略 {name}，可用：{list(STRATEGIES)}")
+        raise ValueError(f"未知策略 {name}，可用：{list(STRATEGIES)} + consensus")
     return STRATEGIES[name](**params)
