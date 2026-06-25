@@ -1,14 +1,76 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, cls } from '../api'
 
-const SIDE_CLS = { buy: 'badge-long', sell: 'badge-short', long: 'badge-long', short: 'badge-short' }
-function sideCls(s) {
-  const k = String(s || '').toLowerCase()
-  return SIDE_CLS[k] || (/多|long|buy|買/i.test(k) ? 'badge-long' : /空|short|sell|賣/i.test(k) ? 'badge-short' : 'badge-flat')
+const BOT_COLORS   = ['var(--accent)', '#e0397a', '#9b59b6']
+const INIT_CAPITAL = 5000   // 每台機器人起始預算（測試網虛擬資金）
+
+// ── 工具函式 ────────────────────────────────────────────────────────────────
+
+function fmt(n, dec = 2) {
+  if (n == null || isNaN(n)) return '—'
+  return Number(n).toFixed(dec)
+}
+function fmtSign(n, dec = 2) {
+  if (n == null || isNaN(n)) return '—'
+  return (n >= 0 ? '+' : '') + Number(n).toFixed(dec)
+}
+function fmtPct(n) {
+  if (n == null || isNaN(n)) return '—'
+  return (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%'
 }
 
-const BOT_COLORS = ['var(--accent)', '#e0397a', '#9b59b6']
-const BOT_LABELS = ['FIB_RETRACEMENT · SOL', 'FIB_CHANNEL · SOL', 'SMC_STRUCTURE · ETH']
+/** 把 recent_trades 配對成「開倉→平倉」回合（最新在前）。 */
+function pairTrades(trades = []) {
+  const ordered = [...trades].reverse()   // 轉時間正序
+  const pairs = []
+  let entry = null
+
+  for (const t of ordered) {
+    if (t.side === 'entry' || t.side === 'entry_short') {
+      entry = t
+    } else if (t.side && t.side.startsWith('exit') && entry) {
+      pairs.push({
+        dir:         entry.side === 'entry' ? 'long' : 'short',
+        entry_price: entry.price,
+        exit_price:  t.price,
+        qty:         t.qty,
+        pnl:         t.pnl,
+        ts:          t.ts,
+        pos_value:   Math.round(entry.qty * entry.price),
+      })
+      entry = null
+    }
+  }
+  if (entry) {          // 尚未平倉的開倉（目前持倉）
+    pairs.push({
+      dir:         entry.side === 'entry' ? 'long' : 'short',
+      entry_price: entry.price,
+      exit_price:  null,
+      qty:         entry.qty,
+      pnl:         null,
+      ts:          entry.ts,
+      pos_value:   Math.round(entry.qty * entry.price),
+      open:        true,
+    })
+  }
+  return pairs.reverse()   // 最新在前
+}
+
+/** 從最新往前算每筆成交後的帳戶餘額。 */
+function calcBalances(pairs, realized) {
+  // 正向累計（最舊→最新）
+  const ordered = [...pairs].reverse()
+  let bal = INIT_CAPITAL
+  const bals = []
+  for (const p of ordered) {
+    if (p.pnl != null) bal += p.pnl
+    bals.push(p.pnl != null ? bal : null)
+  }
+  return bals.reverse()
+}
+
+
+// ── BotCard ─────────────────────────────────────────────────────────────────
 
 function BotCard({ data, num, color }) {
   if (!data) return (
@@ -18,30 +80,41 @@ function BotCard({ data, num, color }) {
     </div>
   )
 
-  const posLabel = data.in_position ? (data.direction === -1 ? '持空' : '持多') : '空手'
-  const posCls   = data.in_position ? (data.direction === -1 ? 'badge-short' : 'badge-long') : 'badge-flat'
-  const pnl      = data.unrealized_pnl
-  const trades   = data.recent_trades || []
   const fresh    = data.age_seconds != null && data.age_seconds < (data.poll ? data.poll * 3 : 180)
+  const realized = data.realized_pnl ?? 0
+  const unreal   = data.unrealized_pnl ?? 0
+  const netVal   = INIT_CAPITAL + realized + unreal
+  const netPct   = (realized + unreal) / INIT_CAPITAL * 100
+  const winPct   = data.total_trades > 0
+    ? Math.round((data.win_trades / data.total_trades) * 100)
+    : null
+
+  const dir     = data.direction ?? 0
+  const posBase = data.base ?? 0
+  const posVal  = data.in_position && data.price ? Math.round(posBase * data.price) : 0
+
+  const pairs = pairTrades(data.recent_trades)
+  const bals  = calcBalances(pairs, realized)
 
   return (
-    <div className="panel" style={{ borderTop: `2px solid ${color}`, display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div className="panel" style={{
+      borderTop: `2px solid ${color}`,
+      display: 'flex', flexDirection: 'column', gap: 12,
+    }}>
 
       {/* ── 標頭 ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{
-          fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700,
-          letterSpacing: '0.1em', color,
-        }}>Bot #{num}</span>
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, color }}>
+          Bot #{num}
+        </span>
         <span style={{ fontFamily: 'var(--font-display)', fontSize: 12, fontWeight: 600 }}>
           {String(data.strategy || '').toUpperCase()}
         </span>
-        <span className="muted" style={{ fontSize: 11 }}>{data.symbol} {data.interval}</span>
+        <span className="muted" style={{ fontSize: 11 }}>{data.symbol} · {data.interval}</span>
         <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
           <span style={{
             width: 6, height: 6, borderRadius: '50%',
-            background: fresh ? '#3fb950' : '#484f58',
-            display: 'inline-block',
+            background: fresh ? '#3fb950' : '#484f58', display: 'inline-block',
           }} />
           <span className="muted" style={{ fontSize: 10 }}>
             {fresh ? `${data.age_seconds}s 前` : '離線'}
@@ -49,64 +122,141 @@ function BotCard({ data, num, color }) {
         </span>
       </div>
 
-      {/* ── 狀態列 ── */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-        <span className={`badge ${posCls}`}>{posLabel}</span>
-        <span style={{ fontSize: 13 }}>
-          權益 <span className="num" style={{ color }}>{data.equity != null ? data.equity.toFixed(2) : '—'}</span>
+      {/* ── 預算 / 已實現 / 未實現 ── */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+        background: 'var(--surface, #161b22)', borderRadius: 6, padding: '10px 8px', gap: 4,
+      }}>
+        {[
+          { label: '預算',   value: `$${INIT_CAPITAL.toLocaleString()}`, c: '' },
+          { label: '已實現', value: fmtSign(realized), c: realized >= 0 ? 'pos' : 'neg' },
+          { label: '未實現', value: fmtSign(unreal),   c: unreal   >= 0 ? 'pos' : 'neg' },
+        ].map(({ label, value, c }) => (
+          <div key={label} style={{ textAlign: 'center' }}>
+            <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>{label}</div>
+            <div className={`num ${c}`} style={{ fontSize: 13, fontWeight: 600 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── 淨值 ── */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span className="muted" style={{ fontSize: 11 }}>淨值</span>
+        <span className="num" style={{ fontSize: 20, fontWeight: 700, color }}>
+          ${fmt(netVal)}
         </span>
-        {pnl != null && (
-          <span style={{ fontSize: 13 }}>
-            未實現 <span className={`num ${cls(pnl)}`}>{pnl >= 0 ? '+' : ''}{Number(pnl).toFixed(2)}</span>
-          </span>
-        )}
-        {data.price != null && (
-          <span className="muted" style={{ fontSize: 12, marginLeft: 'auto' }}>
-            現價 <span className="num">{Number(data.price).toFixed(2)}</span>
+        <span className={`num ${netPct >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 13 }}>
+          {fmtPct(netPct)}
+        </span>
+        {data.total_trades > 0 && (
+          <span className="muted" style={{ fontSize: 11, marginLeft: 'auto' }}>
+            {data.total_trades} 筆 · 勝率 {winPct}%
           </span>
         )}
       </div>
 
-      {/* ── 持倉細節 ── */}
-      {data.in_position && (
-        <div style={{ display: 'flex', gap: 12, fontSize: 12, flexWrap: 'wrap' }}>
-          <span>進場 <span className="num">{Number(data.entry_price).toFixed(2)}</span></span>
-          <span className="neg">SL <span className="num">{data.sl != null ? Number(data.sl).toFixed(2) : '—'}</span></span>
-          <span className="pos">TP <span className="num">{data.tp != null ? Number(data.tp).toFixed(2) : '—'}</span></span>
+      {/* ── 持倉 ── */}
+      {data.in_position ? (
+        <div style={{
+          background: 'var(--surface, #161b22)', borderRadius: 6, padding: '8px 10px',
+          display: 'flex', flexDirection: 'column', gap: 6,
+        }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span className={`badge ${dir === 1 ? 'badge-long' : 'badge-short'}`} style={{ fontSize: 11 }}>
+              {dir === 1 ? '持多' : '持空'}
+            </span>
+            <span style={{ fontSize: 12 }}>
+              進場 <span className="num">${fmt(data.entry_price)}</span>
+            </span>
+            <span style={{ fontSize: 12 }}>
+              數量 <span className="num">
+                {fmt(posBase, 4)} {String(data.symbol || '').replace('USDT', '')}
+              </span>
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 14, fontSize: 12, flexWrap: 'wrap' }}>
+            <span>
+              倉位 <span className="num" style={{ color }}>${posVal.toLocaleString()}</span>
+            </span>
+            <span className="neg">SL <span className="num">${fmt(data.sl)}</span></span>
+            <span className="pos">TP <span className="num">${fmt(data.tp)}</span></span>
+            {data.price != null && (
+              <span className={`${unreal >= 0 ? 'pos' : 'neg'}`} style={{ marginLeft: 'auto' }}>
+                現價 ${fmt(data.price)} ({fmtSign(unreal)})
+              </span>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="badge badge-flat">空手</span>
+          {data.price != null && (
+            <span className="muted">現價 ${fmt(data.price)}</span>
+          )}
         </div>
       )}
 
       {/* ── 交易紀錄 ── */}
       <div>
-        <div style={{ fontSize: 11, fontFamily: 'var(--font-display)', color: 'var(--muted)', marginBottom: 6 }}>
+        <div style={{
+          fontSize: 10, fontFamily: 'var(--font-display)',
+          color: 'var(--muted)', marginBottom: 6,
+        }}>
           交易紀錄
         </div>
-        {trades.length === 0 ? (
+
+        {pairs.length === 0 ? (
           <div className="muted" style={{ fontSize: 12 }}>// 尚無成交</div>
         ) : (
-          <table style={{ width: '100%', fontSize: 12 }}>
+          <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse' }}>
             <thead>
               <tr>
-                <th style={{ textAlign: 'left', paddingBottom: 4, color: 'var(--muted)', fontWeight: 400 }}>時間</th>
-                <th style={{ textAlign: 'left', paddingBottom: 4, color: 'var(--muted)', fontWeight: 400 }}>動作</th>
-                <th style={{ textAlign: 'right', paddingBottom: 4, color: 'var(--muted)', fontWeight: 400 }}>價格</th>
-                <th style={{ textAlign: 'right', paddingBottom: 4, color: 'var(--muted)', fontWeight: 400 }}>損益</th>
+                {[
+                  ['時間',   'left'],
+                  ['方向',   'left'],
+                  ['開倉',   'right'],
+                  ['平倉',   'right'],
+                  ['倉位',   'right'],
+                  ['損益',   'right'],
+                  ['餘額',   'right'],
+                ].map(([h, align]) => (
+                  <th key={h} style={{
+                    textAlign: align, paddingBottom: 4,
+                    color: 'var(--muted)', fontWeight: 400, fontSize: 10,
+                  }}>{h}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {trades.slice(0, 8).map((t, i) => (
+              {pairs.slice(0, 8).map((p, i) => (
                 <tr key={i} style={{ borderTop: '1px solid var(--border, #21262d)' }}>
-                  <td style={{ padding: '4px 0', color: 'var(--muted)', fontSize: 11 }}>
-                    {String(t.ts || '').slice(5, 16)}
+                  <td style={{ padding: '5px 0', color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                    {String(p.ts || '').slice(5, 16)}
                   </td>
-                  <td style={{ padding: '4px 6px 4px 0' }}>
-                    <span className={`badge ${sideCls(t.side)}`} style={{ fontSize: 10 }}>{t.side}</span>
+                  <td style={{ padding: '5px 4px 5px 0' }}>
+                    <span className={`badge ${p.dir === 'long' ? 'badge-long' : 'badge-short'}`}
+                          style={{ fontSize: 9 }}>
+                      {p.dir === 'long' ? '多' : '空'}
+                    </span>
                   </td>
-                  <td className="num" style={{ textAlign: 'right', padding: '4px 0' }}>
-                    {Number(t.price).toFixed(2)}
+                  <td className="num" style={{ textAlign: 'right', padding: '5px 2px' }}>
+                    ${fmt(p.entry_price)}
                   </td>
-                  <td className={`num ${cls(t.pnl)}`} style={{ textAlign: 'right', padding: '4px 0' }}>
-                    {t.pnl != null ? `${t.pnl >= 0 ? '+' : ''}${Number(t.pnl).toFixed(2)}` : '—'}
+                  <td className="num" style={{ textAlign: 'right', padding: '5px 2px' }}>
+                    {p.exit_price != null
+                      ? `$${fmt(p.exit_price)}`
+                      : <span className="muted" style={{ fontSize: 10 }}>持有中</span>
+                    }
+                  </td>
+                  <td className="num" style={{ textAlign: 'right', padding: '5px 2px', color: 'var(--muted)' }}>
+                    ${(p.pos_value ?? 0).toLocaleString()}
+                  </td>
+                  <td className={`num ${p.pnl == null ? '' : p.pnl >= 0 ? 'pos' : 'neg'}`}
+                      style={{ textAlign: 'right', padding: '5px 2px', fontWeight: 600 }}>
+                    {p.pnl != null ? fmtSign(p.pnl) : '—'}
+                  </td>
+                  <td className="num" style={{ textAlign: 'right', padding: '5px 0', color: 'var(--muted)' }}>
+                    {bals[i] != null ? `$${fmt(bals[i])}` : '—'}
                   </td>
                 </tr>
               ))}
@@ -117,6 +267,9 @@ function BotCard({ data, num, color }) {
     </div>
   )
 }
+
+
+// ── Live ─────────────────────────────────────────────────────────────────────
 
 export default function Live() {
   const [d,    setD]    = useState(null)
@@ -149,6 +302,9 @@ export default function Live() {
           即時監控 {anyFresh ? '· 運行中' : '· 待命'}
         </h3>
         <span className="badge badge-system">合約測試網</span>
+        <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>
+          初始預算 ${INIT_CAPITAL.toLocaleString()} / 台
+        </span>
         <span className="badge badge-system" style={{ marginLeft: 'auto' }}>
           每 5 秒自動刷新（#<span className="num">{tick}</span>）
         </span>

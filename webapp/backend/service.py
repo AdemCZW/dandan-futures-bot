@@ -320,11 +320,20 @@ def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
             age = None
 
     trades_mode = "live_futures_testnet" if mode == "futures" else "paper"
-    # 若有 Railway URL，近期成交從雲端抓；否則讀本機 DB
+    # 近期成交（前端顯示用）+ 全量成交（累計損益統計用）
     if ru and mode == "futures":
-        recent = _fetch_railway_trades(limit=15, mode=trades_mode, base_url=ru)
+        recent   = _fetch_railway_trades(limit=30, mode=trades_mode, base_url=ru)
+        all_hist = _fetch_railway_trades(limit=2000, mode=trades_mode, base_url=ru)
     else:
-        recent = read_trades(limit=15, mode=trades_mode, db_path="trades.db")
+        recent   = read_trades(limit=30,   mode=trades_mode, db_path="trades.db")
+        all_hist = read_trades(limit=2000, mode=trades_mode, db_path="trades.db")
+
+    # 只計算「平倉紀錄」(pnl != 0) 作為已實現損益統計
+    closed = [t for t in all_hist if t.get("pnl") and t["pnl"] != 0]
+    realized_pnl = round(sum(t["pnl"] for t in closed), 2)
+    total_trades  = len(closed)
+    win_trades    = sum(1 for t in closed if t["pnl"] > 0)
+
     return {
         "active": bool(st),
         "mode": mode,
@@ -335,6 +344,9 @@ def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
         "base": round(base, 6), "price": round(price, 2) if price is not None else None,
         "equity": round(equity, 2) if equity is not None else None,
         "unrealized_pnl": round(unreal, 2) if unreal is not None else None,
+        "realized_pnl": realized_pnl,
+        "total_trades": total_trades,
+        "win_trades": win_trades,
         "updated_at": updated, "age_seconds": age, "poll": st.get("poll"),
         "last_decision": st.get("last_decision"),
         "recent_trades": recent,
