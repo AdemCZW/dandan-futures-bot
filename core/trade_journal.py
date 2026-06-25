@@ -1,10 +1,12 @@
-"""交易日誌 — 把每筆進出場留底（SQLite + 可選 CSV）。
+"""交易日誌 — 把每筆進出場留底（PostgreSQL 或 SQLite fallback）。
 
 為什麼需要：幣安測試網約每月重置一次，餘額/持倉/掛單都會清空。
 若把長期績效綁在測試網餘額上，重置後就什麼都不剩。這個模組把每一筆
-成交獨立寫進本機 SQLite（與可選的 CSV），不受測試網重置影響。
+成交獨立寫進資料庫，不受測試網重置影響。
 
-只用 Python 標準庫（sqlite3 + csv），不增加任何相依套件。
+後端選擇（自動偵測）：
+  有 DATABASE_URL env var → PostgreSQL（Railway 雲端）
+  無 DATABASE_URL         → SQLite（本地開發）
 
 也可當小工具用，查看最近交易：
     python -m core.trade_journal            # 列出最近 20 筆
@@ -19,57 +21,87 @@ from datetime import datetime, timezone
 _COLUMNS = ["logged_at", "ts", "run_id", "mode", "symbol",
             "strategy", "side", "price", "qty", "pnl", "equity"]
 
+_DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _default_run_id() -> str:
-    # 用啟動時間當 run_id，方便把同一次執行的交易歸在一起
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _pg_connect():
+    import psycopg2
+    return psycopg2.connect(_DATABASE_URL)
+
+
 class TradeJournal:
-    """把交易寫進 SQLite（必備）與 CSV（可選）。可當 context manager 用。"""
+    """把交易寫進 PostgreSQL（Railway）或 SQLite（本地）與 CSV（可選）。"""
 
     def __init__(self, db_path: str = "trades.db", csv_path: str | None = None, *,
                  run_id: str | None = None, mode: str = "live",
                  symbol: str = "", strategy: str = ""):
-        self.db_path = db_path
+        self.db_path  = db_path
         self.csv_path = csv_path
-        self.run_id = run_id or _default_run_id()
-        self.mode = mode
-        self.symbol = symbol
+        self.run_id   = run_id or _default_run_id()
+        self.mode     = mode
+        self.symbol   = symbol
         self.strategy = strategy
-        self._conn = sqlite3.connect(db_path)
+        self._pg      = bool(_DATABASE_URL)
+
+        if self._pg:
+            self._conn = _pg_connect()
+        else:
+            self._conn = sqlite3.connect(db_path)
+
         self._init_db()
         if csv_path:
             self._init_csv()
 
     def _init_db(self) -> None:
-        # WAL + busy_timeout：提升併發容忍度（例如 run_live 與 run_backtest 同時寫入時）
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS trades (
-                   id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                   logged_at TEXT,
-                   ts        TEXT,
-                   run_id    TEXT,
-                   mode      TEXT,
-                   symbol    TEXT,
-                   strategy  TEXT,
-                   side      TEXT,
-                   price     REAL,
-                   qty       REAL,
-                   pnl       REAL,
-                   equity    REAL
-               )"""
-        )
-        self._conn.commit()
+        if self._pg:
+            cur = self._conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id        SERIAL PRIMARY KEY,
+                    logged_at TEXT,
+                    ts        TEXT,
+                    run_id    TEXT,
+                    mode      TEXT,
+                    symbol    TEXT,
+                    strategy  TEXT,
+                    side      TEXT,
+                    price     DOUBLE PRECISION,
+                    qty       DOUBLE PRECISION,
+                    pnl       DOUBLE PRECISION,
+                    equity    DOUBLE PRECISION
+                )
+            """)
+            self._conn.commit()
+        else:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute(
+                """CREATE TABLE IF NOT EXISTS trades (
+                       id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                       logged_at TEXT,
+                       ts        TEXT,
+                       run_id    TEXT,
+                       mode      TEXT,
+                       symbol    TEXT,
+                       strategy  TEXT,
+                       side      TEXT,
+                       price     REAL,
+                       qty       REAL,
+                       pnl       REAL,
+                       equity    REAL
+                   )"""
+            )
+            self._conn.commit()
 
     def _init_csv(self) -> None:
-        # 檔案不存在或空的才寫表頭
         if not os.path.exists(self.csv_path) or os.path.getsize(self.csv_path) == 0:
             with open(self.csv_path, "a", newline="") as fh:
                 csv.writer(fh).writerow(_COLUMNS)
@@ -79,40 +111,56 @@ class TradeJournal:
         """記錄一筆交易事件。回傳寫入的 row dict。"""
         rec = {
             "logged_at": _utc_now(),
-            "ts": _utc_now() if ts is None else str(ts),
-            "run_id": self.run_id,
-            "mode": self.mode,
-            "symbol": self.symbol,
-            "strategy": self.strategy,
-            "side": side,
-            "price": float(price),
-            "qty": float(qty),
-            "pnl": float(pnl),
-            "equity": None if equity is None else float(equity),
+            "ts":        _utc_now() if ts is None else str(ts),
+            "run_id":    self.run_id,
+            "mode":      self.mode,
+            "symbol":    self.symbol,
+            "strategy":  self.strategy,
+            "side":      side,
+            "price":     float(price),
+            "qty":       float(qty),
+            "pnl":       float(pnl),
+            "equity":    None if equity is None else float(equity),
         }
-        self._conn.execute(
-            f"INSERT INTO trades ({','.join(_COLUMNS)}) "
-            f"VALUES ({','.join('?' * len(_COLUMNS))})",
-            [rec[c] for c in _COLUMNS],
-        )
-        self._conn.commit()
+        vals = [rec[c] for c in _COLUMNS]
+        if self._pg:
+            ph = ",".join(["%s"] * len(_COLUMNS))
+            cur = self._conn.cursor()
+            cur.execute(
+                f"INSERT INTO trades ({','.join(_COLUMNS)}) VALUES ({ph})", vals
+            )
+            self._conn.commit()
+        else:
+            self._conn.execute(
+                f"INSERT INTO trades ({','.join(_COLUMNS)}) "
+                f"VALUES ({','.join('?' * len(_COLUMNS))})",
+                vals,
+            )
+            self._conn.commit()
+
         if self.csv_path:
             with open(self.csv_path, "a", newline="") as fh:
-                csv.writer(fh).writerow([rec[c] for c in _COLUMNS])
+                csv.writer(fh).writerow(vals)
         return rec
 
     def log_trades(self, trades: list[dict]) -> int:
-        """批次傾印回測產生的交易清單（dict 需含 side/price，pnl/qty/ts 可選）。"""
         for t in trades:
             self.log(side=t.get("side", ""), price=t.get("price", 0.0),
                      qty=t.get("qty", 0.0), pnl=t.get("pnl", 0.0), ts=t.get("ts"))
         return len(trades)
 
     def tail(self, n: int = 20) -> list[tuple]:
-        cur = self._conn.execute(
-            f"SELECT {','.join(_COLUMNS)} FROM trades ORDER BY id DESC LIMIT ?", (n,)
-        )
-        return list(reversed(cur.fetchall()))
+        cols = ",".join(_COLUMNS)
+        if self._pg:
+            cur = self._conn.cursor()
+            cur.execute(f"SELECT {cols} FROM trades ORDER BY id DESC LIMIT %s", (n,))
+            rows = cur.fetchall()
+        else:
+            cur = self._conn.execute(
+                f"SELECT {cols} FROM trades ORDER BY id DESC LIMIT ?", (n,)
+            )
+            rows = cur.fetchall()
+        return list(reversed(rows))
 
     def close(self) -> None:
         self._conn.close()
@@ -124,27 +172,68 @@ class TradeJournal:
         self.close()
 
 
+# ── 共用查詢函式（供 service.py / run_live_futures.py 使用）────────────────
+
+def read_trades_db(limit: int = 50, mode: str | None = None,
+                   db_path: str = "trades.db") -> list[dict]:
+    """從 PostgreSQL 或 SQLite 讀取最近交易（最新在最前）。"""
+    cols = "ts, mode, symbol, strategy, side, price, qty, pnl"
+
+    if _DATABASE_URL:
+        try:
+            conn = _pg_connect()
+            cur  = conn.cursor()
+            q    = f"SELECT {cols} FROM trades"
+            args: list = []
+            if mode:
+                q += " WHERE mode = %s"
+                args.append(mode)
+            q += " ORDER BY id DESC LIMIT %s"
+            args.append(limit)
+            cur.execute(q, args)
+            keys = ["ts", "mode", "symbol", "strategy", "side", "price", "qty", "pnl"]
+            rows = [dict(zip(keys, r)) for r in cur.fetchall()]
+            conn.close()
+            return rows
+        except Exception:
+            return []
+    else:
+        if not os.path.exists(db_path):
+            return []
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            q    = f"SELECT {cols} FROM trades"
+            args = []
+            if mode:
+                q += " WHERE mode = ?"
+                args.append(mode)
+            q += " ORDER BY id DESC LIMIT ?"
+            args.append(limit)
+            rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+            conn.close()
+            return rows
+        except sqlite3.Error:
+            return []
+
+
 def _print_tail(n: int = 20, db_path: str = "trades.db") -> None:
-    if not os.path.exists(db_path):
-        print(f"找不到資料庫 {db_path}（還沒有任何交易留底）。")
+    rows_raw = read_trades_db(limit=n, db_path=db_path)
+    if not rows_raw:
+        print(f"找不到交易紀錄（{'PostgreSQL' if _DATABASE_URL else db_path}）")
         return
-    j = TradeJournal(db_path=db_path)
-    rows = j.tail(n)
-    j.close()
-    if not rows:
-        print(f"{db_path} 裡還沒有交易。")
-        return
-    print(f"=== {db_path} 最近 {len(rows)} 筆 ===")
+    print(f"=== 最近 {len(rows_raw)} 筆 ===")
     print(f"{'ts':<20}{'mode':<13}{'strategy':<14}{'side':<12}"
           f"{'price':>12}{'qty':>14}{'pnl':>12}")
-    for r in rows:
-        d = dict(zip(_COLUMNS, r))
-        print(f"{d['ts'][:19]:<20}{d['mode']:<13}{d['strategy']:<14}{d['side']:<12}"
-              f"{d['price']:>12.2f}{d['qty']:>14.6f}{d['pnl']:>12.2f}")
+    for d in rows_raw:
+        print(f"{str(d.get('ts',''))[:19]:<20}{str(d.get('mode','')):<13}"
+              f"{str(d.get('strategy','')):<14}{str(d.get('side','')):<12}"
+              f"{float(d.get('price',0)):>12.2f}{float(d.get('qty',0)):>14.6f}"
+              f"{float(d.get('pnl',0)):>12.2f}")
 
 
 if __name__ == "__main__":
     import sys
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+    n    = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     path = sys.argv[2] if len(sys.argv) > 2 else "trades.db"
     _print_tail(n, path)

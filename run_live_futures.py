@@ -309,27 +309,14 @@ class FuturesLiveTrader:
 
 
 def _read_trades_json(path: str) -> bytes:
-    """GET /trades?limit=N&mode=M → 從 Railway 本機 trades.db 讀近期交易，回傳 JSON bytes。"""
-    import sqlite3
+    """GET /trades?limit=N&mode=M → 從 PostgreSQL 或 SQLite 讀近期交易，回傳 JSON bytes。"""
     import urllib.parse
+    from core.trade_journal import read_trades_db
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
     limit = int(qs.get("limit", ["50"])[0])
-    mode = qs.get("mode", [None])[0]
-    db = "trades.db"
-    if not os.path.exists(db):
-        return b"[]"
+    mode  = qs.get("mode", [None])[0]
     try:
-        conn = sqlite3.connect(db)
-        conn.row_factory = sqlite3.Row
-        q = "SELECT ts, mode, symbol, strategy, side, price, qty, pnl FROM trades"
-        args: list = []
-        if mode:
-            q += " WHERE mode = ?"
-            args.append(mode)
-        q += " ORDER BY id DESC LIMIT ?"
-        args.append(limit)
-        rows = [dict(r) for r in conn.execute(q, args).fetchall()]
-        conn.close()
+        rows = read_trades_db(limit=limit, mode=mode)
         return json.dumps(rows, default=str).encode()
     except Exception:
         return b"[]"

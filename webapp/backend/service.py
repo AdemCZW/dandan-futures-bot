@@ -10,6 +10,7 @@ import math
 import os
 import sqlite3
 
+from core.trade_journal import read_trades_db
 from config import Config
 from core.quant_researcher import STRATEGIES, build_strategy
 from core.risk_officer import RiskOfficer
@@ -733,25 +734,7 @@ def whale_data(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30) -> 
 
 def read_trades(limit: int = 50, mode: str | None = None,
                 db_path: str = "trades.db") -> list[dict]:
-    import os
-    if not os.path.exists(db_path):
-        return []
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    q = "SELECT ts, mode, symbol, strategy, side, price, qty, pnl FROM trades"
-    args: list = []
-    if mode:
-        q += " WHERE mode = ?"
-        args.append(mode)
-    q += " ORDER BY id DESC LIMIT ?"
-    args.append(limit)
-    try:
-        rows = [dict(r) for r in conn.execute(q, args).fetchall()]
-    except sqlite3.Error:              # OperationalError / DatabaseError（檔案損毀非 sqlite）等一律回空
-        rows = []
-    finally:
-        conn.close()
-    return rows  # ORDER BY id DESC → 最新在最前
+    return read_trades_db(limit=limit, mode=mode, db_path=db_path)
 
 
 def mark_price(symbol: str = "BTCUSDT") -> dict:
