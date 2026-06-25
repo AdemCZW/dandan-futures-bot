@@ -287,6 +287,18 @@ class FuturesLiveTrader:
         except Exception:
             equity = None
 
+        # 測試網重置偵測：餘額大幅下滑 → 清空持倉狀態
+        if equity is not None:
+            from core.bot_state import BotState, detect_testnet_reset
+            st = BotState.load(STATE_PATH)
+            if detect_testnet_reset(current=equity, last=st.last_balance):
+                print(f"[{bar_time}] ⚠️  測試網重置偵測：餘額 {equity:.2f} << {st.last_balance:.2f}，清空持倉狀態")
+                self.dir = 0
+                self.entry_price = self.sl = self.tp = self.qty = 0.0
+            # 更新 last_balance 並持久化
+            st.last_balance = equity
+            st.save(STATE_PATH)
+
         last_decision = {
             "ts": str(bar_time),
             "price": round(price, 2),

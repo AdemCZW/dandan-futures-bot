@@ -30,6 +30,7 @@ class BotState:
     updated_at: str = ""
     cb_consecutive_losses: int = 0    # Circuit Breaker：連續虧損計數
     cb_paused_until: str = ""         # Circuit Breaker：暫停到期時間（ISO 字串，空=未暫停）
+    last_balance: float = 0.0         # 上次已知帳戶餘額，用於測試網重置偵測
 
     def save(self, path: str) -> None:
         """原子寫入：先寫 .tmp 再 rename，避免崩潰時寫到一半留下半截檔。"""
@@ -50,6 +51,24 @@ class BotState:
             return cls()
         valid = {f.name for f in fields(cls)}
         return cls(**{k: v for k, v in data.items() if k in valid})
+
+
+def detect_testnet_reset(
+    current: float,
+    last: float,
+    drop_pct: float = 0.90,
+    min_ref: float = 200.0,
+) -> bool:
+    """判斷帳戶餘額是否因測試網清帳而大幅歸零。
+
+    current  目前餘額
+    last     上一次記錄的餘額（0 代表首次啟動，不偵測）
+    drop_pct 觸發閾值：跌幅 ≥ drop_pct 視為重置（預設 90%）
+    min_ref  last 必須 ≥ min_ref 才偵測，避免小帳號誤觸發（預設 200 USDT）
+    """
+    if last < min_ref:
+        return False
+    return (1.0 - current / last) >= drop_pct
 
 
 def reconcile(state: BotState, base_balance: float, dust: float, price: float,
