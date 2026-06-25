@@ -58,7 +58,9 @@ class FuturesLiveTrader:
     """合約多/空決策 + 下單 + 狀態持久化。dir：+1 多 / -1 空 / 0 空手。可獨立測試。"""
 
     def __init__(self, cfg, client, strat, risk, execu, journal,
-                 cb_max_losses: int = 3, cb_pause_hours: float = 24):
+                 cb_max_losses: int = 3, cb_pause_hours: float = 24,
+                 ml_model_path: str | None = None,
+                 ml_threshold: float = 0.55):
         self.cfg, self.client, self.strat = cfg, client, strat
         self.risk, self.execu, self.journal = risk, execu, journal
         self.dir = 0
@@ -67,6 +69,16 @@ class FuturesLiveTrader:
         self._last_risk = None              # _open() 執行後暫存風控決策供 SOP 讀取
         self.peak = self.trough = 0.0       # 進場後極值（Chandelier 追蹤停損用）
         self.cb = CircuitBreaker(max_losses=cb_max_losses, pause_hours=cb_pause_hours)
+        # ML Filter：若模型檔存在則載入；不存在則靜默跳過（不影響原有邏輯）
+        self._ml_model    = None
+        self._ml_threshold = ml_threshold
+        if ml_model_path and os.path.exists(ml_model_path):
+            try:
+                from ml.ml_filter import load_filter
+                self._ml_model = load_filter(ml_model_path)
+                print(f"[ML Filter] 已載入模型：{ml_model_path}（門檻 {ml_threshold:.0%}）")
+            except Exception as e:
+                print(f"[ML Filter] 載入失敗，跳過：{e}")
 
     def _save(self) -> None:
         cb_dict = self.cb.to_dict()
@@ -214,7 +226,20 @@ class FuturesLiveTrader:
                 if target in (1, -1):
                     self._last_risk = None
                     atr_val = float(row["atr"]) if "atr" in row.index and not pd.isna(row["atr"]) else None
-                    self._open(price, bar_time, target, atr=atr_val)
+                    # ML Filter 機率門檻（模型未載入則直接通過）
+                    if self._ml_model is not None:
+                        try:
+                            from ml.ml_filter import extract_features, signal_proba
+                            feats = extract_features(df.iloc[:-1], pd.DatetimeIndex([row.name]))
+                            p = signal_proba(self._ml_model, feats)
+                            if p < self._ml_threshold:
+                                print(f"[{bar_time}] ML Filter 否決（p={p:.2f} < {self._ml_threshold:.2f}）")
+                                acts.append({"act": "ml_rejected", "proba": round(p, 3)})
+                                target = 0
+                        except Exception as e:
+                            print(f"[{bar_time}] ML Filter 推論失敗，允許通過：{e}")
+                    if target in (1, -1):
+                        self._open(price, bar_time, target, atr=atr_val)
                     risk_rec = self._last_risk
                     if self.dir == target:      # _open 成功
                         side = "entry" if target == 1 else "entry_short"
@@ -417,9 +442,12 @@ def main():
         risk = RiskOfficer(cfg)
         journal = TradeJournal(db_path="trades.db", csv_path="trades_futures.csv",
                                mode="live_futures_testnet", symbol=cfg.symbol, strategy=cfg.strategy)
+        ml_path = os.getenv("ML_FILTER_PATH", f"models/{cfg.strategy}.pkl")
         trader = FuturesLiveTrader(cfg, client, strat, risk, execu, journal,
                                    cb_max_losses=args.cb_max_losses,
-                                   cb_pause_hours=args.cb_pause_hours)
+                                   cb_pause_hours=args.cb_pause_hours,
+                                   ml_model_path=ml_path,
+                                   ml_threshold=float(os.getenv("ML_THRESHOLD", "0.55")))
 
         budget_msg = f" | 預算上限 {args.budget:.0f}U/筆（max_pos={cfg.max_position_pct:.1%}）" if args.budget else ""
         print(f"[啟動] 合約測試網模擬盤（多/空）| {cfg.symbol} {cfg.interval} | "
