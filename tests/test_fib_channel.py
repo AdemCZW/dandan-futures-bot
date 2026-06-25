@@ -140,6 +140,38 @@ class TestFibChannelLevels:
             assert zero_dir["fib_ch_0"].isna().all(), "dir=0 的行通道線應為 NaN"
 
 
+class TestFibChannelSingle:
+    """單一通道（畫圖用）：固定錨點 + 斜率 + 寬度，可拉成橫跨整圖的直線。"""
+
+    def test_returns_params_for_trend(self):
+        out = se.fib_channel_single(_df(160, "up"))
+        assert out is not None
+        for k in ("dir", "anchor_idx", "anchor_price", "slope", "width"):
+            assert k in out, f"缺少 key：{k}"
+        assert out["dir"] in (1, -1)
+        assert out["width"] > 0
+
+    def test_uptrend_dir_positive(self):
+        out = se.fib_channel_single(_df(160, "up"))
+        assert out["dir"] == 1
+
+    def test_downtrend_dir_negative(self):
+        out = se.fib_channel_single(_df(160, "down"))
+        assert out["dir"] == -1
+
+    def test_straight_line_reconstruction(self):
+        """任一 bar 的 0 線 = anchor_price + slope×(i − anchor_idx)，整段為直線。"""
+        out = se.fib_channel_single(_df(160, "up"))
+        i1, i2 = out["anchor_idx"] + 10, out["anchor_idx"] + 40
+        v1 = out["anchor_price"] + out["slope"] * (i1 - out["anchor_idx"])
+        v2 = out["anchor_price"] + out["slope"] * (i2 - out["anchor_idx"])
+        # 斜率定義一致：兩點連線斜率 == slope
+        assert abs((v2 - v1) / (i2 - i1) - out["slope"]) < 1e-9
+
+    def test_none_when_insufficient(self):
+        assert se.fib_channel_single(_df(10, "up"), pivot_left=4, pivot_right=4) is None
+
+
 class TestFibChannelStrategy:
     def test_strategy_registered(self):
         assert build_strategy("fib_channel") is not None

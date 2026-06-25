@@ -791,10 +791,10 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
     don = se.donchian(df, entry_period=20, exit_period=10)
     df["dc_upper"] = don["dc_upper"]
     df["dc_lower"] = don["dc_lower"]
-    fch = se.fib_channel_levels(df, pivot_left=5, pivot_right=5)
-    fib_cols = list(se.FIB_CHANNEL_RATIOS.values())
-    for col in fib_cols:
-        df[col] = fch[col]
+    # 費波那契通道：畫圖用「單一」通道（固定錨點+斜率+寬度），每條線拉成橫跨整圖的直線。
+    # 不用逐根 fib_channel_levels（那會每根重畫、線條跳動雜亂；逐根版供策略/回測用）。
+    fib_cols   = list(se.FIB_CHANNEL_RATIOS.values())
+    fib_single = se.fib_channel_single(df, pivot_left=5, pivot_right=5)
 
     def _ts(idx):
         return int(idx.timestamp())
@@ -811,7 +811,13 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
     dc_upper, dc_lower = [], []
     fib_series = {col: [] for col in fib_cols}
 
-    for idx, row in df.iterrows():
+    # 預備單一通道的直線參數（橫跨整圖；pos = df 位置索引，與 anchor_idx 同基準）
+    _fc = None
+    if fib_single is not None:
+        _fc = (fib_single["anchor_idx"], fib_single["anchor_price"],
+               fib_single["slope"], fib_single["width"], fib_single["dir"])
+
+    for pos, (idx, row) in enumerate(df.iterrows()):
         t = _ts(idx)
         o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
         if None in (o, h, lo, c):
@@ -834,9 +840,11 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
             dc_upper.append({"time": t, "value": v})
         if (v := _f(row["dc_lower"])) is not None:
             dc_lower.append({"time": t, "value": v})
-        for col in fib_cols:
-            if (v := _f(row[col])) is not None:
-                fib_series[col].append({"time": t, "value": v})
+        if _fc is not None:
+            a_idx, a_px, slope, width, sdir = _fc
+            base = a_px + slope * (pos - a_idx)         # 0 線在當根（直線）
+            for r, col in se.FIB_CHANNEL_RATIOS.items():
+                fib_series[col].append({"time": t, "value": base + sdir * r * width})
 
     return {
         "candles": candles,

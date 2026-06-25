@@ -502,6 +502,71 @@ def fib_channel_levels(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int =
     return out
 
 
+def fib_channel_single(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5,
+                       trend_fast: int = 20, trend_slow: int = 50) -> dict | None:
+    """畫圖用的「單一」費波那契通道（與 TradingView 手動畫一條一致）。
+
+    不同於 fib_channel_levels（逐根 causal、供策略用），本函式只回傳「當前最新結構」
+    的一條通道參數，前端可據此把每條費波那契線拉成橫跨整圖的直線——乾淨不跳動。
+
+    取最後一根的趨勢方向，沿最近兩個已確認 pivot（漲沿 swing low / 跌沿 swing high）
+    定基線斜率，寬度 = 錨點起算到末根之間價格往對側的最大實際距離。
+
+    回傳 dict（無足夠 pivot 時回 None）：
+      dir          +1 上升 / −1 下降
+      anchor_idx   0 線錨點的位置索引（df 第幾根）
+      anchor_price 0 線在 anchor_idx 的價格
+      slope        每根的斜率（價格/根）
+      width        通道寬度 W（fib_ch_100 = 0 線 + dir×W）
+    """
+    n = len(df)
+    if n < pivot_left + pivot_right + 2:
+        return None
+
+    lows  = df["low"].values
+    highs = df["high"].values
+    ema_f = ema(df["close"], trend_fast).values
+    ema_s = ema(df["close"], trend_slow).values
+
+    # 末根趨勢方向（往回找第一個有效 EMA）
+    last = n - 1
+    while last >= 0 and (np.isnan(ema_f[last]) or np.isnan(ema_s[last])):
+        last -= 1
+    if last < 0:
+        return None
+    up = ema_f[last] >= ema_s[last]
+
+    pivots = _confirmed_pivots(lows if up else highs, pivot_left, pivot_right,
+                               "low" if up else "high")
+    # 只取在末根前已確認的
+    confirmed = [(j, p) for j, p in pivots if j + pivot_right <= last]
+    if len(confirmed) < 2:
+        return None
+
+    p1_j, p1_v = confirmed[-2]
+    p2_j, p2_v = confirmed[-1]
+    if p2_j <= p1_j:
+        return None
+
+    slope = (p2_v - p1_v) / (p2_j - p1_j)
+    ks = np.arange(p1_j, last + 1)
+    baseline = p1_v + slope * (ks - p1_j)
+    if up:
+        width = float((highs[p1_j:last + 1] - baseline).max())
+    else:
+        width = float((baseline - lows[p1_j:last + 1]).max())
+    if width <= 0:
+        return None
+
+    return {
+        "dir": 1 if up else -1,
+        "anchor_idx": int(p1_j),
+        "anchor_price": float(p1_v),
+        "slope": float(slope),
+        "width": width,
+    }
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """一次把常用指標都算好，附加到 DataFrame。"""
     out = df.copy()
