@@ -732,8 +732,8 @@ class FibChannelStrategy(Strategy):
     出場：到達對面出場區或突破通道外側。
     """
     name = "fib_channel"
-    defaults = {"pivot_left": 5, "pivot_right": 3, "atr_period": 14,
-                "atr_mult": 3.0, "entry_zone": 0.30, "exit_zone": 0.80,
+    defaults = {"pivot_left": 5, "pivot_right": 3,
+                "entry_zone": 0.30, "exit_zone": 0.80,
                 "regime_confirm_bars": 1}
     allow_short = True
     regime_pref = "trend"
@@ -741,10 +741,8 @@ class FibChannelStrategy(Strategy):
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         out = se.fib_channel_levels(df.copy(),
                                     int(self.params["pivot_left"]),
-                                    int(self.params["pivot_right"]),
-                                    int(self.params["atr_period"]),
-                                    float(self.params["atr_mult"]))
-        out["atr"] = se.atr(out, int(self.params["atr_period"]))
+                                    int(self.params["pivot_right"]))
+        out["atr"] = se.atr(out, 14)
         return self._prepare_regime(out)
 
     def signal(self, row, position: int) -> int:
