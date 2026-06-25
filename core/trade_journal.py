@@ -175,23 +175,28 @@ class TradeJournal:
 # ── 共用查詢函式（供 service.py / run_live_futures.py 使用）────────────────
 
 def read_trades_db(limit: int = 50, mode: str | None = None,
+                   strategy: str | None = None,
                    db_path: str = "trades.db") -> list[dict]:
-    """從 PostgreSQL 或 SQLite 讀取最近交易（最新在最前）。"""
+    """從 PostgreSQL 或 SQLite 讀取最近交易（最新在最前）。
+
+    strategy 過濾確保每台 bot 只看到自己的紀錄（共用 PG 時必要）。
+    """
     cols = "ts, mode, symbol, strategy, side, price, qty, pnl"
+    keys = ["ts", "mode", "symbol", "strategy", "side", "price", "qty", "pnl"]
 
     if _DATABASE_URL:
         try:
-            conn = _pg_connect()
-            cur  = conn.cursor()
-            q    = f"SELECT {cols} FROM trades"
-            args: list = []
+            conn  = _pg_connect()
+            cur   = conn.cursor()
+            conds: list[str] = []
+            args:  list      = []
             if mode:
-                q += " WHERE mode = %s"
-                args.append(mode)
-            q += " ORDER BY id DESC LIMIT %s"
-            args.append(limit)
-            cur.execute(q, args)
-            keys = ["ts", "mode", "symbol", "strategy", "side", "price", "qty", "pnl"]
+                conds.append("mode = %s");     args.append(mode)
+            if strategy:
+                conds.append("strategy = %s"); args.append(strategy)
+            where = (" WHERE " + " AND ".join(conds)) if conds else ""
+            cur.execute(f"SELECT {cols} FROM trades{where} ORDER BY id DESC LIMIT %s",
+                        args + [limit])
             rows = [dict(zip(keys, r)) for r in cur.fetchall()]
             conn.close()
             return rows
@@ -203,14 +208,17 @@ def read_trades_db(limit: int = 50, mode: str | None = None,
         try:
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
-            q    = f"SELECT {cols} FROM trades"
-            args = []
+            conds_s: list[str] = []
+            args_s:  list      = []
             if mode:
-                q += " WHERE mode = ?"
-                args.append(mode)
-            q += " ORDER BY id DESC LIMIT ?"
-            args.append(limit)
-            rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+                conds_s.append("mode = ?");     args_s.append(mode)
+            if strategy:
+                conds_s.append("strategy = ?"); args_s.append(strategy)
+            where_s = (" WHERE " + " AND ".join(conds_s)) if conds_s else ""
+            rows = [dict(r) for r in conn.execute(
+                f"SELECT {cols} FROM trades{where_s} ORDER BY id DESC LIMIT ?",
+                args_s + [limit],
+            ).fetchall()]
             conn.close()
             return rows
         except sqlite3.Error:

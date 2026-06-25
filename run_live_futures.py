@@ -309,14 +309,18 @@ class FuturesLiveTrader:
 
 
 def _read_trades_json(path: str) -> bytes:
-    """GET /trades?limit=N&mode=M → 從 PostgreSQL 或 SQLite 讀近期交易，回傳 JSON bytes。"""
+    """GET /trades?limit=N&mode=M → 從 PostgreSQL 或 SQLite 讀近期交易，回傳 JSON bytes。
+
+    用 BOT_STRATEGY env var 過濾，確保每台 bot 只回傳自己的紀錄。
+    """
     import urllib.parse
     from core.trade_journal import read_trades_db
-    qs = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
-    limit = int(qs.get("limit", ["50"])[0])
-    mode  = qs.get("mode", [None])[0]
+    qs       = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+    limit    = int(qs.get("limit", ["50"])[0])
+    mode     = qs.get("mode", [None])[0]
+    strategy = os.getenv("BOT_STRATEGY")   # 各 service 自己的策略名
     try:
-        rows = read_trades_db(limit=limit, mode=mode)
+        rows = read_trades_db(limit=limit, mode=mode, strategy=strategy)
         return json.dumps(rows, default=str).encode()
     except Exception:
         return b"[]"
