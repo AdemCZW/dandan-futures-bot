@@ -1,6 +1,6 @@
 # 合約測試網 bot 雲端部署的最小依賴（不含 matplotlib/web 等用不到的套件）
-# 驗證過 run_live_futures.py 只需這四個：
 python-binance>=1.0.19
 pandas>=2.0
 numpy>=1.24
 python-dotenv>=1.0
+psycopg2-binary>=2.9
