@@ -23,6 +23,9 @@ class PurgedKFold:
         self.t1           = t1
         self.pct_embargo  = pct_embargo
 
+    def get_n_splits(self, X=None, y=None, groups=None) -> int:
+        return self.n_splits
+
     def split(self, X: pd.DataFrame, y=None, groups=None):
         if self.t1 is None:
             raise ValueError("t1 must be provided")

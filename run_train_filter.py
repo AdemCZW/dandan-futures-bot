@@ -79,7 +79,10 @@ def main():
         le, _, _, _ = signals_from_prepared(prepared, args.strategy)
         events = prepared.index[le]
     except Exception:
-        # fallback: 全樣本每 20 根取一個
+        events = pd.Index([])   # 留給下面的 fallback 處理
+
+    if len(events) < 20:
+        print(f"[Entry signals] 策略訊號 {len(events)} 筆不足，退回每 20 根抽樣")
         events = prepared.index[::20]
 
     print(f"[Entry signals] {len(events)} 個潛在進場點")
