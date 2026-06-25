@@ -68,6 +68,8 @@ class FuturesLiveTrader:
         self.qty = 0.0                      # 本地追蹤的持倉量（避免開倉後立刻讀帶號倉位的最終一致性問題）
         self._last_risk = None              # _open() 執行後暫存風控決策供 SOP 讀取
         self.peak = self.trough = 0.0       # 進場後極值（Chandelier 追蹤停損用）
+        self._scaled_out = False            # Scale-out：本輪持倉已部分獲利了結
+        self._entry_sl_dist = 0.0          # 進場時的原始停損距離（scale-out 閾值用）
         self.cb = CircuitBreaker(max_losses=cb_max_losses, pause_hours=cb_pause_hours)
         # PortfolioGuard：跨 bot 同向暴露控制；max_notional 由 env 設定（預設 15000 USDT）
         from core.portfolio_guard import PortfolioGuard
@@ -90,7 +92,9 @@ class FuturesLiveTrader:
                  sl=self.sl, tp=self.tp, qty=abs(self.qty),
                  symbol=self.cfg.symbol, strategy=self.cfg.strategy,
                  cb_consecutive_losses=cb_dict["consecutive_losses"],
-                 cb_paused_until=cb_dict["paused_until"] or "").save(STATE_PATH)
+                 cb_paused_until=cb_dict["paused_until"] or "",
+                 scaled_out=self._scaled_out,
+                 entry_sl_dist=self._entry_sl_dist).save(STATE_PATH)
 
     def _latest_atr(self):
         """抓最近已收盤那根的 ATR（供 restore 重建停損用）；失敗則回 None 退回固定百分比。"""
@@ -125,6 +129,9 @@ class FuturesLiveTrader:
             # Chandelier 極值必須以還原的 entry 為起點 —— 否則 trough/peak 殘留 0，
             # 下一根 trailing 會用 min(sl, 0+chand*atr) 把空單 SL 砸成 ~3×ATR（停損形同失效）。
             self.peak = self.trough = self.entry_price
+            # 還原 scale-out 狀態，避免重啟後再次觸發已做過的 scale-out
+            self._scaled_out = st.scaled_out
+            self._entry_sl_dist = st.entry_sl_dist
         else:
             self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
             self.peak = self.trough = 0.0
@@ -148,6 +155,8 @@ class FuturesLiveTrader:
             print(f"[{bar_time}] {reason} @ {price:.2f}")
         self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
         self.peak = self.trough = 0.0
+        self._scaled_out = False
+        self._entry_sl_dist = 0.0
         self._guard.clear_position(self.cfg.strategy)
         self._save()
 
@@ -197,6 +206,8 @@ class FuturesLiveTrader:
         self.entry_price = price
         self.peak = self.trough = price             # Chandelier 進場後極值起點
         self.sl, self.tp = self.risk.exit_levels(price, direction, atr=atr)
+        self._entry_sl_dist = abs(price - self.sl)  # 原始停損距離，scale-out 閾值計算用
+        self._scaled_out = False                    # 新倉重設
         self.journal.log(side, price, decision.quantity, 0.0, ts=bar_time)
         self._guard.upsert_position(self.cfg.strategy, self.cfg.symbol,
                                     direction, decision.quantity, price)
@@ -280,6 +291,27 @@ class FuturesLiveTrader:
                 dir_txt = {1: "持多", -1: "持空", 0: "空手"}[self.dir]
                 acts.append({"act": "hold" if self.dir != 0 else "flat"})
                 print(f"[{bar_time}] {dir_txt} | 價 {price:.2f}")
+
+        # Scale-out：浮盈達 0.5R 時平一半倉、停損移到進場成本（保本）
+        if self.dir != 0 and not self._scaled_out and self._entry_sl_dist > 0:
+            if self.risk.check_scale_out(
+                self.entry_price, price, self._entry_sl_dist, self.dir, self._scaled_out
+            ):
+                half_qty = self.qty / 2
+                ok, _msg = self.execu.valid_order(half_qty, price)
+                if ok and half_qty > 0:
+                    self.execu.close(half_qty, self.dir)
+                    pnl_half = (price - self.entry_price) * half_qty * self.dir
+                    self.journal.log("scale_out", price, half_qty, pnl_half, ts=bar_time)
+                    self.qty -= half_qty
+                    self.sl = self.entry_price      # 剩餘半倉停損移到成本（保本）
+                    self._scaled_out = True
+                    self._save()
+                    acts.append({"act": "scale_out", "price": round(price, 2),
+                                 "qty": round(half_qty, 6)})
+                    side_txt = "多" if self.dir == 1 else "空"
+                    print(f"[{bar_time}] Scale Out {side_txt} — 平半倉 {half_qty:.6f} "
+                          f"@ {price:.2f}，SL 移至成本 {self.entry_price:.2f}")
 
         # Chandelier 追蹤停損：用「這根已收盤」(row=iloc[-2]) 的極值與 ATR 更新 self.sl，
         # 供「下一根」判定觸發（只升不降/只降不升、不用未收盤即時值，故無 look-ahead）。

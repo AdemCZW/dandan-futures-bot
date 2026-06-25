@@ -133,6 +133,26 @@ class RiskOfficer:
             return max(prev_stop, extreme_since_entry - band)
         return min(prev_stop, extreme_since_entry + band)
 
+    def check_scale_out(
+        self,
+        entry_price: float,
+        current_price: float,
+        sl_dist: float,
+        direction: int,
+        already_scaled: bool,
+        scale_r: float = 0.5,
+    ) -> bool:
+        """浮盈達到 scale_r 倍 R 時回傳 True，表示應部分獲利了結。
+
+        sl_dist  進場時的停損距離（原始，不隨 Chandelier 移動）
+        direction +1 多 / -1 空 / 0 空手
+        already_scaled 本輪已執行過 scale-out 時回傳 False（防重複）
+        """
+        if already_scaled or direction == 0 or sl_dist <= 0:
+            return False
+        floating_r = (current_price - entry_price) * direction / sl_dist
+        return floating_r >= scale_r
+
     def exit_levels(self, entry_price: float, direction: int = 1, atr=None):
         """回傳 (停損價, 停利價)。direction=+1 做多 / -1 做空。
 

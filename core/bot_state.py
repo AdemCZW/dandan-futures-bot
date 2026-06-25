@@ -31,6 +31,8 @@ class BotState:
     cb_consecutive_losses: int = 0    # Circuit Breaker：連續虧損計數
     cb_paused_until: str = ""         # Circuit Breaker：暫停到期時間（ISO 字串，空=未暫停）
     last_balance: float = 0.0         # 上次已知帳戶餘額，用於測試網重置偵測
+    scaled_out: bool = False          # 本輪持倉已執行 scale-out（防重複）
+    entry_sl_dist: float = 0.0        # 進場時的原始停損距離（scale-out 閾值計算用）
 
     def save(self, path: str) -> None:
         """原子寫入：先寫 .tmp 再 rename，避免崩潰時寫到一半留下半截檔。"""
