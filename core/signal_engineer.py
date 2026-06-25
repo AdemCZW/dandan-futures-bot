@@ -385,24 +385,60 @@ def smc_levels(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5) -> p
     return out
 
 
+# 費波那契通道比率 → 欄位名。0/1.0 為錨點，其餘（含 >1.0 延伸）皆平行排列。
+FIB_CHANNEL_RATIOS: dict[float, str] = {
+    0.0:   "fib_ch_0",
+    0.236: "fib_ch_236",
+    0.382: "fib_ch_382",
+    0.5:   "fib_ch_5",
+    0.618: "fib_ch_618",
+    0.786: "fib_ch_786",
+    1.0:   "fib_ch_100",
+    1.272: "fib_ch_1272",
+    1.618: "fib_ch_1618",
+    2.0:   "fib_ch_200",
+}
+
+
+def _confirmed_pivots(values: np.ndarray, pivot_left: int, pivot_right: int,
+                      kind: str) -> list[tuple[int, float]]:
+    """找所有確認的 swing pivot（j+pivot_right 根後才知道 j 是 pivot，故 causal）。
+
+    kind="low"  → swing low（局部最小）；kind="high" → swing high（局部最大）。
+    """
+    n = len(values)
+    out: list[tuple[int, float]] = []
+    for j in range(pivot_left, n - pivot_right):
+        left  = values[j - pivot_left: j]
+        right = values[j + 1: j + pivot_right + 1]
+        if kind == "low":
+            if values[j] < right.min() and values[j] <= left.min():
+                out.append((j, values[j]))
+        else:
+            if values[j] > right.max() and values[j] >= left.max():
+                out.append((j, values[j]))
+    return out
+
+
 def fib_channel_levels(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5,
-                       _atr_period: int = 14, _atr_mult: float = 3.0) -> pd.DataFrame:
-    """標準費波那契通道：斜率錨定結構、寬度錨定實際價格振幅。
+                       trend_fast: int = 20, trend_slow: int = 50) -> pd.DataFrame:
+    """費波那契斜向通道（與 TradingView Fibonacci Channel 同定義，漲跌雙向）。
 
-    構造方式（與 TradingView Fibonacci Channel 相同）：
-      1. 基線斜率：最近兩個已確認 swing low 連線延伸（市場結構方向）
-      2. 通道寬度 W：基線確立後，[p1 → 當根] 視窗內 high 超出基線的最大值
-         → 大波動市場自動撐寬，完全用實際價格而非 ATR 決定，與圖表工具一致
-      3. 多條平行帶在 0%、38.2%、61.8%、100% 位置
+    構造方式：
+      1. 趨勢方向：EMA(fast) vs EMA(slow) 判定（causal）。
+         上升 → 沿最近兩個已確認 swing low 連線（0 線在下、支撐）。
+         下降 → 沿最近兩個已確認 swing high 連線（0 線在上、阻力）。
+      2. 通道寬度 W：基線確立後，[p1 → 當根] 視窗內價格往對側超出基線的最大實際距離
+         （上升取 high−基線、下降取 基線−low）。完全用實際振幅，非 ATR。
+      3. 每條線 = fib_ch_0 + sign × r × W，sign=+1 上升 / −1 下降，
+         r ∈ {0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0, 1.272, 1.618, 2.0}。
+         等價於 fib_ch_0 + r × (fib_ch_100 − fib_ch_0)，即平行 + 費波那契間距。
 
-    全部 causal：pivot 需 pivot_right 根延遲確認，寬度只用過去 K 線的 high。
+    全部 causal：pivot 需延遲確認，寬度與趨勢只用過去 K 線。
 
-    回傳新增欄位：
-      fib_ch_0    — 下帶基線（0%）
-      fib_ch_382  — 38.2% 帶
-      fib_ch_618  — 61.8% 帶（黃金比例）
-      fib_ch_100  — 上帶（100%）
-      fib_ch_pos  — 收盤相對位置（0=下帶, 1=上帶；< 0 或 > 1 表示突破）
+    新增欄位：FIB_CHANNEL_RATIOS 的 10 條線 + fib_ch_pos + fib_ch_dir。
+      fib_ch_pos  收盤相對位置：0=趨勢原點（進場側）, 1=對側（目標側）；與方向無關。
+      fib_ch_dir  趨勢方向：+1 上升 / −1 下降 / 0 未定（無有效通道）。
     """
     out = df.copy()
     n = len(df)
@@ -410,58 +446,58 @@ def fib_channel_levels(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int =
     highs  = df["high"].values
     closes = df["close"].values
 
-    for col in ("fib_ch_0", "fib_ch_382", "fib_ch_618", "fib_ch_100", "fib_ch_pos"):
+    level_cols = list(FIB_CHANNEL_RATIOS.values())
+    for col in level_cols + ["fib_ch_pos", "fib_ch_dir"]:
         out[col] = np.nan
+    out["fib_ch_dir"] = 0.0
 
-    # 找所有確認的 swing low（j+pivot_right 根後才知道 j 是 pivot）
-    swing_lows: list[tuple[int, float]] = []
-    for j in range(pivot_left, n - pivot_right):
-        left_sl  = lows[j - pivot_left: j].min() if j >= pivot_left else lows[0:j].min() if j > 0 else lows[j]
-        right_sl = lows[j + 1: j + pivot_right + 1].min()
-        if lows[j] < right_sl and lows[j] <= left_sl:
-            swing_lows.append((j, lows[j]))
+    # 趨勢方向（causal）：快線 ≥ 慢線視為上升
+    ema_f = ema(df["close"], trend_fast).values
+    ema_s = ema(df["close"], trend_slow).values
 
-    if len(swing_lows) < 2:
+    swing_lows  = _confirmed_pivots(lows,  pivot_left, pivot_right, "low")
+    swing_highs = _confirmed_pivots(highs, pivot_left, pivot_right, "high")
+    if len(swing_lows) < 2 and len(swing_highs) < 2:
         return out
 
-    col_idx = {c: out.columns.get_loc(c)
-               for c in ("fib_ch_0", "fib_ch_382", "fib_ch_618", "fib_ch_100", "fib_ch_pos")}
-
-    # 快取：每個 (p1_j, p2_j) 組合的累計最大偏移
-    _max_dev_cache: dict[tuple[int, int], float] = {}
+    col_idx = {c: out.columns.get_loc(c) for c in level_cols}
+    pos_idx = out.columns.get_loc("fib_ch_pos")
+    dir_idx = out.columns.get_loc("fib_ch_dir")
 
     for i in range(n):
-        confirmed = [(j, p) for j, p in swing_lows if j + pivot_right <= i]
+        if np.isnan(ema_f[i]) or np.isnan(ema_s[i]):
+            continue
+        up = ema_f[i] >= ema_s[i]
+        pivots = swing_lows if up else swing_highs
+        confirmed = [(j, p) for j, p in pivots if j + pivot_right <= i]
         if len(confirmed) < 2:
             continue
 
-        p1_j, p1_low = confirmed[-2]
-        p2_j, p2_low = confirmed[-1]
+        p1_j, p1_v = confirmed[-2]
+        p2_j, p2_v = confirmed[-1]
         if p2_j <= p1_j:
             continue
 
-        slope = (p2_low - p1_low) / (p2_j - p1_j)
+        slope = (p2_v - p1_v) / (p2_j - p1_j)
+        # 基線（0 線）在各 bar 的值，覆蓋窗口 [p1_j, i]
+        ks       = np.arange(p1_j, i + 1)
+        baseline = p1_v + slope * (ks - p1_j)
+        ch0 = p1_v + slope * (i - p1_j)             # 0 線在當根
 
-        # 基線在 bar i 的值
-        ch_lower = p1_low + slope * (i - p1_j)
+        if up:
+            width = float((highs[p1_j:i + 1] - baseline).max())   # high 超出支撐
+            sign  = 1.0
+        else:
+            width = float((baseline - lows[p1_j:i + 1]).max())    # low 跌破阻力
+            sign  = -1.0
 
-        # 通道寬度：[p1_j, i] 窗口內 high 超出對應基線的最大值（增量更新）
-        key = (p1_j, p2_j)
-        prev_max = _max_dev_cache.get(key, 0.0)
-        bl_at_i = ch_lower                          # 基線在當根
-        dev_i   = highs[i] - bl_at_i
-        new_max = max(prev_max, dev_i)
-        _max_dev_cache[key] = new_max
-
-        ch_width = new_max
-        if ch_width <= 0:
+        if width <= 0:
             continue
 
-        out.iloc[i, col_idx["fib_ch_0"]]   = ch_lower
-        out.iloc[i, col_idx["fib_ch_382"]] = ch_lower + 0.382 * ch_width
-        out.iloc[i, col_idx["fib_ch_618"]] = ch_lower + 0.618 * ch_width
-        out.iloc[i, col_idx["fib_ch_100"]] = ch_lower + ch_width
-        out.iloc[i, col_idx["fib_ch_pos"]] = (closes[i] - ch_lower) / ch_width
+        for r, col in FIB_CHANNEL_RATIOS.items():
+            out.iloc[i, col_idx[col]] = ch0 + sign * r * width
+        out.iloc[i, pos_idx] = (closes[i] - ch0) * sign / width
+        out.iloc[i, dir_idx] = sign
 
     return out
 

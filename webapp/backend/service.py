@@ -792,7 +792,8 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
     df["dc_upper"] = don["dc_upper"]
     df["dc_lower"] = don["dc_lower"]
     fch = se.fib_channel_levels(df, pivot_left=5, pivot_right=5)
-    for col in ("fib_ch_0", "fib_ch_382", "fib_ch_618", "fib_ch_100"):
+    fib_cols = list(se.FIB_CHANNEL_RATIOS.values())
+    for col in fib_cols:
         df[col] = fch[col]
 
     def _ts(idx):
@@ -808,7 +809,7 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
     candles, st_bull, st_bear = [], [], []
     ema_fast, ema_slow, ema_trend = [], [], []
     dc_upper, dc_lower = [], []
-    fib_ch_0, fib_ch_382, fib_ch_618, fib_ch_100 = [], [], [], []
+    fib_series = {col: [] for col in fib_cols}
 
     for idx, row in df.iterrows():
         t = _ts(idx)
@@ -833,14 +834,9 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
             dc_upper.append({"time": t, "value": v})
         if (v := _f(row["dc_lower"])) is not None:
             dc_lower.append({"time": t, "value": v})
-        if (v := _f(row["fib_ch_0"])) is not None:
-            fib_ch_0.append({"time": t, "value": v})
-        if (v := _f(row["fib_ch_382"])) is not None:
-            fib_ch_382.append({"time": t, "value": v})
-        if (v := _f(row["fib_ch_618"])) is not None:
-            fib_ch_618.append({"time": t, "value": v})
-        if (v := _f(row["fib_ch_100"])) is not None:
-            fib_ch_100.append({"time": t, "value": v})
+        for col in fib_cols:
+            if (v := _f(row[col])) is not None:
+                fib_series[col].append({"time": t, "value": v})
 
     return {
         "candles": candles,
@@ -851,8 +847,5 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
         "ema_trend": ema_trend,
         "donchian_upper": dc_upper,
         "donchian_lower": dc_lower,
-        "fib_ch_0":   fib_ch_0,
-        "fib_ch_382": fib_ch_382,
-        "fib_ch_618": fib_ch_618,
-        "fib_ch_100": fib_ch_100,
+        **fib_series,
     }

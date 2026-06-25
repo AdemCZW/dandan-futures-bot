@@ -15,10 +15,17 @@ const OVERLAYS = [
   { key: 'ema_fast',        label: 'EMA 9',         color: '#ffa657', width: 1, style: 0, defOn: false, group: '均線' },
   { key: 'donchian_upper',  label: 'DC 上軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
   { key: 'donchian_lower',  label: 'DC 下軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
-  { key: 'fib_ch_0',        label: 'FC 0%',          color: '#388bfd', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
-  { key: 'fib_ch_382',      label: 'FC 38.2%',       color: '#3fb950', width: 1, style: 1, defOn: false, group: 'Fib 通道' },
-  { key: 'fib_ch_618',      label: 'FC 61.8%',       color: '#ffa657', width: 1, style: 1, defOn: false, group: 'Fib 通道' },
-  { key: 'fib_ch_100',      label: 'FC 100%',        color: '#f85149', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
+  // 費波那契通道：0 與 1.0 為錨點（實線），中間比率與延伸線（虛線）。漲跌雙向自動切換。
+  { key: 'fib_ch_0',        label: 'FC 0',           color: '#7f77dd', width: 2, style: 0, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_236',      label: 'FC 0.236',       color: '#6e7681', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_382',      label: 'FC 0.382',       color: '#6e7681', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_5',        label: 'FC 0.5',         color: '#8b949e', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_618',      label: 'FC 0.618',       color: '#ffa657', width: 2, style: 0, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_786',      label: 'FC 0.786',       color: '#6e7681', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_100',      label: 'FC 1.0',         color: '#7f77dd', width: 2, style: 0, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_1272',     label: 'FC 1.272',       color: '#f85149', width: 1, style: 1, defOn: false, group: 'Fib 延伸' },
+  { key: 'fib_ch_1618',     label: 'FC 1.618',       color: '#f85149', width: 1, style: 1, defOn: false, group: 'Fib 延伸' },
+  { key: 'fib_ch_200',      label: 'FC 2.0',         color: '#f85149', width: 1, style: 1, defOn: false, group: 'Fib 延伸' },
 ]
 
 const ALL_KEYS = OVERLAYS.map(o => o.key)

@@ -1,4 +1,13 @@
-"""費波那契通道 — signal_engineer.fib_channel_levels + FibChannelStrategy 測試。"""
+"""費波那契通道 — signal_engineer.fib_channel_levels + FibChannelStrategy 測試。
+
+新版定義（與 TradingView Fibonacci Channel 一致）：
+  - 趨勢自適應錨定：上升 → 沿兩個 swing low 連線（0 線在下、支撐）；
+                    下降 → 沿兩個 swing high 連線（0 線在上、阻力）。
+  - 全套比率以平行線排列：0/0.236/0.382/0.5/0.618/0.786/1.0 + 延伸 1.272/1.618/2.0。
+  - 每條線 = fib_ch_0 + r × (fib_ch_100 − fib_ch_0)（核心：平行 + 費波那契間距）。
+  - fib_ch_pos：0 = 趨勢原點（進場側），1 = 對側（目標側），與方向無關。
+  - fib_ch_dir：+1 上升 / -1 下降 / 0 未定。
+"""
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,14 +16,30 @@ from core import signal_engineer as se
 from core.quant_researcher import build_strategy
 
 
-def _df(n: int = 100, trend: str = "up", seed: int = 42) -> pd.DataFrame:
+# ratio → 欄位名（用於重建公式驗證）
+RATIO_COLS = {
+    0.0:   "fib_ch_0",
+    0.236: "fib_ch_236",
+    0.382: "fib_ch_382",
+    0.5:   "fib_ch_5",
+    0.618: "fib_ch_618",
+    0.786: "fib_ch_786",
+    1.0:   "fib_ch_100",
+    1.272: "fib_ch_1272",
+    1.618: "fib_ch_1618",
+    2.0:   "fib_ch_200",
+}
+ALL_LEVEL_COLS = list(RATIO_COLS.values())
+
+
+def _df(n: int = 120, trend: str = "up", seed: int = 42) -> pd.DataFrame:
     """產生測試用 OHLCV。noise std=2.0 確保出現真實回調，讓 swing pivot 得以被確認。"""
     np.random.seed(seed)
     noise = np.random.randn(n) * 2.0
     if trend == "up":
         close = 100 + np.arange(n) * 0.5 + noise
     elif trend == "down":
-        close = 150 - np.arange(n) * 0.5 + noise
+        close = 200 - np.arange(n) * 0.5 + noise
     else:
         close = 100 + noise
     high = close + abs(np.random.randn(n)) * 1.5
@@ -26,108 +51,71 @@ def _df(n: int = 100, trend: str = "up", seed: int = 42) -> pd.DataFrame:
 
 
 class TestFibChannelLevels:
-    def test_returns_required_columns(self):
-        df  = _df(80)
+    def test_returns_all_fib_columns(self):
+        out = se.fib_channel_levels(_df(100))
+        for col in ALL_LEVEL_COLS + ["fib_ch_pos", "fib_ch_dir"]:
+            assert col in out.columns, f"缺少欄位：{col}"
+
+    def test_fib_reconstruction_formula(self):
+        """核心：每條線都必須 = fib_ch_0 + r × (fib_ch_100 − fib_ch_0)。
+
+        這正是 TradingView Fib Channel 的定義，也是反推使用者圖片數字所得的公式。
+        """
+        out = se.fib_channel_levels(_df(140, "up"))
+        valid = out.dropna(subset=["fib_ch_0", "fib_ch_100"])
+        assert not valid.empty, "上升趨勢應有有效通道"
+        width = valid["fib_ch_100"] - valid["fib_ch_0"]
+        for r, col in RATIO_COLS.items():
+            expected = valid["fib_ch_0"] + r * width
+            assert np.allclose(valid[col], expected, atol=1e-6), \
+                f"{col} 不符費波那契重建公式（r={r}）"
+
+    def test_uptrend_levels_ascend(self):
+        """上升趨勢：dir=+1，0 線在下、100 線在上（fib_ch_0 < fib_ch_100）。"""
+        out = se.fib_channel_levels(_df(140, "up"))
+        valid = out.dropna(subset=["fib_ch_0", "fib_ch_100", "fib_ch_dir"])
+        assert not valid.empty
+        assert (valid["fib_ch_dir"] == 1).all(), "上升趨勢 dir 應全為 +1"
+        assert (valid["fib_ch_0"] < valid["fib_ch_100"]).all(), "上升趨勢 0 線應低於 100 線"
+
+    def test_downtrend_levels_descend(self):
+        """下降趨勢：dir=-1，0 線在上、100 線在下（fib_ch_0 > fib_ch_100）。"""
+        out = se.fib_channel_levels(_df(140, "down"))
+        valid = out.dropna(subset=["fib_ch_0", "fib_ch_100", "fib_ch_dir"])
+        assert not valid.empty, "下降趨勢應有有效通道"
+        assert (valid["fib_ch_dir"] == -1).all(), "下降趨勢 dir 應全為 -1"
+        assert (valid["fib_ch_0"] > valid["fib_ch_100"]).all(), "下降趨勢 0 線應高於 100 線"
+
+    def test_extensions_beyond_100(self):
+        """延伸線（>1.0）離 0 線比 100 線更遠，且方向一致。"""
+        out = se.fib_channel_levels(_df(140, "up"))
+        valid = out.dropna(subset=["fib_ch_0", "fib_ch_100", "fib_ch_1618"])
+        assert not valid.empty
+        d100 = (valid["fib_ch_100"]  - valid["fib_ch_0"]).abs()
+        d162 = (valid["fib_ch_1618"] - valid["fib_ch_0"]).abs()
+        assert (d162 > d100).all(), "1.618 應比 1.0 離 0 線更遠"
+
+    def test_pos_matches_normalized_close(self):
+        """fib_ch_pos == (close − fib_ch_0) / (fib_ch_100 − fib_ch_0)。"""
+        df  = _df(140, "up")
         out = se.fib_channel_levels(df)
-        for col in ("fib_ch_0", "fib_ch_382", "fib_ch_618", "fib_ch_100", "fib_ch_pos"):
-            assert col in out.columns, f"Missing column: {col}"
+        valid = out.dropna(subset=["fib_ch_pos", "fib_ch_0", "fib_ch_100"])
+        assert not valid.empty
+        width = valid["fib_ch_100"] - valid["fib_ch_0"]
+        expected = (df.loc[valid.index, "close"] - valid["fib_ch_0"]) / width
+        assert np.allclose(valid["fib_ch_pos"], expected, atol=1e-6)
 
     def test_causal_warmup_is_nan(self):
-        """前幾根（warmup 期）必須是 NaN，不得用未來資料。"""
-        df  = _df(100)
-        out = se.fib_channel_levels(df, pivot_left=5, pivot_right=5)
-        # 第一個確認 pivot 最早在 bar 5+5=10，通道需要兩個 pivot → 最早 bar ~20
-        assert out["fib_ch_0"].iloc[:15].isna().all(), "warmup 期應全為 NaN"
-
-    def test_has_valid_data_in_uptrend(self):
-        """上升趨勢 100 根應有足夠 pivot，後半段要有通道資料。"""
-        df  = _df(100, "up")
-        out = se.fib_channel_levels(df, pivot_left=5, pivot_right=5)
-        assert out["fib_ch_0"].notna().any(), "上升趨勢應出現至少一個通道有效值"
-
-    def test_bands_are_ordered(self):
-        """fib_ch_0 < fib_ch_382 < fib_ch_618 < fib_ch_100 在所有有效行。"""
-        df  = _df(100, "up")
-        out = se.fib_channel_levels(df, pivot_left=5, pivot_right=5)
-        valid = out.dropna(subset=["fib_ch_0", "fib_ch_100"])
-        assert (valid["fib_ch_0"] < valid["fib_ch_382"]).all(),  "fib_ch_0 應 < fib_ch_382"
-        assert (valid["fib_ch_382"] < valid["fib_ch_618"]).all(), "fib_ch_382 應 < fib_ch_618"
-        assert (valid["fib_ch_618"] < valid["fib_ch_100"]).all(), "fib_ch_618 應 < fib_ch_100"
+        """前段 warmup 期必須是 NaN，不得用未來資料。"""
+        out = se.fib_channel_levels(_df(120), pivot_left=5, pivot_right=5)
+        assert out["fib_ch_0"].iloc[:12].isna().all(), "warmup 期應全為 NaN"
 
     def test_insufficient_pivots_returns_all_nan(self):
-        """K 棒太少 / 無足夠 pivot → 全 NaN。"""
-        df  = _df(10, "up")  # 太短，找不到兩個 pivot
-        out = se.fib_channel_levels(df, pivot_left=3, pivot_right=3)
+        out = se.fib_channel_levels(_df(10, "up"), pivot_left=3, pivot_right=3)
         assert out["fib_ch_0"].isna().all(), "不足 pivot 應全 NaN"
 
-    def test_fib_ch_pos_ratio_at_lower_band(self):
-        """fib_ch_pos ≈ 0 當收盤貼近下帶（手工構造）。"""
-        # 手工設定通道：直接讀已知的 fib_ch_0，確認 pos 接近 0
-        df  = _df(100, "up")
-        out = se.fib_channel_levels(df, pivot_left=5, pivot_right=5)
-        valid = out.dropna(subset=["fib_ch_pos", "fib_ch_0", "fib_ch_100"])
-        if valid.empty:
-            pytest.skip("無有效通道資料（pivot 不足）")
-        # 至少有些 row 的 pos 在合理範圍內（-1 ~ 2）
-        assert valid["fib_ch_pos"].between(-1, 2).all(), "fib_ch_pos 應在合理範圍"
-
-
-class TestFibChannelStrategy:
-    def test_strategy_registered(self):
-        strat = build_strategy("fib_channel")
-        assert strat is not None
-
-    def test_prepare_adds_channel_columns(self):
-        strat = build_strategy("fib_channel")
-        df    = _df(100, "up")
-        out   = strat.prepare(df)
-        assert "fib_ch_0"   in out.columns
-        assert "fib_ch_100" in out.columns
-        assert "fib_ch_pos" in out.columns
-
-    def test_signal_returns_valid_values(self):
-        strat = build_strategy("fib_channel")
-        df    = _df(100, "up")
-        prepared = strat.prepare(df).dropna()
-        for _, row in prepared.iterrows():
-            sig = strat.signal(row, 0)
-            assert sig in (-1, 0, 1), f"無效信號: {sig}"
-
-    def test_long_signal_when_in_lower_zone(self):
-        """fib_ch_pos < entry_zone 且 regime OK → 做多信號。"""
-        strat = build_strategy("fib_channel",
-                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
-                               entry_zone=0.35)
-        df    = _df(100, "up")
-        prepared = strat.prepare(df).dropna()
-        lower_zone = prepared[prepared["fib_ch_pos"] < 0.35]
-        if lower_zone.empty:
-            pytest.skip("無下帶區行")
-        signals = [strat.signal(row, 0) for _, row in lower_zone.iterrows()]
-        assert 1 in signals, "下帶區應有至少一個做多信號"
-
-    def test_exit_long_when_price_above_exit_zone(self):
-        """持多且 fib_ch_pos > exit_zone → 平倉（return 0）。"""
-        strat = build_strategy("fib_channel",
-                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
-                               exit_zone=0.70)
-        df    = _df(100, "up")
-        prepared = strat.prepare(df).dropna()
-        upper_zone = prepared[prepared["fib_ch_pos"] > 0.70]
-        if upper_zone.empty:
-            pytest.skip("無上帶區行")
-        signals = [strat.signal(row, 1) for _, row in upper_zone.iterrows()]
-        assert 0 in signals, "上帶區持多應平倉"
-
-    def test_signal_no_entry_without_channel(self):
-        """通道 NaN 時不進場（維持空手）。"""
-        strat = build_strategy("fib_channel")
-        row = {"fib_ch_pos": float("nan"), "close": 100.0}
-        assert strat.signal(row, 0) == 0
-
     def test_channel_wider_when_volatility_higher(self):
-        """高波動資料的通道寬度（fib_ch_100 - fib_ch_0）應大於低波動資料。"""
-        def _volatile_df(noise_std, n=150, seed=7):
+        def _vol_df(noise_std, n=160, seed=7):
             np.random.seed(seed)
             noise = np.random.randn(n) * noise_std
             close = 100 + np.arange(n) * 0.3 + noise
@@ -137,12 +125,72 @@ class TestFibChannelStrategy:
                                   "low": low, "close": close,
                                   "volume": np.ones(n) * 500.0})
 
-        low_vol  = se.fib_channel_levels(_volatile_df(1.0))
-        high_vol = se.fib_channel_levels(_volatile_df(6.0))
+        low_vol  = se.fib_channel_levels(_vol_df(1.0))
+        high_vol = se.fib_channel_levels(_vol_df(6.0))
+        low_w  = (low_vol["fib_ch_100"]  - low_vol["fib_ch_0"]).abs().dropna().mean()
+        high_w = (high_vol["fib_ch_100"] - high_vol["fib_ch_0"]).abs().dropna().mean()
+        assert not np.isnan(low_w) and not np.isnan(high_w)
+        assert high_w > low_w, "高波動應產生更寬的通道"
 
-        low_width  = (low_vol["fib_ch_100"]  - low_vol["fib_ch_0"]).dropna().mean()
-        high_width = (high_vol["fib_ch_100"] - high_vol["fib_ch_0"]).dropna().mean()
+    def test_dir_zero_rows_have_nan_levels(self):
+        """方向未定（dir=0）的行，通道線應為 NaN（不亂畫）。"""
+        out = se.fib_channel_levels(_df(120, "flat"))
+        zero_dir = out[out["fib_ch_dir"] == 0]
+        if not zero_dir.empty:
+            assert zero_dir["fib_ch_0"].isna().all(), "dir=0 的行通道線應為 NaN"
 
-        assert not np.isnan(low_width),  "低波動資料應能產生通道"
-        assert not np.isnan(high_width), "高波動資料應能產生通道"
-        assert high_width > low_width, "高波動應產生更寬的通道"
+
+class TestFibChannelStrategy:
+    def test_strategy_registered(self):
+        assert build_strategy("fib_channel") is not None
+
+    def test_prepare_adds_channel_columns(self):
+        strat = build_strategy("fib_channel")
+        out   = strat.prepare(_df(120, "up"))
+        for col in ("fib_ch_0", "fib_ch_100", "fib_ch_pos", "fib_ch_dir"):
+            assert col in out.columns
+
+    def test_signal_returns_valid_values(self):
+        strat = build_strategy("fib_channel")
+        prepared = strat.prepare(_df(120, "up")).dropna()
+        for _, row in prepared.iterrows():
+            assert strat.signal(row, 0) in (-1, 0, 1)
+
+    def test_long_entry_in_uptrend_pullback(self):
+        """上升趨勢 + 回調到原點（pos<entry_z）→ 做多。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               entry_zone=0.35)
+        prepared = strat.prepare(_df(140, "up")).dropna()
+        zone = prepared[(prepared["fib_ch_dir"] == 1) & (prepared["fib_ch_pos"] < 0.35)]
+        if zone.empty:
+            pytest.skip("無上升回調區行")
+        signals = [strat.signal(row, 0) for _, row in zone.iterrows()]
+        assert 1 in signals, "上升趨勢回調區應有做多信號"
+
+    def test_short_entry_in_downtrend_pullback(self):
+        """下降趨勢 + 回調到原點（pos<entry_z）→ 做空。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               entry_zone=0.35)
+        prepared = strat.prepare(_df(140, "down")).dropna()
+        zone = prepared[(prepared["fib_ch_dir"] == -1) & (prepared["fib_ch_pos"] < 0.35)]
+        if zone.empty:
+            pytest.skip("無下降回調區行")
+        signals = [strat.signal(row, 0) for _, row in zone.iterrows()]
+        assert -1 in signals, "下降趨勢回調區應有做空信號"
+
+    def test_exit_long_when_reach_target(self):
+        """持多且 pos > exit_z（到達目標側）→ 平倉。"""
+        strat = build_strategy("fib_channel", exit_zone=0.70)
+        prepared = strat.prepare(_df(140, "up")).dropna()
+        upper = prepared[prepared["fib_ch_pos"] > 0.70]
+        if upper.empty:
+            pytest.skip("無目標側行")
+        signals = [strat.signal(row, 1) for _, row in upper.iterrows()]
+        assert 0 in signals, "到達目標側持多應平倉"
+
+    def test_no_entry_without_channel(self):
+        strat = build_strategy("fib_channel")
+        row = {"fib_ch_pos": float("nan"), "fib_ch_dir": float("nan"), "close": 100.0}
+        assert strat.signal(row, 0) == 0

@@ -725,15 +725,19 @@ class SmcStructureStrategy(Strategy):
 
 
 class FibChannelStrategy(Strategy):
-    """費波那契斜向通道順勢策略（多空雙向）。
+    """費波那契斜向通道順勢策略（多空雙向，趨勢自適應）。
 
-    基線：最近兩個確認 swing low 連線延伸；通道高度：兩 pivot 間 high 超出基線的最大值。
-    進場：收盤在下帶區（fib_ch_pos < entry_zone）做多、上帶區（>1-entry_zone）做空。
-    出場：到達對面出場區或突破通道外側。
+    通道由 signal_engineer.fib_channel_levels 計算：
+      - 上升趨勢（fib_ch_dir=+1）：0 線沿 swing low（支撐），目標在上。
+      - 下降趨勢（fib_ch_dir=−1）：0 線沿 swing high（阻力），目標在下。
+    fib_ch_pos：0=趨勢原點（進場側）、1=對側（目標側），與方向無關。
+
+    進場：回調到原點（fib_ch_pos < entry_zone）順勢進場，方向 = fib_ch_dir。
+    出場：到達目標側（pos > exit_zone）或跌破原點（pos < −break_buffer，趨勢失效）。
     """
     name = "fib_channel"
     defaults = {"pivot_left": 5, "pivot_right": 3,
-                "entry_zone": 0.30, "exit_zone": 0.80,
+                "entry_zone": 0.30, "exit_zone": 0.80, "break_buffer": 0.10,
                 "regime_confirm_bars": 1}
     allow_short = True
     regime_pref = "trend"
@@ -748,27 +752,27 @@ class FibChannelStrategy(Strategy):
     def signal(self, row, position: int) -> int:
         g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
         pos_in_ch = _num(g("fib_ch_pos"))
-
-        if pos_in_ch is None:
-            return 0 if position == 0 else position
+        ch_dir    = _num(g("fib_ch_dir"))
 
         entry_z = float(self.params.get("entry_zone", 0.30))
         exit_z  = float(self.params.get("exit_zone",  0.80))
+        brk     = float(self.params.get("break_buffer", 0.10))
 
-        if position == 1:
-            # 持多：到上帶或跌破通道 → 平倉
-            return 0 if (pos_in_ch > exit_z or pos_in_ch < 0) else 1
-        if position == -1:
-            # 持空：回到下帶或突破通道 → 平倉
-            return 0 if (pos_in_ch < (1.0 - exit_z) or pos_in_ch > 1) else -1
+        # 持倉中：到達目標側或跌破原點 → 平倉（pos 語意與方向無關，多空共用）
+        if position != 0:
+            if pos_in_ch is None:
+                return position
+            if pos_in_ch > exit_z or pos_in_ch < -brk:
+                return 0
+            return position
 
+        # 空手進場：需有效通道 + regime 確認 + 回調到原點區
+        if pos_in_ch is None or ch_dir is None or ch_dir == 0:
+            return 0
         if not self._regime_ok(row):
             return 0
-
         if pos_in_ch < entry_z:
-            return 1
-        if pos_in_ch > (1.0 - entry_z):
-            return -1
+            return int(ch_dir)          # 順勢方向進場（+1 多 / −1 空）
         return 0
 
 
