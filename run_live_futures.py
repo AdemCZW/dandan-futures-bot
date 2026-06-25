@@ -146,13 +146,28 @@ class FuturesLiveTrader:
         self.peak = self.trough = 0.0
         self._save()
 
+    def _kelly_pct(self) -> float | None:
+        """從 DB 讀近 50 筆平倉紀錄，計算 half-Kelly 倉位比例。樣本不足時回傳 None。"""
+        try:
+            from core.trade_journal import read_trades_db
+            from core.risk_officer import kelly_fraction
+            strategy = os.getenv("BOT_STRATEGY")
+            rows = read_trades_db(limit=50, mode="exit", strategy=strategy)
+            pnl = [r["pnl"] for r in rows if r.get("pnl") is not None]
+            return kelly_fraction(pnl, min_trades=20)
+        except Exception:
+            return None
+
     def _open(self, price, bar_time, direction, atr=None) -> None:
         cfg = self.cfg
         bal = self.execu.balance(cfg.quote_asset)
-        decision = self.risk.check_entry(bal, price, bar_time, direction=direction, atr=atr)
+        kelly_pct = self._kelly_pct()
+        decision = self.risk.check_entry(bal, price, bar_time, direction=direction, atr=atr,
+                                         kelly_pct=kelly_pct)
+        kelly_tag = f" Kelly={kelly_pct:.1%}" if kelly_pct is not None else ""
         self._last_risk = {"allow": bool(decision.allow),
                            "qty": round(float(decision.quantity), 6),
-                           "reason": decision.reason}
+                           "reason": decision.reason + kelly_tag}
         if not decision.allow:
             print(f"[{bar_time}] 風控否決：{decision.reason}")
             return

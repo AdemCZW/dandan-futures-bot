@@ -225,3 +225,85 @@ def test_daily_circuit_breaker_resets_across_days(officer):
     decision = officer.check_entry(9_300.0, 100.0, "2026-06-23T00:05:00", direction=1)
     assert decision.allow is True
     assert decision.quantity > 0.0
+
+
+# ── kelly_fraction ─────────────────────────────────────────────────
+
+from core.risk_officer import kelly_fraction
+
+
+class TestKellyFraction:
+
+    def test_returns_none_when_empty(self):
+        assert kelly_fraction([]) is None
+
+    def test_returns_none_when_too_few_trades(self):
+        """min_trades 預設 20，少於此數回傳 None，不產生雜訊 Kelly。"""
+        assert kelly_fraction([100.0] * 10) is None
+
+    def test_all_losses_returns_zero(self):
+        """Kelly 公式算出負值時夾在 0，不建議反押。"""
+        pnl = [-50.0] * 20
+        result = kelly_fraction(pnl, min_trades=20)
+        assert result == 0.0
+
+    def test_all_wins_capped_at_max(self):
+        """連贏算出 Kelly=1；half-Kelly=0.5；最終夾在 0.5（保守上限）。"""
+        pnl = [100.0] * 20
+        result = kelly_fraction(pnl, min_trades=20)
+        assert result == pytest.approx(0.5)
+
+    def test_sixty_win_one_to_one_ratio(self):
+        """60% 勝率，盈虧比 1:1 → Kelly = p - q/b = 0.6 - 0.4 = 0.2 → half = 0.1"""
+        wins  = [100.0] * 12
+        losses = [-100.0] * 8
+        result = kelly_fraction(wins + losses, min_trades=20)
+        assert result == pytest.approx(0.10, abs=1e-9)
+
+    def test_sixty_win_two_to_one_ratio(self):
+        """60% 勝率，盈虧比 2:1 → Kelly = 0.6 - 0.4/2 = 0.4 → half = 0.2"""
+        wins  = [200.0] * 12
+        losses = [-100.0] * 8
+        result = kelly_fraction(wins + losses, min_trades=20)
+        assert result == pytest.approx(0.20, abs=1e-9)
+
+    def test_half_kelly_false_returns_full_kelly(self):
+        """half_kelly=False 時回傳完整 Kelly（仍夾在 [0, 0.5]）。"""
+        wins  = [200.0] * 12
+        losses = [-100.0] * 8
+        result = kelly_fraction(wins + losses, min_trades=20, half_kelly=False)
+        assert result == pytest.approx(0.40, abs=1e-9)
+
+    def test_custom_min_trades(self):
+        """min_trades=5 → 5 筆就夠了。"""
+        pnl = [100.0] * 5
+        result = kelly_fraction(pnl, min_trades=5)
+        assert result is not None
+
+    def test_position_size_uses_kelly_pct(self):
+        """kelly_pct 傳入時，position_size 以 kelly_pct 取代 cfg.max_position_pct。"""
+        cfg = Config()
+        cfg.max_position_pct = 0.30        # 原本 30%
+        officer = RiskOfficer(cfg)
+        equity, price, stop = 10_000.0, 100.0, 98.0
+
+        size_default = officer.position_size(equity, price, stop)
+        size_kelly   = officer.position_size(equity, price, stop, kelly_pct=0.10)
+
+        assert size_kelly < size_default   # 10% Kelly cap 比 30% 預設更保守
+        # notional = equity * kelly_pct = 10_000 * 0.10 = 1000 → qty = 1000/100 = 10
+        # (risk-based qty 可能更小；取 min)
+        assert size_kelly <= 10.0 + 1e-9
+
+    def test_check_entry_accepts_kelly_pct(self):
+        """check_entry 接受 kelly_pct 參數並正確傳給 position_size。"""
+        cfg = Config()
+        cfg.max_position_pct = 0.30
+        officer = RiskOfficer(cfg)
+        equity, price = 10_000.0, 100.0
+
+        dec_default = officer.check_entry(equity, price, "2026-01-01", kelly_pct=None)
+        dec_kelly   = officer.check_entry(equity, price, "2026-01-01", kelly_pct=0.05)
+
+        assert dec_kelly.allow is True
+        assert dec_kelly.quantity < dec_default.quantity
