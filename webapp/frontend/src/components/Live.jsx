@@ -19,7 +19,9 @@ function fmtPct(n) {
   return (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%'
 }
 
-/** 把 recent_trades 配對成「開倉→平倉」回合（最新在前）。 */
+/** 把 recent_trades 配對成「開倉→平倉」回合（最新在前）。
+ *  配對失敗的孤立 exit（entry 超出歷史範圍）仍顯示，只是開倉格顯示 —。
+ */
 function pairTrades(trades = []) {
   const ordered = [...trades].reverse()   // 轉時間正序
   const pairs = []
@@ -28,17 +30,32 @@ function pairTrades(trades = []) {
   for (const t of ordered) {
     if (t.side === 'entry' || t.side === 'entry_short') {
       entry = t
-    } else if (t.side && t.side.startsWith('exit') && entry) {
-      pairs.push({
-        dir:         entry.side === 'entry' ? 'long' : 'short',
-        entry_price: entry.price,
-        exit_price:  t.price,
-        qty:         t.qty,
-        pnl:         t.pnl,
-        ts:          t.ts,
-        pos_value:   Math.round(entry.qty * entry.price),
-      })
-      entry = null
+    } else if (t.side && t.side.startsWith('exit')) {
+      if (entry) {
+        // 完整配對
+        pairs.push({
+          dir:         entry.side === 'entry' ? 'long' : 'short',
+          entry_price: entry.price,
+          exit_price:  t.price,
+          qty:         t.qty,
+          pnl:         t.pnl,
+          ts:          t.ts,
+          pos_value:   Math.round(entry.qty * entry.price),
+        })
+        entry = null
+      } else {
+        // 孤立 exit（entry 超出歷史範圍）— 仍顯示
+        pairs.push({
+          dir:         t.pnl > 0 ? 'long' : 'short',   // 用損益方向猜
+          entry_price: null,
+          exit_price:  t.price,
+          qty:         t.qty,
+          pnl:         t.pnl,
+          ts:          t.ts,
+          pos_value:   Math.round(t.qty * t.price),
+          orphan:      true,
+        })
+      }
     }
   }
   if (entry) {          // 尚未平倉的開倉（目前持倉）
