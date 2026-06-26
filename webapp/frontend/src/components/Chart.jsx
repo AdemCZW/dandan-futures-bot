@@ -5,8 +5,9 @@ import { api } from '../api'
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 const TFS = ['1h', '4h', '1d']
 
-// 不同 bot（strategy）配不同顏色；超過長度則循環取用
-const BOT_PALETTE = ['#58a6ff', '#3fb950', '#ffa657', '#d2a8ff', '#39d3c3', '#f778ba', '#e3b341', '#ff7b72']
+// 不同 bot（strategy）配不同顏色；刻意避開紅/綠（與漲跌 K 棒同色會看不出來），
+// 選一組高彩度、彼此區隔明顯的色票。超過長度則循環取用。
+const BOT_PALETTE = ['#58a6ff', '#f778ba', '#e3b341', '#39d3c3', '#d2a8ff', '#ff9580', '#7ee787', '#ffab70']
 const colorForBot = (names, strat) => BOT_PALETTE[Math.max(0, names.indexOf(strat)) % BOT_PALETTE.length]
 
 // mode → 中文標籤（標明回測 vs 真實）
@@ -24,12 +25,13 @@ const OVERLAYS = [
   { key: 'donchian_upper',  label: 'DC 上軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
   { key: 'donchian_lower',  label: 'DC 下軌',        color: '#3d4451', width: 1, style: 2, defOn: false, group: '通道' },
   // 費波那契通道：0 與 1.0 為錨點（實線），中間比率與延伸線（虛線）。漲跌雙向自動切換。
+  // 預設只開 3 條關鍵線（0 原點 / 0.618 黃金 / 1.0 目標），中間比率預設關閉避免雜訊，需要時手動開。
   { key: 'fib_ch_0',        label: 'FC 0',           color: '#7f77dd', width: 2, style: 0, defOn: true,  group: 'Fib 通道' },
-  { key: 'fib_ch_236',      label: 'FC 0.236',       color: '#6e7681', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
-  { key: 'fib_ch_382',      label: 'FC 0.382',       color: '#6e7681', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
-  { key: 'fib_ch_5',        label: 'FC 0.5',         color: '#8b949e', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_236',      label: 'FC 0.236',       color: '#6e7681', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
+  { key: 'fib_ch_382',      label: 'FC 0.382',       color: '#6e7681', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
+  { key: 'fib_ch_5',        label: 'FC 0.5',         color: '#8b949e', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
   { key: 'fib_ch_618',      label: 'FC 0.618',       color: '#ffa657', width: 2, style: 0, defOn: true,  group: 'Fib 通道' },
-  { key: 'fib_ch_786',      label: 'FC 0.786',       color: '#6e7681', width: 1, style: 2, defOn: true,  group: 'Fib 通道' },
+  { key: 'fib_ch_786',      label: 'FC 0.786',       color: '#6e7681', width: 1, style: 2, defOn: false, group: 'Fib 通道' },
   { key: 'fib_ch_100',      label: 'FC 1.0',         color: '#7f77dd', width: 2, style: 0, defOn: true,  group: 'Fib 通道' },
   { key: 'fib_ch_1272',     label: 'FC 1.272',       color: '#f85149', width: 1, style: 1, defOn: false, group: 'Fib 延伸' },
   { key: 'fib_ch_1618',     label: 'FC 1.618',       color: '#f85149', width: 1, style: 1, defOn: false, group: 'Fib 延伸' },
@@ -74,7 +76,7 @@ export default function Chart() {
       rightPriceScale: { borderColor: '#21262d', textColor: '#8b949e' },
       timeScale: {
         borderColor: '#21262d', timeVisible: true, secondsVisible: false,
-        rightOffset: 8, barSpacing: 8,
+        rightOffset: 12, barSpacing: 12, minBarSpacing: 4,
       },
       width: el.clientWidth, height: 460,
     })
@@ -112,7 +114,14 @@ export default function Chart() {
         dataRef.current = d
         seriesRef.current.candles?.setData(d.candles ?? [])
         ALL_KEYS.forEach(k => seriesRef.current[k]?.setData(vis[k] ? (d[k] ?? []) : []))
-        chartRef.current?.timeScale().scrollToRealTime()
+        // 預設聚焦最近 ~90 根，讓 K 棒放大、交易點散開（避免 300 根全擠成一團）。
+        // setData 在新資料上會排程一次 auto-fit，故用 rAF 延後設定可見範圍以覆蓋 auto-fit。
+        const n = d.candles?.length ?? 0
+        requestAnimationFrame(() => {
+          if (!chartRef.current) return
+          if (n > 0) chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 12 })
+          else chartRef.current.timeScale().scrollToRealTime()
+        })
         const last = d.candles?.[d.candles.length - 1]
         if (last) { setLastTs(last.time); setLivePrice(last.close) }
         setLoading(false)
