@@ -95,3 +95,86 @@ class TestPortfolioGuard:
         ok2, _ = guard.check_exposure("bot_a", direction=1, new_notional=2001.0,
                                       max_notional=5000.0)
         assert ok2 is False
+
+
+class TestSameStrategyDifferentSymbol:
+    """兩台 bot 跑同一策略（fib_channel）但不同標的（BTC / SOL）。
+
+    問題背景：identity 原本只用 strategy → 兩台共用同一列，互相覆蓋/刪除，
+    且 check_exposure 把對方的倉位誤當「自己的舊倉」排除。
+    修法：identity 改用 (strategy, symbol) 複合鍵。
+    """
+
+    @pytest.fixture
+    def guard(self, tmp_path):
+        return PortfolioGuard(db_path=str(tmp_path / "g.db"))
+
+    def test_two_symbols_same_strategy_tracked_separately(self, guard):
+        """同 strategy 不同 symbol → 各自獨立記錄，不互相覆蓋。"""
+        guard.upsert_position("fib_channel", "BTCUSDT", 1, 0.01, 60000.0)
+        guard.upsert_position("fib_channel", "SOLUSDT", -1, 10.0, 68.0)
+        positions = guard.get_positions()
+        assert len(positions) == 2, "同策略不同標的應各自獨立，不該互相覆蓋"
+        syms = {p["symbol"] for p in positions}
+        assert syms == {"BTCUSDT", "SOLUSDT"}
+
+    def test_clear_one_symbol_keeps_other(self, guard):
+        """clear_position 帶 symbol → 只刪該標的，不影響同策略另一標的。"""
+        guard.upsert_position("fib_channel", "BTCUSDT", 1, 0.01, 60000.0)
+        guard.upsert_position("fib_channel", "SOLUSDT", -1, 10.0, 68.0)
+        guard.clear_position("fib_channel", "SOLUSDT")
+        positions = guard.get_positions()
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "BTCUSDT", "只該刪掉 SOLUSDT"
+
+    def test_exposure_counts_same_strategy_other_symbol_as_other_bot(self, guard):
+        """同策略、不同 symbol 的倉位，對 check_exposure 而言是「別台 bot」，須計入暴露。"""
+        # Bot2 = fib_channel/SOL 已做多 4000
+        guard.upsert_position("fib_channel", "SOLUSDT", 1, 58.8, 68.0)  # ~4000
+        # Bot1 = fib_channel/BTC 想做多 2000，同向合計 6000 > 5000 → 拒絕
+        ok, reason = guard.check_exposure("fib_channel", direction=1,
+                                          new_notional=2000.0, max_notional=5000.0,
+                                          own_symbol="BTCUSDT")
+        assert ok is False, "對方同策略不同標的的倉位應計入同向暴露"
+
+    def test_exposure_excludes_own_symbol(self, guard):
+        """check_exposure 排除自己（strategy+symbol 都相同）的舊倉。"""
+        # Bot1 自己 fib_channel/BTC 的殘留舊倉 4000
+        guard.upsert_position("fib_channel", "BTCUSDT", 1, 0.0667, 60000.0)  # ~4000
+        # Bot1 新倉 2000；排除自己舊倉 → 其他為 0 → 放行
+        ok, _ = guard.check_exposure("fib_channel", direction=1,
+                                     new_notional=2000.0, max_notional=5000.0,
+                                     own_symbol="BTCUSDT")
+        assert ok is True, "自己（strategy+symbol 相同）的舊倉不該計入"
+
+
+class TestLegacySchemaMigration:
+    """舊版單一主鍵 (strategy) 的表，初始化時應遷移成 (strategy, symbol) 並保留資料。"""
+
+    def test_migrates_old_single_pk_table_preserving_rows(self, tmp_path):
+        import sqlite3
+        db_path = str(tmp_path / "legacy.db")
+        # 手動建立「舊結構」：strategy 為唯一主鍵
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE open_positions ("
+            "strategy TEXT PRIMARY KEY, symbol TEXT, direction INTEGER, "
+            "qty REAL, price REAL, notional REAL, updated_at TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO open_positions VALUES "
+            "('fib_channel','SOLUSDT',-1,10.0,68.0,680.0,'2026-06-26T00:00:00')"
+        )
+        conn.commit(); conn.close()
+
+        # 初始化 guard → 觸發遷移
+        guard = PortfolioGuard(db_path=db_path)
+
+        # 舊資料保留
+        positions = guard.get_positions()
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "SOLUSDT"
+
+        # 遷移後可容納同策略不同標的（舊結構會因 PK 衝突失敗）
+        guard.upsert_position("fib_channel", "BTCUSDT", 1, 0.01, 60000.0)
+        assert len(guard.get_positions()) == 2

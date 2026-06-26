@@ -157,7 +157,7 @@ class FuturesLiveTrader:
         self.peak = self.trough = 0.0
         self._scaled_out = False
         self._entry_sl_dist = 0.0
-        self._guard.clear_position(self.cfg.strategy)
+        self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)
         self._save()
 
     def _kelly_pct(self) -> float | None:
@@ -181,7 +181,8 @@ class FuturesLiveTrader:
         if decision.allow:
             notional = decision.quantity * price
             ok, reason = self._guard.check_exposure(
-                self.cfg.strategy, direction, notional, self._guard_max)
+                self.cfg.strategy, direction, notional, self._guard_max,
+                own_symbol=self.cfg.symbol)
             if not ok:
                 decision = type(decision)(False, 0.0, reason)
         kelly_tag = f" Kelly={kelly_pct:.1%}" if kelly_pct is not None else ""
