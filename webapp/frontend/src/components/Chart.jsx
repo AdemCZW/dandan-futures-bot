@@ -48,7 +48,8 @@ export default function Chart() {
   const markerDataRef = useRef([])           // 原始標記（後端回傳）
 
   const [bots,        setBots]        = useState([])    // 出現過的 strategy 清單（圖例）
-  const [showMarkers, setShowMarkers] = useState(true)  // 交易點開關
+  const [showMarkers, setShowMarkers] = useState(true)  // 交易點總開關
+  const [hiddenBots,  setHiddenBots]  = useState(new Set())  // 個別隱藏的 bot
 
   const [symbol,    setSymbol]    = useState('BTCUSDT')
   const [tf,        setTf]        = useState('4h')
@@ -145,19 +146,22 @@ export default function Chart() {
   }, [autoSec, symbol]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 交易標記：依 bot 配色 + 進出場形狀 + 聚合筆數，套到 K 線 ──────────────
-  const applyMarkers = useCallback((raw, botNames, show) => {
+  const applyMarkers = useCallback((raw, botNames, show, hidden) => {
     if (!markersRef.current) return
     if (!show || !raw?.length) { markersRef.current.setMarkers([]); return }
-    const ms = raw.map(m => {
-      const color = colorForBot(botNames, m.strategy)
-      const text  = m.count > 1 ? String(m.count) : undefined   // 聚合多筆 → 顯示筆數
-      if (m.side === 'entry') {
-        const short = m.dir < 0
-        return { time: m.time, position: short ? 'aboveBar' : 'belowBar',
-                 color, shape: short ? 'arrowDown' : 'arrowUp', text }
-      }
-      return { time: m.time, position: 'aboveBar', color, shape: 'circle', text }
-    })
+    const ms = raw
+      .filter(m => !hidden?.has(m.strategy))   // 過濾個別隱藏的 bot
+      .map(m => {
+        const color = colorForBot(botNames, m.strategy)
+        const text  = m.count > 1 ? `×${m.count}` : undefined  // 聚合多筆 → ×N
+        if (m.side === 'entry') {
+          const short = m.dir < 0
+          return { time: m.time, position: short ? 'aboveBar' : 'belowBar',
+                   color, shape: short ? 'arrowDown' : 'arrowUp', text }
+        }
+        // 出場：嵌在 K 線內，不跟進場點搶位置
+        return { time: m.time, position: 'inBar', color, shape: 'circle', text }
+      })
     markersRef.current.setMarkers(ms)
   }, [])
 
@@ -168,15 +172,15 @@ export default function Chart() {
         markerDataRef.current = d.markers ?? []
         const bl = d.bots ?? []
         setBots(bl)
-        applyMarkers(d.markers ?? [], bl.map(b => b.strategy), showMarkers)
+        applyMarkers(d.markers ?? [], bl.map(b => b.strategy), showMarkers, hiddenBots)
       })
-      .catch(() => { markerDataRef.current = []; setBots([]); applyMarkers([], [], false) })
+      .catch(() => { markerDataRef.current = []; setBots([]); applyMarkers([], [], false, hiddenBots) })
   }, [symbol, refresh, applyMarkers]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── 開關切換 → 重套標記 ──────────────────────────────────────────────
+  // ── 開關切換 / 個別隱藏 → 重套標記 ──────────────────────────────────
   useEffect(() => {
-    applyMarkers(markerDataRef.current, bots.map(b => b.strategy), showMarkers)
-  }, [showMarkers, bots, applyMarkers])
+    applyMarkers(markerDataRef.current, bots.map(b => b.strategy), showMarkers, hiddenBots)
+  }, [showMarkers, hiddenBots, bots, applyMarkers])
 
   const toggle = useCallback(key => {
     setVis(prev => {
@@ -269,34 +273,46 @@ export default function Chart() {
         ))}
       </div>
 
-      {/* ── 交易點：開關 + bot 圖例（每 6h 聚合一點，標明回測）── */}
+      {/* ── 交易點：總開關 + bot 圖例（可逐一點擊隱藏）── */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button onClick={() => setShowMarkers(s => !s)} style={chip(showMarkers, '#e3b341')}>
-          ⚲ 交易點 / 6h
+          ⚲ 交易點
         </button>
         {showMarkers && bots.length > 0 && (
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
             {bots.map(b => {
-              const names = bots.map(x => x.strategy)
-              const isBT = b.mode === 'backtest'
+              const names   = bots.map(x => x.strategy)
+              const isBT    = b.mode === 'backtest'
+              const hidden  = hiddenBots.has(b.strategy)
+              const dotClr  = colorForBot(names, b.strategy)
+              const toggleBot = () => setHiddenBots(prev => {
+                const next = new Set(prev)
+                hidden ? next.delete(b.strategy) : next.add(b.strategy)
+                return next
+              })
               return (
-                <span key={b.strategy} style={{ display: 'flex', alignItems: 'center', gap: 4,
-                  fontSize: 11, color: '#8b949e', fontFamily: 'var(--font-display)' }}>
-                  <span style={{ width: 9, height: 9, borderRadius: '50%',
-                    background: colorForBot(names, b.strategy), display: 'inline-block' }} />
-                  {b.strategy}
-                  <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 6,
+                <button key={b.strategy} onClick={toggleBot}
+                  title={hidden ? '點擊顯示' : '點擊隱藏'}
+                  style={{ display: 'flex', alignItems: 'center', gap: 4,
+                    fontSize: 11, fontFamily: 'var(--font-display)',
+                    background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px',
+                    borderRadius: 6, outline: `1px solid ${hidden ? '#21262d' : dotClr + '55'}`,
+                    opacity: hidden ? 0.35 : 1, transition: 'opacity .15s,outline .15s' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%',
+                    background: hidden ? '#484f58' : dotClr, display: 'inline-block',
+                    transition: 'background .15s' }} />
+                  <span style={{ color: hidden ? '#484f58' : '#c9d1d9' }}>{b.strategy}</span>
+                  <span style={{ fontSize: 10, padding: '1px 4px', borderRadius: 4,
                     background: isBT ? '#f8514922' : '#3fb95018',
-                    color: isBT ? '#f85149' : '#6e7681',
-                    outline: isBT ? '1px solid #f8514955' : 'none' }}>
-                    {modeLabel(b.mode)}{isBT ? '⚠' : ''}
+                    color: isBT ? '#f85149' : '#6e7681' }}>
+                    {modeLabel(b.mode)}{isBT ? ' ⚠' : ''}
                   </span>
                   <span style={{ fontSize: 10, color: '#484f58' }}>{b.count}筆</span>
-                </span>
+                </button>
               )
             })}
             <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-display)' }}>
-              ↑進多 ↓進空 ●出場
+              ↑多進 ↓空進 ●出場
             </span>
           </div>
         )}
