@@ -746,7 +746,7 @@ class FibChannelStrategy(Strategy):
     name = "fib_channel"
     defaults = {"pivot_left": 5, "pivot_right": 3,
                 "entry_zone": 0.30, "exit_zone": 0.80, "break_buffer": 0.10,
-                "regime_confirm_bars": 1}
+                "regime_confirm_bars": 1, "min_channel_width_atr": 0.0}
     allow_short = True
     regime_pref = "trend"
 
@@ -779,6 +779,17 @@ class FibChannelStrategy(Strategy):
             return 0
         if not self._regime_ok(row):
             return 0
+
+        min_w_atr = float(self.params.get("min_channel_width_atr", 0.0))
+        if min_w_atr > 0:
+            atr_val = _num(g("atr"))
+            ch0 = _num(g("fib_ch_0"))
+            ch100 = _num(g("fib_ch_100"))
+            if (atr_val is not None and not pd.isna(atr_val) and
+                    ch0 is not None and ch100 is not None):
+                if abs(ch100 - ch0) < min_w_atr * atr_val:
+                    return 0
+
         if pos_in_ch < entry_z:
             return int(ch_dir)          # 順勢方向進場（+1 多 / −1 空）
         return 0

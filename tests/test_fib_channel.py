@@ -226,3 +226,65 @@ class TestFibChannelStrategy:
         strat = build_strategy("fib_channel")
         row = {"fib_ch_pos": float("nan"), "fib_ch_dir": float("nan"), "close": 100.0}
         assert strat.signal(row, 0) == 0
+
+
+class TestFibChannelMinWidth:
+    """通道寬度過濾：通道太窄（壓縮行情）時拒絕進場，避免小幅震盪過度交易。
+
+    min_channel_width_atr = N 表示：
+      若 |fib_ch_100 - fib_ch_0| < N × ATR → 不進場。
+    出場邏輯不受影響（寬度再窄仍平倉）。
+    """
+
+    def _entry_row(self, ch0, ch100, atr, pos=0.10, ch_dir=1.0, regime="trend"):
+        """建立進場用 row：pos < entry_zone(0.30) 確保在進場區。"""
+        return {
+            "fib_ch_0": ch0, "fib_ch_100": ch100,
+            "fib_ch_pos": pos, "fib_ch_dir": ch_dir,
+            "atr": atr, "regime": regime,
+        }
+
+    def test_blocks_entry_when_channel_narrower_than_threshold(self):
+        """channel_width(0.5) < 1.0 × ATR(1.0) → 拒絕進場。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               min_channel_width_atr=1.0)
+        row = self._entry_row(ch0=100.0, ch100=100.5, atr=1.0)
+        assert strat.signal(row, 0) == 0, \
+            "通道寬 0.5 < 1.0 ATR，應拒絕進場"
+
+    def test_allows_entry_when_channel_wider_than_threshold(self):
+        """channel_width(2.0) >= 1.0 × ATR(1.0) → 允許進場。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               min_channel_width_atr=1.0)
+        row = self._entry_row(ch0=100.0, ch100=102.0, atr=1.0)
+        assert strat.signal(row, 0) == 1, \
+            "通道寬 2.0 >= 1.0 ATR，應允許多單進場"
+
+    def test_exit_not_blocked_by_narrow_channel(self):
+        """持倉中通道太窄仍應正常出場（不能因寬度過濾影響平倉）。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               min_channel_width_atr=5.0,
+                               exit_zone=0.80)
+        row = self._entry_row(ch0=100.0, ch100=100.1, atr=1.0, pos=0.90)
+        assert strat.signal(row, 1) == 0, \
+            "pos > exit_zone 應平倉，即使通道窄"
+
+    def test_default_min_width_is_zero_so_existing_behavior_unchanged(self):
+        """min_channel_width_atr 預設值為 0（不過濾），不影響現有策略行為。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0)
+        row = self._entry_row(ch0=100.0, ch100=100.1, atr=1.0)  # 極窄通道
+        assert strat.signal(row, 0) == 1, \
+            "預設 min_channel_width_atr=0 時不應過濾任何進場"
+
+    def test_no_atr_skips_width_filter(self):
+        """ATR 欄位缺失（NaN）時跳過寬度過濾，不因缺欄阻擋進場。"""
+        strat = build_strategy("fib_channel",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               min_channel_width_atr=1.0)
+        row = self._entry_row(ch0=100.0, ch100=100.1, atr=float("nan"))
+        assert strat.signal(row, 0) == 1, \
+            "ATR 缺失時應跳過寬度過濾"
