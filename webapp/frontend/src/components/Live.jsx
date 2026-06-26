@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, cls } from '../api'
+import MiniChart from './MiniChart'
 
 const BOT_COLORS   = ['var(--accent)', '#e0397a', '#9b59b6']
 const INIT_CAPITAL = 5000   // 每台機器人起始預算（測試網虛擬資金）
@@ -236,6 +237,23 @@ function BotCard({ data, num, color }) {
 
       {/* ── 權益曲線 ── */}
       <EquitySpark bals={bals} color={color} />
+
+      {/* ── K 線 + 技術位（看該策略的買賣參考線與距離）── */}
+      <div>
+        <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
+          K 線 · {String(data.strategy || '').replace('_', ' ')}
+          <span style={{ marginLeft: 6, fontSize: 10 }}>{data.symbol} · {data.interval}</span>
+        </div>
+        <MiniChart
+          symbol={data.symbol}
+          interval={data.interval}
+          strategy={data.strategy}
+          entry={data.entry_price}
+          sl={data.sl}
+          tp={data.tp}
+          inPosition={!!data.in_position}
+        />
+      </div>
 
       {/* ── 持倉 ── */}
       {data.in_position ? (
