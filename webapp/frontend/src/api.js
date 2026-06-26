@@ -35,8 +35,8 @@ export const api = {
   hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),
   klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
     get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
-  tradeMarkers: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
-    get(`/api/trade-markers?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  tradeMarkers: (symbol = 'BTCUSDT', bucketHours = 6) =>
+    get(`/api/trade-markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
   price: (symbol = 'BTCUSDT') => get(`/api/price?symbol=${symbol}`),
   copytraders: (limit = 20) => get(`/api/copytraders?limit=${limit}`),
   copytraderPositions: (uid) => get(`/api/copytrader-positions?uid=${encodeURIComponent(uid)}`),

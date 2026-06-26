@@ -7,7 +7,11 @@ const TFS = ['1h', '4h', '1d']
 
 // 不同 bot（strategy）配不同顏色；超過長度則循環取用
 const BOT_PALETTE = ['#58a6ff', '#3fb950', '#ffa657', '#d2a8ff', '#39d3c3', '#f778ba', '#e3b341', '#ff7b72']
-const colorForBot = (list, strat) => BOT_PALETTE[Math.max(0, list.indexOf(strat)) % BOT_PALETTE.length]
+const colorForBot = (names, strat) => BOT_PALETTE[Math.max(0, names.indexOf(strat)) % BOT_PALETTE.length]
+
+// mode → 中文標籤（標明回測 vs 真實）
+const MODE_LABEL = { backtest: '回測', live_futures_testnet: '測試網', paper: '模擬' }
+const modeLabel = (mode) => MODE_LABEL[mode] || mode
 const AUTO_OPTS = [{ label: '關閉', sec: 0 }, { label: '3s', sec: 3 }, { label: '10s', sec: 10 }, { label: '30s', sec: 30 }]
 
 // indicator catalogue — only ST + EMA200 on by default
@@ -140,36 +144,38 @@ export default function Chart() {
     return () => { clearInterval(ivP); clearInterval(ivC) }
   }, [autoSec, symbol]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── 交易標記：依 bot 配色 + 進出場形狀，套到 K 線 ───────────────────────
-  const applyMarkers = useCallback((raw, botList, show) => {
+  // ── 交易標記：依 bot 配色 + 進出場形狀 + 聚合筆數，套到 K 線 ──────────────
+  const applyMarkers = useCallback((raw, botNames, show) => {
     if (!markersRef.current) return
     if (!show || !raw?.length) { markersRef.current.setMarkers([]); return }
     const ms = raw.map(m => {
-      const color = colorForBot(botList, m.strategy)
+      const color = colorForBot(botNames, m.strategy)
+      const text  = m.count > 1 ? String(m.count) : undefined   // 聚合多筆 → 顯示筆數
       if (m.side === 'entry') {
         const short = m.dir < 0
         return { time: m.time, position: short ? 'aboveBar' : 'belowBar',
-                 color, shape: short ? 'arrowDown' : 'arrowUp' }
+                 color, shape: short ? 'arrowDown' : 'arrowUp', text }
       }
-      return { time: m.time, position: 'aboveBar', color, shape: 'circle' }
+      return { time: m.time, position: 'aboveBar', color, shape: 'circle', text }
     })
     markersRef.current.setMarkers(ms)
   }, [])
 
-  // ── fetch 交易標記（換標的/週期/重整時）─────────────────────────────────
+  // ── fetch 交易標記（換標的/重整時；每 6 小時聚合一點）───────────────────
   useEffect(() => {
-    api.tradeMarkers(symbol, tf, 300)
+    api.tradeMarkers(symbol, 6)
       .then(d => {
         markerDataRef.current = d.markers ?? []
-        setBots(d.strategies ?? [])
-        applyMarkers(d.markers ?? [], d.strategies ?? [], showMarkers)
+        const bl = d.bots ?? []
+        setBots(bl)
+        applyMarkers(d.markers ?? [], bl.map(b => b.strategy), showMarkers)
       })
       .catch(() => { markerDataRef.current = []; setBots([]); applyMarkers([], [], false) })
-  }, [symbol, tf, refresh, applyMarkers]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [symbol, refresh, applyMarkers]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 開關切換 → 重套標記 ──────────────────────────────────────────────
   useEffect(() => {
-    applyMarkers(markerDataRef.current, bots, showMarkers)
+    applyMarkers(markerDataRef.current, bots.map(b => b.strategy), showMarkers)
   }, [showMarkers, bots, applyMarkers])
 
   const toggle = useCallback(key => {
@@ -263,21 +269,32 @@ export default function Chart() {
         ))}
       </div>
 
-      {/* ── 交易點：開關 + bot 圖例 ── */}
+      {/* ── 交易點：開關 + bot 圖例（每 6h 聚合一點，標明回測）── */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button onClick={() => setShowMarkers(s => !s)} style={chip(showMarkers, '#e3b341')}>
-          ⚲ 交易點
+          ⚲ 交易點 / 6h
         </button>
         {showMarkers && bots.length > 0 && (
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            {bots.map(b => (
-              <span key={b} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
-                color: '#8b949e', fontFamily: 'var(--font-display)' }}>
-                <span style={{ width: 9, height: 9, borderRadius: '50%',
-                  background: colorForBot(bots, b), display: 'inline-block' }} />
-                {b}
-              </span>
-            ))}
+            {bots.map(b => {
+              const names = bots.map(x => x.strategy)
+              const isBT = b.mode === 'backtest'
+              return (
+                <span key={b.strategy} style={{ display: 'flex', alignItems: 'center', gap: 4,
+                  fontSize: 11, color: '#8b949e', fontFamily: 'var(--font-display)' }}>
+                  <span style={{ width: 9, height: 9, borderRadius: '50%',
+                    background: colorForBot(names, b.strategy), display: 'inline-block' }} />
+                  {b.strategy}
+                  <span style={{ fontSize: 10, padding: '1px 5px', borderRadius: 6,
+                    background: isBT ? '#f8514922' : '#3fb95018',
+                    color: isBT ? '#f85149' : '#6e7681',
+                    outline: isBT ? '1px solid #f8514955' : 'none' }}>
+                    {modeLabel(b.mode)}{isBT ? '⚠' : ''}
+                  </span>
+                  <span style={{ fontSize: 10, color: '#484f58' }}>{b.count}筆</span>
+                </span>
+              )
+            })}
             <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-display)' }}>
               ↑進多 ↓進空 ●出場
             </span>
@@ -289,6 +306,11 @@ export default function Chart() {
           </span>
         )}
       </div>
+      {showMarkers && bots.some(b => b.mode === 'backtest') && (
+        <div style={{ fontSize: 10, color: '#f85149', fontFamily: 'var(--font-display)', marginTop: -6 }}>
+          ⚠ 標「回測」者為回測產出資料（每筆只記出場、無進場點），非實盤下單
+        </div>
+      )}
 
       {/* ── chart ── */}
       <div ref={containerRef} style={{

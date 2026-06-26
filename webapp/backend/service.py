@@ -74,21 +74,24 @@ def _parse_ts_unix(ts: str) -> int | None:
     return int(dt.timestamp())
 
 
-def build_trade_markers(trades: list[dict], symbol: str, interval: str) -> dict:
-    """把交易日誌列轉成 K 線標記。
+def build_trade_markers(trades: list[dict], symbol: str, bucket_hours: int = 6) -> dict:
+    """把交易日誌列轉成 K 線標記，每 bucket_hours 小時聚合一個點。
 
     - 只保留指定 symbol。
-    - ts 對齊到 interval 時間桶（floor），與 K 棒開盤時間一致，標記才畫得準。
+    - 每 bucket_hours 小時為一桶（預設 6h）：同桶、同 bot、同進/出場方向的多筆
+      聚合成一個點，帶 count（筆數）與均價，避免分鐘級交易在圖上堆疊成柱。
     - side 分類：entry（多 dir=+1 / 空 entry_short dir=−1）、exit（exit_* / scale_out）。
-    - 帶 strategy 欄位，供前端依 bot 上色。
+    - 每點帶 strategy + mode（paper / live_futures_testnet / backtest），供前端標明回測。
     - 標記依時間遞增排序（lightweight-charts 要求）。
 
-    回傳 {"markers": [...], "strategies": [distinct strategy 名]}。
+    回傳 {"markers": [...], "bots": [{strategy, mode, count}, ...]}。
     """
-    bucket = _interval_seconds(interval)
-    markers: list[dict] = []
-    strategies: list[str] = []
-    seen_strat: set[str] = set()
+    bucket = max(1, bucket_hours) * 3600
+    # group key (strategy, side, dir, bucket_time) -> 聚合累積
+    groups: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    bots: dict[str, dict] = {}
+    bots_order: list[str] = []
 
     for t in trades:
         if t.get("symbol") and symbol and t["symbol"] != symbol:
@@ -102,27 +105,47 @@ def build_trade_markers(trades: list[dict], symbol: str, interval: str) -> dict:
         else:                                    # exit_signal / exit_sltp / scale_out / ...
             side, direction = "exit", 0
         strat = str(t.get("strategy", "") or "—")
-        if strat not in seen_strat:
-            seen_strat.add(strat)
-            strategies.append(strat)
+        mode  = str(t.get("mode", "") or "—")
+        bt    = (unix // bucket) * bucket
+        price = float(t.get("price", 0.0))
+
+        key = (strat, side, direction, bt)
+        g = groups.get(key)
+        if g is None:
+            g = {"time": bt, "side": side, "dir": direction, "strategy": strat,
+                 "mode": mode, "sum": 0.0, "count": 0}
+            groups[key] = g
+            order.append(key)
+        g["sum"]   += price
+        g["count"] += 1
+
+        b = bots.get(strat)
+        if b is None:
+            bots[strat] = {"strategy": strat, "mode": mode, "count": 0}
+            bots_order.append(strat)
+        bots[strat]["count"] += 1
+
+    markers = []
+    for key in order:
+        g = groups[key]
         markers.append({
-            "time": (unix // bucket) * bucket,
-            "price": round(float(t.get("price", 0.0)), 2),
-            "side": side,
-            "dir": direction,
-            "strategy": strat,
-            "pnl": round(float(t.get("pnl", 0.0)), 2),
+            "time": g["time"],
+            "price": round(g["sum"] / g["count"], 2),
+            "side": g["side"],
+            "dir": g["dir"],
+            "strategy": g["strategy"],
+            "mode": g["mode"],
+            "count": g["count"],
         })
-
     markers.sort(key=lambda m: m["time"])
-    return {"markers": markers, "strategies": strategies}
+    return {"markers": markers, "bots": [bots[s] for s in bots_order]}
 
 
-def trade_markers(symbol: str = "BTCUSDT", interval: str = "4h",
-                  limit: int = 300, db_path: str = "trades.db") -> dict:
-    """讀交易日誌並轉成 K 線標記（依 symbol/interval）。"""
+def trade_markers(symbol: str = "BTCUSDT", bucket_hours: int = 6,
+                  limit: int = 5000, db_path: str = "trades.db") -> dict:
+    """讀交易日誌（全部紀錄）並轉成 6h 聚合的 K 線標記。"""
     rows = read_trades_db(limit=limit, db_path=db_path)
-    return build_trade_markers(rows, symbol, interval)
+    return build_trade_markers(rows, symbol, bucket_hours)
 
 
 def _trades_out(trades: list[dict]) -> list[dict]:
