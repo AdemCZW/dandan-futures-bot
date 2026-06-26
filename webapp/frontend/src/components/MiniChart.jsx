@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { createChart, CandlestickSeries, LineSeries } from 'lightweight-charts'
+import { createChart, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { api } from '../api'
 
 // 各策略疊的技術線（讓使用者直接看出該技術的買賣參考位）。
@@ -26,10 +26,13 @@ const DEFAULT_OVERLAY = [{ key: 'ema_trend', color: '#58a6ff', w: 1, style: 0 }]
 
 /** 卡片內嵌的迷你 K 線圖：蠟燭 + 策略技術線 + 進場/SL/TP 價格線。
  *  靜態（不可拖曳縮放），每 60s 自動刷新一次 K 線。 */
-export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, inPosition }) {
+export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, inPosition, trades }) {
   const elRef         = useRef(null)
   const candleRef     = useRef(null)
   const priceLinesRef = useRef([])
+  const markersRef    = useRef(null)         // createSeriesMarkers plugin
+  const tradesRef     = useRef([])
+  tradesRef.current = trades || []           // 最新成交供 load() 使用（避免 stale closure）
 
   // ── 建圖 + 載 K 線（symbol/interval/strategy 變才重建）─────────────────────
   useEffect(() => {
@@ -69,6 +72,31 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
           ls.setData(arr)
           overlaySeries.push(ls)
         }
+        // 進出場標記：把成交時間吸附到最近的 K 棒，標在蠟燭上
+        const ctimes = d.candles.map(c => c.time)
+        const lo = ctimes[0], hi = ctimes[ctimes.length - 1]
+        const snap = (sec) => {
+          let best = lo, bd = Infinity
+          for (const t of ctimes) { const dd = Math.abs(t - sec); if (dd < bd) { bd = dd; best = t } }
+          return best
+        }
+        const marks = []
+        for (const tr of tradesRef.current) {
+          const sec = Math.floor(new Date(String(tr.ts).replace(' ', 'T') + 'Z').getTime() / 1000)
+          if (!sec || sec < lo - 60 || sec > hi + 60) continue   // 視窗外略過
+          const t = snap(sec)
+          const side = tr.side || ''
+          if (side === 'entry')
+            marks.push({ time: t, position: 'belowBar', color: '#3fb950', shape: 'arrowUp', text: '買' })
+          else if (side === 'entry_short')
+            marks.push({ time: t, position: 'aboveBar', color: '#f85149', shape: 'arrowDown', text: '空' })
+          else if (side.startsWith('exit'))
+            marks.push({ time: t, position: (tr.pnl ?? 0) >= 0 ? 'aboveBar' : 'belowBar',
+                         color: '#8b949e', shape: 'circle', text: '平' })
+        }
+        marks.sort((a, b) => a.time - b.time)
+        if (markersRef.current) markersRef.current.setMarkers(marks)
+        else markersRef.current = createSeriesMarkers(candle, marks)
         chart.timeScale().fitContent()
       } catch { /* 網路/資料異常時靜默，維持空圖 */ }
     }
@@ -79,6 +107,7 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
       clearInterval(timer)
       candleRef.current = null
       priceLinesRef.current = []
+      markersRef.current = null
       chart.remove()
     }
   }, [symbol, interval, strategy])

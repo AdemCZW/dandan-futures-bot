@@ -252,6 +252,7 @@ function BotCard({ data, num, color }) {
           sl={data.sl}
           tp={data.tp}
           inPosition={!!data.in_position}
+          trades={data.recent_trades}
         />
       </div>
 
