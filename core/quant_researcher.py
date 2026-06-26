@@ -736,20 +736,26 @@ class SmcStructureStrategy(Strategy):
 
 
 class FibChannelStrategy(Strategy):
-    """費波那契斜向通道順勢策略（多空雙向，趨勢自適應）。
+    """費波那契斜向通道策略（多空雙向，支援兩種模式）。
 
     通道由 signal_engineer.fib_channel_levels 計算：
-      - 上升趨勢（fib_ch_dir=+1）：0 線沿 swing low（支撐），目標在上。
-      - 下降趨勢（fib_ch_dir=−1）：0 線沿 swing high（阻力），目標在下。
-    fib_ch_pos：0=趨勢原點（進場側）、1=對側（目標側），與方向無關。
+      fib_ch_pos：0=趨勢原點（上升→底、下降→頂），1=對側目標，與方向無關。
+      fib_ch_dir：+1 上升 / −1 下降。
 
-    進場：回調到原點（fib_ch_pos < entry_zone）順勢進場，方向 = fib_ch_dir。
-    出場：到達目標側（pos > exit_zone）或跌破原點（pos < −break_buffer，趨勢失效）。
+    mode="trend"（預設，新版）：
+      進場：回調到原點（pos < entry_zone），方向 = fib_ch_dir（順勢）。
+      出場：到達目標側（pos > exit_zone）或跌破原點（pos < −break_buffer）。
+
+    mode="reversion"（舊版，均值回歸）：
+      進場：pos < entry_zone → 順 ch_dir；pos > 1−entry_zone → 逆 ch_dir（通道對面）。
+      出場：多單到達目標側（pos > exit_zone）或跌出通道（pos < 0）；
+            空單到達底部（pos < 1−exit_zone）或突破通道（pos > 1）。
     """
     name = "fib_channel"
     defaults = {"pivot_left": 5, "pivot_right": 3,
                 "entry_zone": 0.30, "exit_zone": 0.80, "break_buffer": 0.10,
-                "regime_confirm_bars": 1, "min_channel_width_atr": 0.0}
+                "regime_confirm_bars": 1, "min_channel_width_atr": 0.0,
+                "mode": "trend"}
     allow_short = True
     regime_pref = "trend"
 
@@ -768,16 +774,25 @@ class FibChannelStrategy(Strategy):
         entry_z = float(self.params.get("entry_zone", 0.30))
         exit_z  = float(self.params.get("exit_zone",  0.80))
         brk     = float(self.params.get("break_buffer", 0.10))
+        mode    = str(self.params.get("mode", "trend"))
 
-        # 持倉中：到達目標側或跌破原點 → 平倉（pos 語意與方向無關，多空共用）
+        # ── 持倉中出場 ───────────────────────────────────────────────────────
         if position != 0:
             if pos_in_ch is None:
                 return position
-            if pos_in_ch > exit_z or pos_in_ch < -brk:
-                return 0
+            if mode == "reversion":
+                if position == 1:   # 多單：到達目標頂或跌破通道 → 平倉
+                    if pos_in_ch > exit_z or pos_in_ch < 0:
+                        return 0
+                else:               # 空單：到達目標底或突破通道 → 平倉
+                    if pos_in_ch < (1.0 - exit_z) or pos_in_ch > 1:
+                        return 0
+            else:                   # trend：pos 語意方向一致，多空共用
+                if pos_in_ch > exit_z or pos_in_ch < -brk:
+                    return 0
             return position
 
-        # 空手進場：需有效通道 + regime 確認 + 回調到原點區
+        # ── 空手進場 ─────────────────────────────────────────────────────────
         if pos_in_ch is None or ch_dir is None or ch_dir == 0:
             return 0
         if not self._regime_ok(row):
@@ -793,8 +808,16 @@ class FibChannelStrategy(Strategy):
                 if abs(ch100 - ch0) < min_w_atr * atr_val:
                     return 0
 
+        if mode == "reversion":
+            if pos_in_ch < entry_z:
+                return int(ch_dir)           # 原點側 → 順趨勢（上升=多、下降=空）
+            if pos_in_ch > (1.0 - entry_z):
+                return -int(ch_dir)          # 目標側 → 逆趨勢（上升=空、下降=多）
+            return 0
+
+        # trend mode（預設）
         if pos_in_ch < entry_z:
-            return int(ch_dir)          # 順勢方向進場（+1 多 / −1 空）
+            return int(ch_dir)
         return 0
 
 
