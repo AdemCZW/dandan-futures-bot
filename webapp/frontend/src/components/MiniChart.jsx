@@ -21,6 +21,12 @@ const OVERLAYS = {
     { key: 'ema_fast', color: '#ffa657', w: 1, style: 0 },
     { key: 'ema_slow', color: '#58a6ff', w: 1, style: 0 },
   ],
+  // trend_pullback：EMA200 主方向（粗藍）+ 快/慢線（圖表用 9/21 當短線動能 proxy）
+  trend_pullback: [
+    { key: 'ema_trend', color: '#58a6ff', w: 2, style: 0 },
+    { key: 'ema_slow',  color: '#d2a8ff', w: 1, style: 0 },
+    { key: 'ema_fast',  color: '#ffa657', w: 1, style: 0 },
+  ],
 }
 const DEFAULT_OVERLAY = [{ key: 'ema_trend', color: '#58a6ff', w: 1, style: 0 }]
 
