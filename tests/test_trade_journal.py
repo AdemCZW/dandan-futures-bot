@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from core.trade_journal import TradeJournal, _COLUMNS
+from core.trade_journal import TradeJournal, _COLUMNS, read_trades_db
 
 
 def _read_csv_rows(csv_path):
@@ -139,6 +139,50 @@ def test_log_trades_returns_batch_count(tmp_path):
         # 未提供的欄位採預設值
         assert dicts[2]["qty"] == 0.0
         assert dicts[2]["pnl"] == 0.0
+
+
+class TestReadTradesSymbolFilter:
+    """同策略不同 symbol 共用同一張表時，symbol 過濾確保各 bot 只看到自己的紀錄。
+
+    問題背景：Bot1（fib_channel + BTCUSDT）與 Bot2（fib_channel + SOLUSDT）
+    共用同一個 DB，僅用 strategy 過濾時兩台撈到同一批紀錄。
+    """
+
+    def _seed(self, db_path):
+        """寫入同策略、兩種 symbol 的紀錄。"""
+        with TradeJournal(db_path=db_path, run_id="R", mode="live_futures_testnet",
+                          symbol="BTCUSDT", strategy="fib_channel") as j:
+            j.log(side="entry", price=60000.0, qty=0.01)
+            j.log(side="exit_signal", price=61000.0, qty=0.01, pnl=10.0)
+        with TradeJournal(db_path=db_path, run_id="R", mode="live_futures_testnet",
+                          symbol="SOLUSDT", strategy="fib_channel") as j:
+            j.log(side="entry", price=68.0, qty=10.0)
+            j.log(side="exit_signal", price=69.0, qty=10.0, pnl=10.0)
+            j.log(side="entry_short", price=70.0, qty=10.0)
+
+    def test_filter_by_symbol_returns_only_that_symbol(self, tmp_path):
+        db_path = str(tmp_path / "trades.db")
+        self._seed(db_path)
+        btc = read_trades_db(limit=50, strategy="fib_channel",
+                             symbol="BTCUSDT", db_path=db_path)
+        assert len(btc) == 2
+        assert all(r["symbol"] == "BTCUSDT" for r in btc), \
+            "BTCUSDT 過濾不該撈到 SOLUSDT 的紀錄"
+
+    def test_other_symbol_isolated(self, tmp_path):
+        db_path = str(tmp_path / "trades.db")
+        self._seed(db_path)
+        sol = read_trades_db(limit=50, strategy="fib_channel",
+                             symbol="SOLUSDT", db_path=db_path)
+        assert len(sol) == 3
+        assert all(r["symbol"] == "SOLUSDT" for r in sol)
+
+    def test_no_symbol_returns_all(self, tmp_path):
+        """未給 symbol 時維持舊行為（只用 strategy 過濾，全撈）。"""
+        db_path = str(tmp_path / "trades.db")
+        self._seed(db_path)
+        allrows = read_trades_db(limit=50, strategy="fib_channel", db_path=db_path)
+        assert len(allrows) == 5, "未指定 symbol 應回傳該策略全部紀錄"
 
 
 def test_equity_none_is_null_in_db_and_empty_in_csv(tmp_path):

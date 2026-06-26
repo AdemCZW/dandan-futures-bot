@@ -19,6 +19,16 @@ function fmtPct(n) {
   return (n >= 0 ? '+' : '') + Number(n).toFixed(2) + '%'
 }
 
+/** UTC 時間字串 → 台灣時間（UTC+8），顯示 MM-DD HH:mm。 */
+function fmtTwTime(ts) {
+  if (!ts) return '—'
+  const d = new Date(String(ts).replace(' ', 'T') + 'Z')
+  if (isNaN(d.getTime())) return String(ts).slice(5, 16)   // 解析失敗回退原樣
+  const tw = new Date(d.getTime() + 8 * 3600 * 1000)
+  const p  = (x) => String(x).padStart(2, '0')
+  return `${p(tw.getUTCMonth() + 1)}-${p(tw.getUTCDate())} ${p(tw.getUTCHours())}:${p(tw.getUTCMinutes())}`
+}
+
 /** 把 recent_trades 配對成「開倉→平倉」回合（最新在前）。
  *  配對失敗的孤立 exit（entry 超出歷史範圍）仍顯示，只是開倉格顯示 —。
  */
@@ -303,7 +313,7 @@ function BotCard({ data, num, color }) {
               {pairs.slice(0, 8).map((p, i) => (
                 <tr key={i} style={{ borderTop: '1px solid var(--border, #21262d)' }}>
                   <td style={{ padding: '5px 0', color: 'var(--muted)', whiteSpace: 'nowrap' }}>
-                    {String(p.ts || '').slice(5, 16)}
+                    {fmtTwTime(p.ts)}
                   </td>
                   <td style={{ padding: '5px 4px 5px 0' }}>
                     <span className={`badge ${p.dir === 'long' ? 'badge-long' : 'badge-short'}`}
