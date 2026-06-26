@@ -6,9 +6,15 @@ import { api } from '../api'
 //   fib_channel → 費波那契通道（0 原點 / 0.618 黃金 / 1.0 目標）= 均值回歸的頂底參考
 //   smc_structure → EMA 快慢線（趨勢方向）
 const OVERLAYS = {
+  // 全套費波那契通道：0/1.0 錨點與 0.618 黃金線用粗實線，中間比率（0.236/0.382/0.5/0.786）
+  // 用細虛線、灰階，既呈現完整 7 條結構又不會在小圖上太雜。
   fib_channel: [
     { key: 'fib_ch_0',   color: '#7f77dd', w: 2, style: 0 },
-    { key: 'fib_ch_618', color: '#ffa657', w: 1, style: 2 },
+    { key: 'fib_ch_236', color: '#6e7681', w: 1, style: 2 },
+    { key: 'fib_ch_382', color: '#6e7681', w: 1, style: 2 },
+    { key: 'fib_ch_5',   color: '#8b949e', w: 1, style: 2 },
+    { key: 'fib_ch_618', color: '#ffa657', w: 2, style: 0 },
+    { key: 'fib_ch_786', color: '#6e7681', w: 1, style: 2 },
     { key: 'fib_ch_100', color: '#7f77dd', w: 2, style: 0 },
   ],
   smc_structure: [
