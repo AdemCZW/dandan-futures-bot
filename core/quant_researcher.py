@@ -690,7 +690,8 @@ class SmcStructureStrategy(Strategy):
     """
     name = "smc_structure"
     defaults = {"pivot_left": 5, "pivot_right": 3, "atr_period": 14,
-                "require_fvg": False, "regime_confirm_bars": 1}
+                "require_fvg": False, "regime_confirm_bars": 1,
+                "ema_fast_period": 20, "ema_slow_period": 50}
     allow_short = True
     regime_pref = "trend"
 
@@ -699,6 +700,8 @@ class SmcStructureStrategy(Strategy):
         out = se.smc_levels(out, pivot_left=int(self.params["pivot_left"]),
                             pivot_right=int(self.params["pivot_right"]))
         out["atr"] = se.atr(out, int(self.params["atr_period"]))
+        out["ema_fast"] = se.ema(out["close"], int(self.params["ema_fast_period"]))
+        out["ema_slow"] = se.ema(out["close"], int(self.params["ema_slow_period"]))
         return self._prepare_regime(out)
 
     def signal(self, row: pd.Series, position: int) -> int:
@@ -708,6 +711,8 @@ class SmcStructureStrategy(Strategy):
         fvg_bull = _num(g("fvg_bull")) or 0.0
         fvg_bear = _num(g("fvg_bear")) or 0.0
         require_fvg = bool(self.params.get("require_fvg", True))
+        ema_fast = _num(g("ema_fast"))
+        ema_slow = _num(g("ema_slow"))
 
         if position == 1:
             return 0 if bos_bear else 1
@@ -717,9 +722,12 @@ class SmcStructureStrategy(Strategy):
         if not self._regime_ok(row):
             return 0
 
-        if bos_bull and (fvg_bull or not require_fvg):
+        ema_bullish = (ema_fast is not None and ema_slow is not None and ema_fast > ema_slow)
+        ema_bearish = (ema_fast is not None and ema_slow is not None and ema_fast < ema_slow)
+
+        if bos_bull and ema_bullish and (fvg_bull or not require_fvg):
             return 1
-        if bos_bear and (fvg_bear or not require_fvg):
+        if bos_bear and ema_bearish and (fvg_bear or not require_fvg):
             return -1
         return 0
 
