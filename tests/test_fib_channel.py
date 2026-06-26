@@ -292,15 +292,54 @@ class TestFibChannelMinWidth:
 
 # ── mode 切換：trend vs reversion ────────────────────────────────────────────
 
-def _regime_row(pos, ch_dir, position=0):
-    """最小 row：直接給 fib_ch_pos / fib_ch_dir，regime 設 trend 通過。"""
+def _regime_row(pos, ch_dir, position=0, regime="trend"):
+    """最小 row：直接給 fib_ch_pos / fib_ch_dir 與 regime。"""
     return {
         "fib_ch_pos": pos, "fib_ch_dir": float(ch_dir),
         "fib_ch_0": 100.0, "fib_ch_100": 110.0,
         "atr": 5.0,
-        "regime": "trend",
+        "regime": regime,
         "er": 0.5, "choppiness": 40.0, "adx": 30.0,
     }
+
+
+class TestFibChannelReversionRegime:
+    """核心修正：mode 決定 regime 偏好。
+    - trend 模式只在趨勢盤進場（順勢）
+    - reversion 模式只在盤整盤進場（均值回歸不該頂著趨勢接刀）
+    """
+
+    def test_reversion_mode_prefers_range(self):
+        strat = build_strategy("fib_channel", mode="reversion")
+        assert strat.regime_pref == "range", "reversion 應只在 range 盤進場"
+
+    def test_trend_mode_prefers_trend(self):
+        strat = build_strategy("fib_channel")  # 預設 mode=trend
+        assert strat.regime_pref == "trend"
+
+    def test_reversion_blocked_in_trend_regime(self):
+        """趨勢盤：reversion 不進場（修掉「頂著漲勢做空」的 bug）。"""
+        strat = build_strategy("fib_channel", mode="reversion")
+        row = _regime_row(pos=0.85, ch_dir=1, regime="trend")  # 通道頂、上升趨勢
+        assert strat.signal(row, 0) == 0, "趨勢盤不該逆勢接刀"
+
+    def test_reversion_enters_in_range_regime(self):
+        """盤整盤：reversion 在通道頂做空（均值回歸本職）。"""
+        strat = build_strategy("fib_channel", mode="reversion")
+        row = _regime_row(pos=0.85, ch_dir=1, regime="range")
+        assert strat.signal(row, 0) == -1, "盤整盤通道頂應做空"
+
+    def test_trend_still_blocked_in_range(self):
+        """趨勢模式在盤整盤仍被擋（行為不變）。"""
+        strat = build_strategy("fib_channel", mode="trend")
+        row = _regime_row(pos=0.15, ch_dir=1, regime="range")
+        assert strat.signal(row, 0) == 0
+
+    def test_trend_enters_in_trend_regime(self):
+        """趨勢模式在趨勢盤進場（行為不變）。"""
+        strat = build_strategy("fib_channel", mode="trend")
+        row = _regime_row(pos=0.15, ch_dir=1, regime="trend")
+        assert strat.signal(row, 0) == 1
 
 
 class TestFibChannelModeSwitch:
@@ -324,34 +363,34 @@ class TestFibChannelModeSwitch:
     # ── reversion mode ───────────────────────────────────────────────────────
 
     def test_reversion_enters_near_origin_with_ch_dir(self):
-        """reversion mode：pos < entry_zone → 順 ch_dir（上升=多）。"""
+        """reversion mode（盤整盤）：pos < entry_zone → 順 ch_dir（上升=多）。"""
         strat = build_strategy("fib_channel", mode="reversion")
-        row = _regime_row(pos=0.15, ch_dir=1)
+        row = _regime_row(pos=0.15, ch_dir=1, regime="range")
         assert strat.signal(row, 0) == 1
 
     def test_reversion_enters_near_target_counter_trend(self):
-        """reversion mode：pos > 1-entry_zone 且 ch_dir=+1（上升）→ 做空（均值回歸）。"""
+        """reversion mode（盤整盤）：pos > 1-entry_zone 且 ch_dir=+1 → 做空（均值回歸）。"""
         strat = build_strategy("fib_channel", mode="reversion")
-        row = _regime_row(pos=0.85, ch_dir=1)
+        row = _regime_row(pos=0.85, ch_dir=1, regime="range")
         assert strat.signal(row, 0) == -1, \
             "通道頂部 reversion 應做空"
 
     def test_reversion_downtrend_top_goes_short(self):
-        """reversion mode 下降通道：pos < entry_zone（通道頂部原點）→ 做空。"""
+        """reversion mode 下降通道（盤整盤）：pos < entry_zone（通道頂部原點）→ 做空。"""
         strat = build_strategy("fib_channel", mode="reversion")
-        row = _regime_row(pos=0.15, ch_dir=-1)
+        row = _regime_row(pos=0.15, ch_dir=-1, regime="range")
         assert strat.signal(row, 0) == -1
 
     def test_reversion_downtrend_bottom_goes_long(self):
-        """reversion mode 下降通道：pos > 1-entry_zone（通道底部目標側）→ 做多。"""
+        """reversion mode 下降通道（盤整盤）：pos > 1-entry_zone（通道底部目標側）→ 做多。"""
         strat = build_strategy("fib_channel", mode="reversion")
-        row = _regime_row(pos=0.85, ch_dir=-1)
+        row = _regime_row(pos=0.85, ch_dir=-1, regime="range")
         assert strat.signal(row, 0) == 1
 
     def test_reversion_no_entry_in_middle(self):
         """pos 在中間（0.4~0.6）reversion 也不進場。"""
         strat = build_strategy("fib_channel", mode="reversion")
-        row = _regime_row(pos=0.50, ch_dir=1)
+        row = _regime_row(pos=0.50, ch_dir=1, regime="range")
         assert strat.signal(row, 0) == 0
 
     # ── reversion 出場邏輯 ────────────────────────────────────────────────────

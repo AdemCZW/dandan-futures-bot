@@ -759,6 +759,12 @@ class FibChannelStrategy(Strategy):
     allow_short = True
     regime_pref = "trend"
 
+    def __init__(self, **params):
+        super().__init__(**params)
+        # regime 偏好由 mode 決定：順勢只在 trend 盤進場，均值回歸只在 range 盤進場
+        # （reversion 在趨勢盤逆勢接刀正是虧損主因，故 range 盤才放行）。
+        self.regime_pref = "range" if self.params.get("mode") == "reversion" else "trend"
+
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         out = se.fib_channel_levels(df.copy(),
                                     int(self.params["pivot_left"]),
