@@ -1,0 +1,28 @@
+# 丹丹交易團隊 — 儀表板映像（FastAPI 後端 + 打包好的 React 前端，同源無 CORS）。
+# ⚠️ 只讀公開行情 + 三台 bot 的 /state、/trades；金鑰/設定由 Railway 環境變數注入。
+# Railway 該 service 設 RAILWAY_DOCKERFILE_PATH=Dockerfile.webapp 指定用本檔建置。
+
+# ── Stage 1：建前端（vite build → dist）─────────────────────────────────────
+FROM node:20-slim AS frontend
+WORKDIR /fe
+COPY webapp/frontend/package.json webapp/frontend/package-lock.json ./
+RUN npm ci
+COPY webapp/frontend/ ./
+RUN npm run build
+
+# ── Stage 2：後端 + 靜態前端 ────────────────────────────────────────────────
+FROM python:3.12-slim
+WORKDIR /app
+
+# 先裝後端依賴（requirements-web = requirements.txt + fastapi + uvicorn），利用 layer cache
+COPY requirements-web.txt requirements.txt ./
+RUN pip install --no-cache-dir -r requirements-web.txt
+
+# 複製程式碼（.dockerignore 已排除 .env/.venv/node_modules/dist/tests）
+COPY . .
+
+# 放入打包好的前端，供 FastAPI 掛在 "/"
+COPY --from=frontend /fe/dist ./webapp/frontend/dist
+
+# Railway 注入 $PORT；shell 形式才能展開變數
+CMD uvicorn webapp.backend.main:app --host 0.0.0.0 --port ${PORT:-8000}

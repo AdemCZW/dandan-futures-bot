@@ -6,8 +6,11 @@
 所有運算邏輯在 service.py；這裡只負責路由、請求驗證、CORS、錯誤碼。
 """
 from __future__ import annotations
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from webapp.backend import service
@@ -185,3 +188,12 @@ def large_trades(symbol: str = "BTCUSDT", min_usdt: float = 100_000, limit: int 
         return service.okx_large_trades(symbol=symbol, min_usdt=min_usdt, limit=limit)
     except Exception as e:                                   # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+# ── 靜態前端 ──────────────────────────────────────────────────────────────────
+# 正式部署時把打包好的 React（webapp/frontend/dist）掛在 "/"，前端同源呼叫 /api，
+# 不需 CORS。本機開發（前端跑 vite :5173、無 dist）則自動略過此掛載。
+# 掛在所有 /api 路由「之後」，確保 API 優先匹配。
+_DIST = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+if os.path.isdir(_DIST):
+    app.mount("/", StaticFiles(directory=_DIST, html=True), name="frontend")
