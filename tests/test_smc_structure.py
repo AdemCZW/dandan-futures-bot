@@ -131,6 +131,35 @@ class TestSMCEntryEMAFilter:
             "regime 不對應時 _regime_ok 應擋下入場"
 
 
+class TestSMCEmaFilterToggle:
+    """use_ema_filter 開關：可關閉 EMA 方向過濾（回到純 BOS 進場），供 A/B 驗證。"""
+
+    def test_filter_on_is_default(self):
+        """預設開啟 EMA 過濾：EMA 空頭時擋下 bos_bull 多單。"""
+        strat = _strategy()  # 預設 use_ema_filter=True
+        row = _row(bos_bull=1.0, ema_fast=95.0, ema_slow=100.0)
+        assert strat.signal(row, 0) == 0
+
+    def test_filter_off_allows_counter_trend_entry(self):
+        """關閉過濾：EMA 空頭仍可因 bos_bull 進多單（純 BOS 行為）。"""
+        strat = _strategy({"use_ema_filter": False})
+        row = _row(bos_bull=1.0, ema_fast=95.0, ema_slow=100.0)
+        assert strat.signal(row, 0) == 1, \
+            "關閉 EMA 過濾後應回到純 BOS 進場"
+
+    def test_filter_off_bear_entry_regardless_of_ema(self):
+        """關閉過濾：EMA 多頭仍可因 bos_bear 進空單。"""
+        strat = _strategy({"use_ema_filter": False})
+        row = _row(bos_bear=1.0, ema_fast=105.0, ema_slow=100.0)
+        assert strat.signal(row, 0) == -1
+
+    def test_filter_off_still_respects_regime(self):
+        """關閉 EMA 過濾不影響 regime 閘門：range 仍擋下進場。"""
+        strat = _strategy({"use_ema_filter": False})
+        row = _row(bos_bull=1.0, ema_fast=95.0, ema_slow=100.0, regime="range")
+        assert strat.signal(row, 0) == 0
+
+
 # ── signal() — 出場邏輯不受 EMA 影響 ───────────────────────────────────────
 
 class TestSMCExitUnchanged:

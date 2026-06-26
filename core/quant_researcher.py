@@ -691,7 +691,8 @@ class SmcStructureStrategy(Strategy):
     name = "smc_structure"
     defaults = {"pivot_left": 5, "pivot_right": 3, "atr_period": 14,
                 "require_fvg": False, "regime_confirm_bars": 1,
-                "ema_fast_period": 20, "ema_slow_period": 50}
+                "ema_fast_period": 20, "ema_slow_period": 50,
+                "use_ema_filter": True}
     allow_short = True
     regime_pref = "trend"
 
@@ -722,8 +723,10 @@ class SmcStructureStrategy(Strategy):
         if not self._regime_ok(row):
             return 0
 
-        ema_bullish = (ema_fast is not None and ema_slow is not None and ema_fast > ema_slow)
-        ema_bearish = (ema_fast is not None and ema_slow is not None and ema_fast < ema_slow)
+        # use_ema_filter=False → 跳過方向過濾，回到純 BOS 進場（供 A/B 驗證）
+        use_ema = bool(self.params.get("use_ema_filter", True))
+        ema_bullish = (not use_ema) or (ema_fast is not None and ema_slow is not None and ema_fast > ema_slow)
+        ema_bearish = (not use_ema) or (ema_fast is not None and ema_slow is not None and ema_fast < ema_slow)
 
         if bos_bull and ema_bullish and (fvg_bull or not require_fvg):
             return 1
