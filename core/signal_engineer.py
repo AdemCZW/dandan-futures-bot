@@ -317,6 +317,25 @@ def bollinger(close: pd.Series, period: int = 20, mult: float = 2.0) -> pd.DataF
     }, index=close.index)
 
 
+def stochastic(df: pd.DataFrame, k_period: int = 14,
+               smooth_k: int = 3, d_period: int = 3) -> pd.DataFrame:
+    """隨機指標 KD：
+
+    raw %K = 100 × (close − LL(k_period)) / (HH(k_period) − LL(k_period))
+    stoch_k = SMA(raw %K, smooth_k)（慢速 %K）；stoch_d = SMA(stoch_k, d_period)（%D）。
+    全用滾動過去 k_period 根的 high/low，causal、不 repaint。
+    區間 [0,100]。HH==LL（range=0，常數段）→ raw %K = NaN，避免除零。
+    """
+    high, low, close = df["high"], df["low"], df["close"]
+    ll = low.rolling(k_period).min()
+    hh = high.rolling(k_period).max()
+    rng = (hh - ll).replace(0, np.nan)
+    raw_k = 100 * (close - ll) / rng
+    k = raw_k.rolling(smooth_k).mean() if smooth_k > 1 else raw_k
+    d = k.rolling(d_period).mean()
+    return pd.DataFrame({"stoch_k": k, "stoch_d": d}, index=df.index)
+
+
 def rolling_vwap(df: pd.DataFrame, window: int = 50) -> pd.Series:
     """滾動 N 根成交量加權典型價（causal，無 session 錨點）。
 

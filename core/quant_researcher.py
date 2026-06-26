@@ -827,6 +827,70 @@ class FibChannelStrategy(Strategy):
         return 0
 
 
+class TrendPullbackStrategy(Strategy):
+    """趨勢過濾 + 回踩進場 + KD 觸發（使用者指定的多指標短線打法）。
+
+    主方向（200EMA）：價 > 200EMA 只做多、價 < 200EMA 只做空，過濾逆勢假突破。
+    進場（順勢回踩，不追極端，四條件 AND）：
+      多 = 價 > 200EMA、EMA20 > EMA50（短線動能向上）、
+           RSI 在回踩區 [rsi_lo, rsi_hi]（非 >hi 追高）、KD 黃金交叉（%K 上穿 %D，觸發鍵）。
+      空 = 鏡像（價 < 200EMA、EMA20 < EMA50、RSI 在區間、KD 死叉）。
+    出場：趨勢翻轉（價反向跨越 200EMA）或動能翻轉（EMA20/50 反向）。
+          ATR 動態停損/停利由 risk 層（RiskOfficer.exit_levels）負責，不在此重複。
+
+    布林通道暫不納入進場（避免條件過多→幾乎不交易）；regime 預設不過濾
+    （200EMA + EMA 交叉本身已是趨勢過濾）。
+    """
+    name = "trend_pullback"
+    defaults = {"ema_trend": 200, "ema_fast": 20, "ema_slow": 50,
+                "rsi_period": 14, "rsi_lo": 40.0, "rsi_hi": 60.0,
+                "k_period": 14, "smooth_k": 3, "d_period": 3}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        p = self.params
+        out["ema_t"] = se.ema(out["close"], int(p["ema_trend"]))
+        out["ema_f"] = se.ema(out["close"], int(p["ema_fast"]))
+        out["ema_s"] = se.ema(out["close"], int(p["ema_slow"]))
+        out["rsi"]   = se.rsi(out["close"], int(p["rsi_period"]))
+        kd = se.stochastic(out, int(p["k_period"]), int(p["smooth_k"]), int(p["d_period"]))
+        out["stoch_k"], out["stoch_d"] = kd["stoch_k"], kd["stoch_d"]
+        k, d = out["stoch_k"], out["stoch_d"]
+        # 黃金/死亡交叉（用 shift(1) 比前一根，causal、不 repaint）
+        out["kd_gold"] = ((k > d) & (k.shift(1) <= d.shift(1))).astype(float)
+        out["kd_dead"] = ((k < d) & (k.shift(1) >= d.shift(1))).astype(float)
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_regime(out)
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda key: row.get(key) if hasattr(row, "get") else row[key])
+        close = _num(g("close")); et = _num(g("ema_t"))
+        ef = _num(g("ema_f")); es = _num(g("ema_s")); rsi = _num(g("rsi"))
+        if any(v is None or pd.isna(v) for v in (close, et, ef, es, rsi)):
+            return position                      # 資料不足：維持現狀
+
+        # 出場：趨勢/動能翻轉（與 regime 無關，多空共用）
+        if position == 1:
+            return 0 if (close < et or ef < es) else 1
+        if position == -1:
+            return 0 if (close > et or ef > es) else -1
+
+        # 空手進場
+        if not self._regime_ok(row):
+            return 0
+        lo = float(self.params["rsi_lo"]); hi = float(self.params["rsi_hi"])
+        in_zone = lo <= rsi <= hi
+        gold = (_num(g("kd_gold")) or 0.0) > 0.5
+        dead = (_num(g("kd_dead")) or 0.0) > 0.5
+        if close > et and ef > es and in_zone and gold:
+            return 1
+        if close < et and ef < es and in_zone and dead:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -842,6 +906,7 @@ STRATEGIES = {
     Rsi2ConnorsStrategy.name: Rsi2ConnorsStrategy,
     SmcStructureStrategy.name: SmcStructureStrategy,
     FibChannelStrategy.name: FibChannelStrategy,
+    TrendPullbackStrategy.name: TrendPullbackStrategy,
 }
 
 

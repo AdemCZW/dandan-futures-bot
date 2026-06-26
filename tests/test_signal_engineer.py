@@ -816,3 +816,60 @@ def test_heikin_ashi_is_causal_prefix_matches():
         pref = se.heikin_ashi(df.iloc[:k])
         for col in ("ha_open", "ha_close", "ha_high", "ha_low"):
             np.testing.assert_allclose(full[col].iloc[:k].values, pref[col].values, rtol=1e-9)
+
+
+# --------------------------------------------------------------------------- #
+# Stochastic (KD)：raw %K=100*(close-LL)/(HH-LL)、slow %K=SMA(raw,smooth_k)、
+#                  %D=SMA(slow %K, d_period)。bounded [0,100]、causal。
+# --------------------------------------------------------------------------- #
+def _stoch_df(seed=7, n=80):
+    rng = np.random.RandomState(seed)
+    px = 100 + np.cumsum(rng.normal(size=n))
+    high = px + np.abs(rng.normal(size=n)) + 0.5
+    low = px - np.abs(rng.normal(size=n)) - 0.5
+    return pd.DataFrame({"open": px, "high": high, "low": low, "close": px})
+
+
+def test_stochastic_returns_k_and_d_columns():
+    out = se.stochastic(_stoch_df())
+    assert "stoch_k" in out.columns and "stoch_d" in out.columns
+
+
+def test_stochastic_bounded_0_100():
+    out = se.stochastic(_stoch_df())
+    k = out["stoch_k"].dropna()
+    d = out["stoch_d"].dropna()
+    assert (k >= -1e-9).all() and (k <= 100 + 1e-9).all()
+    assert (d >= -1e-9).all() and (d <= 100 + 1e-9).all()
+
+
+def test_stochastic_raw_k_matches_definition():
+    """smooth_k=1 時 stoch_k == raw %K = 100*(close-LL)/(HH-LL)。"""
+    df = _stoch_df()
+    k_period = 14
+    out = se.stochastic(df, k_period=k_period, smooth_k=1, d_period=3)
+    i = 50
+    win = df.iloc[i - k_period + 1: i + 1]
+    ll, hh = win["low"].min(), win["high"].max()
+    expected = 100 * (df["close"].iloc[i] - ll) / (hh - ll)
+    assert out["stoch_k"].iloc[i] == pytest.approx(expected)
+
+
+def test_stochastic_constant_range_no_divzero():
+    """高低相等（range=0）→ 不應炸除零，回 NaN 或被前值填，總之有限或 NaN。"""
+    s = pd.DataFrame({"open": [100.0] * 30, "high": [100.0] * 30,
+                      "low": [100.0] * 30, "close": [100.0] * 30})
+    out = se.stochastic(s)
+    v = out["stoch_k"].iloc[-1]
+    assert np.isnan(v) or np.isfinite(v)
+
+
+def test_stochastic_is_causal_no_lookahead():
+    df = _stoch_df(seed=11, n=90)
+    full = se.stochastic(df)
+    for k in (30, 60, 85):
+        pref = se.stochastic(df.iloc[:k])
+        for col in ("stoch_k", "stoch_d"):
+            a, b = full[col].iloc[:k], pref[col]
+            assert a.isna().equals(b.isna())
+            np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
