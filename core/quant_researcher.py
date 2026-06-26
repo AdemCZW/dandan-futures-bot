@@ -825,7 +825,8 @@ class ConsensusStrategy:
     """
     name = "consensus"
 
-    def __init__(self, strategies=None, min_agree: int = 2, **_):
+    def __init__(self, strategies=None, min_agree: int = 2,
+                 min_agree_range: int | None = None, **_):
         if strategies is None:
             strategies = []
         # 接受 strategy 物件清單或名稱字串清單
@@ -836,6 +837,8 @@ class ConsensusStrategy:
             else:
                 self._subs.append(s)
         self.min_agree = min_agree
+        # 橫盤降門檻：未指定時等於 min_agree（向後相容）
+        self.min_agree_range = min_agree_range if min_agree_range is not None else min_agree
 
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
@@ -854,9 +857,11 @@ class ConsensusStrategy:
                 long_v += 1
             elif v == -1:
                 short_v += 1
-        if long_v >= self.min_agree:
+        regime = row.get("regime", "") if hasattr(row, "get") else ""
+        threshold = self.min_agree_range if regime == "range" else self.min_agree
+        if long_v >= threshold:
             return 1
-        if short_v >= self.min_agree:
+        if short_v >= threshold:
             return -1
         return 0
 
