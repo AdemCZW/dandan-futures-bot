@@ -578,3 +578,46 @@ h3::before {
   button.run { animation: none; }
   button.run, .btn-ghost, .tab, select, input { transition: none; }
 }
+
+/* ============================================================================
+   手機 RWD（≤640px）：收窄留白、分頁列改橫向捲動、字級/表格縮小。
+   即時監控三卡網格已用 auto-fit + minmax 自動降為單欄，不需在此處理。
+   ============================================================================ */
+@media (max-width: 640px) {
+  .wrap { padding: 12px; }
+
+  header h1 { font-size: 18px; }
+  header .sub { font-size: 12px; }
+
+  /* 分頁列：不換行、可橫向捲動（手機常見 pattern），隱藏捲軸 */
+  .tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    margin: 14px 0 10px;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 8px 11px;
+    font-size: 13px;
+    letter-spacing: 0.5px;
+  }
+
+  /* 面板/卡片：收窄內距，讓窄螢幕有更多可用寬度 */
+  .panel { padding: 12px; }
+
+  /* 表格：縮字避免橫向溢出；仍可在容器內橫捲 */
+  table { font-size: 11px; }
+  th, td { padding-left: 2px; padding-right: 2px; }
+}
+
+/* 極窄機（≤380px）：再壓一級 */
+@media (max-width: 380px) {
+  .wrap { padding: 8px; }
+  header h1 { font-size: 16px; }
+  .tab { padding: 7px 9px; font-size: 12px; }
+  table { font-size: 10px; }
+}

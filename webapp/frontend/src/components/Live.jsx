@@ -411,10 +411,10 @@ export default function Live() {
         </span>
       </div>
 
-      {/* ── 三台並排 ── */}
+      {/* ── 三台並排（窄螢幕自動降欄：auto-fit + minmax）── */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(3, 1fr)',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))',
         gap: 16,
         alignItems: 'start',
       }}>
