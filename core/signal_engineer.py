@@ -586,6 +586,42 @@ def fib_channel_single(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int =
     }
 
 
+_FIB_FAST_DEFAULT = (8, 13, 21)
+_FIB_SLOW_DEFAULT = (34, 55, 89)
+
+
+def fib_ema_score(
+    close: pd.Series,
+    fast: tuple = _FIB_FAST_DEFAULT,
+    slow: tuple = _FIB_SLOW_DEFAULT,
+) -> pd.Series:
+    """費波那契 EMA 排列分數（Fibonacci EMA Alignment Score）。
+
+    以 Fibonacci 數列週期（8/13/21 快 vs 34/55/89 慢）計算多頭/空頭排列強度。
+    分數 = 快線全部高於慢線的組合數 / 總組合數，回傳 [0, 1]：
+      1.0 = 完全多頭排列（快線全在慢線上方）
+      0.0 = 完全空頭排列（快線全在慢線下方）
+      0.5 附近 = 盤整混沌
+
+    Causal：只用過去 K 線，不 repaint。
+    NaN：慢線週期最長一條穩定前均為 NaN。
+    """
+    fast_emas = [ema(close, p) for p in fast]
+    slow_emas = [ema(close, p) for p in slow]
+
+    n_pairs = len(fast) * len(slow)
+    score = sum(
+        (f > s).astype(float)
+        for f in fast_emas
+        for s in slow_emas
+    ) / n_pairs
+
+    # NaN until the slowest EMA has settled (first non-NaN of slowest)
+    slowest = ema(close, max(slow))
+    score = score.where(slowest.notna())
+    return score
+
+
 def enrich(df: pd.DataFrame) -> pd.DataFrame:
     """一次把常用指標都算好，附加到 DataFrame。"""
     out = df.copy()

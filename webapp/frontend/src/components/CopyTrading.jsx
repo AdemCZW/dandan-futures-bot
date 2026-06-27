@@ -232,13 +232,153 @@ function LargeTradesSection() {
   )
 }
 
+// ─── Binance Copy Trading Leaderboard ────────────────────────────────────────
+function BinanceSection() {
+  const [data, setData]         = useState(null)
+  const [loading, setLoading]   = useState(false)
+  const [err, setErr]           = useState(null)
+  const [selected, setSelected] = useState(null)   // selected trader uid
+  const [positions, setPositions] = useState([])
+  const [posLoading, setPosLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true); setErr(null)
+    try { setData(await api.copytraders(20)) }
+    catch (e) { setErr(e.message) }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const selectTrader = useCallback(async (uid, positionShared) => {
+    if (selected === uid) { setSelected(null); setPositions([]); return }
+    setSelected(uid)
+    setPositions([])
+    if (!positionShared) return
+    setPosLoading(true)
+    try {
+      const d = await api.copytraderPositions(uid)
+      setPositions(d.positions ?? [])
+    } catch { /* silent */ }
+    finally { setPosLoading(false) }
+  }, [selected])
+
+  const traders = data?.traders ?? []
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#e6edf3', fontFamily: 'var(--font-display)' }}>
+          幣安帶單排行榜
+        </div>
+        <span style={{ fontSize: 10, color: '#484f58', fontFamily: 'var(--font-display)' }}>
+          7日 ROI 降序 · 點擊查看持倉
+        </span>
+        <button onClick={load} disabled={loading} style={{
+          marginLeft: 'auto', padding: '3px 12px', borderRadius: 20, border: '1px solid #21262d',
+          background: 'transparent', color: loading ? '#484f58' : '#8b949e',
+          cursor: loading ? 'default' : 'pointer', fontSize: 11, fontFamily: 'var(--font-display)',
+        }}>
+          {loading ? '…' : '↻'}
+        </button>
+      </div>
+
+      {err && <div style={{ fontSize: 11, color: '#f85149', marginBottom: 8 }}>⚠ {err}</div>}
+
+      <div style={{ borderRadius: 8, overflow: 'hidden', border: '1px solid #21262d' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              {['#', '交易者', '粉絲', '7日 ROI', '7日 PnL', '勝率', '持倉'].map(h => (
+                <th key={h} style={hdr}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {loading && traders.length === 0
+              ? <tr><td colSpan={7} style={{ ...cell, textAlign: 'center', color: '#484f58' }}>載入中…</td></tr>
+              : traders.length === 0
+              ? <tr><td colSpan={7} style={{ ...cell, textAlign: 'center', color: '#484f58' }}>暫無資料（幣安 API 可能不通）</td></tr>
+              : traders.map((t, i) => {
+                  const isSelected = selected === t.uid
+                  return (
+                    <tr
+                      key={t.uid || i}
+                      onClick={() => selectTrader(t.uid, t.position_shared)}
+                      style={{
+                        background: isSelected ? '#58a6ff0a' : 'transparent',
+                        cursor: 'pointer',
+                        outline: isSelected ? '1px solid #58a6ff22' : 'none',
+                      }}
+                    >
+                      <td style={{ ...cell, color: '#484f58', width: 28 }}>{i + 1}</td>
+                      <td style={{ ...cell, color: '#e6edf3', fontWeight: 600, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {t.nickname}
+                      </td>
+                      <td style={{ ...cell, color: '#8b949e' }}>{fmtK(t.followers)}</td>
+                      <td style={{ ...cell, color: clr(t.roi_7d), fontWeight: 700 }}>
+                        {t.roi_7d == null ? '—' : `${t.roi_7d > 0 ? '+' : ''}${fmt(t.roi_7d)}%`}
+                      </td>
+                      <td style={{ ...cell, color: clr(t.pnl_7d) }}>
+                        {t.pnl_7d == null ? '—' : `${t.pnl_7d > 0 ? '+' : ''}${fmtK(t.pnl_7d)}`}
+                      </td>
+                      <td style={{ ...cell, color: '#8b949e' }}>
+                        {t.win_rate == null ? '—' : `${fmt(t.win_rate, 1)}%`}
+                      </td>
+                      <td style={{ ...cell, color: t.position_shared ? '#3fb950' : '#484f58', fontSize: 10 }}>
+                        {t.position_shared ? '公開' : '未分享'}
+                      </td>
+                    </tr>
+                  )
+                })
+            }
+          </tbody>
+        </table>
+      </div>
+
+      {/* 持倉展開區 */}
+      {selected && (
+        <div style={{ marginTop: 8, borderRadius: 8, border: '1px solid #21262d', overflow: 'hidden' }}>
+          <div style={{ ...hdr, padding: '8px 12px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>持倉明細</span>
+            {posLoading && <span style={{ color: '#484f58' }}>載入中…</span>}
+          </div>
+          {!posLoading && positions.length === 0
+            ? <div style={{ ...cell, textAlign: 'center', color: '#484f58' }}>無公開持倉</div>
+            : positions.map((p, i) => {
+                const isLong = p.direction === 'long'
+                return (
+                  <div key={i} style={{
+                    display: 'grid', gridTemplateColumns: '1fr 60px 90px 90px 80px 70px',
+                    gap: 8, padding: '8px 12px', borderBottom: '1px solid #161b22',
+                    fontSize: 12, fontFamily: 'var(--font-display)',
+                  }}>
+                    <span style={{ color: '#e6edf3', fontWeight: 600 }}>{p.symbol}</span>
+                    <span style={{ color: isLong ? '#3fb950' : '#f85149', fontWeight: 700 }}>
+                      {isLong ? '▲ 多' : '▼ 空'}
+                    </span>
+                    <span style={{ color: '#8b949e' }}>入 ${fmt(p.entry_price, 2)}</span>
+                    <span style={{ color: '#8b949e' }}>標 ${fmt(p.mark_price, 2)}</span>
+                    <span style={{ color: clr(p.upnl) }}>{p.upnl > 0 ? '+' : ''}{fmt(p.upnl)}</span>
+                    <span style={{ color: clr(p.roe) }}>{p.roe > 0 ? '+' : ''}{fmt(p.roe, 1)}% ROE</span>
+                  </div>
+                )
+              })
+          }
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main Tab ─────────────────────────────────────────────────────────────────
 export default function CopyTrading() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
       <div style={{ fontSize: 11, color: '#484f58', fontFamily: 'var(--font-display)' }}>
-        帶單追蹤 · HyperLiquid 頂級交易者 + OKX BTC 大單流
+        帶單追蹤 · 幣安帶單排行榜 + HyperLiquid 頂級交易者 + OKX BTC 大單流
       </div>
+      <BinanceSection />
       <HlSection />
       <LargeTradesSection />
       <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }`}</style>

@@ -891,6 +891,66 @@ class TrendPullbackStrategy(Strategy):
         return 0
 
 
+class FibEmaStrategy(Strategy):
+    """費波那契 EMA 排列策略（Fibonacci EMA Alignment）。
+
+    核心指標：fib_ema_score — 以 8/13/21（快）vs 34/55/89（慢）共 9 對 EMA
+    計算多頭/空頭排列的強度（0=完全空頭, 1=完全多頭）。
+
+    進場：score ≥ score_bull（預設 0.67）且 RSI 在合理區間（避免追極端）→ 多
+          score ≤ score_bear（預設 0.33）且 RSI 在合理區間 → 空
+    出場：持多時 score 跌破 score_bear；持空時 score 突破 score_bull
+    """
+
+    name = "fib_ema"
+    defaults = {
+        "rsi_period": 14,
+        "rsi_lo": 35.0,
+        "rsi_hi": 65.0,
+        "score_bull": 0.67,
+        "score_bear": 0.33,
+    }
+    allow_short = True
+    regime_pref = "trend"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        p = self.params
+        out["fib_score"] = se.fib_ema_score(out["close"])
+        out["rsi"] = se.rsi(out["close"], int(p["rsi_period"]))
+        out["atr"] = se.atr(out, 14)
+        return self._prepare_regime(out)
+
+    def signal(self, row, position: int) -> int:
+        def g(col):
+            v = row.get(col) if hasattr(row, "get") else getattr(row, col, None)
+            return float(v) if v is not None and str(v) != "nan" else None
+
+        score = g("fib_score")
+        rsi   = g("rsi")
+        if score is None:
+            return position  # not enough data yet, hold
+
+        bull = float(self.params.get("score_bull", 0.67))
+        bear = float(self.params.get("score_bear", 0.33))
+        rsi_lo = float(self.params.get("rsi_lo", 35.0))
+        rsi_hi = float(self.params.get("rsi_hi", 65.0))
+        in_rsi_zone = rsi is None or (rsi_lo <= rsi <= rsi_hi)
+
+        # exit logic — score reversal
+        if position == 1:
+            return 0 if score <= bear else 1
+        if position == -1:
+            return 0 if score >= bull else -1
+
+        # entry: fib_score alignment is the sole gate for this trend strategy
+        if score >= bull:
+            return 1
+        if score <= bear:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -907,6 +967,7 @@ STRATEGIES = {
     SmcStructureStrategy.name: SmcStructureStrategy,
     FibChannelStrategy.name: FibChannelStrategy,
     TrendPullbackStrategy.name: TrendPullbackStrategy,
+    FibEmaStrategy.name: FibEmaStrategy,
 }
 
 

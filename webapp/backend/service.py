@@ -567,22 +567,20 @@ def binance_copytrading(limit: int = 20) -> dict:
             return json.loads(r.read())
 
     now = time.time()
-    if now - _bn_ct_cache["ts"] > _BN_CT_TTL or _bn_ct_cache["data"] is None:
-        try:
-            raw = _post(
-                "https://www.binance.com/bapi/futures/v3/public/future/leaderboard/getLeaderboardRank",
-                {"isShared": True, "isTrader": True,
-                 "periodType": "WEEKLY", "rankType": "ROI",
-                 "statisticsType": "FUTURES", "traderType": "REGULAR"},
-            )
-            rank_list = (raw.get("data") or {}).get("rankList") or []
-        except Exception:
-            rank_list = []
-        _bn_ct_cache["ts"] = now
-        _bn_ct_cache["data"] = rank_list
+    if now - _bn_ct_cache["ts"] < _BN_CT_TTL and _bn_ct_cache["data"] is not None:
+        traders = _bn_ct_cache["data"]
+        return {"traders": traders[:limit], "source": "Binance Copy Trading"}
 
-    rank_list = _bn_ct_cache["data"] or []
-    top = rank_list[:limit]
+    try:
+        raw = _post(
+            "https://www.binance.com/bapi/futures/v3/public/future/leaderboard/getLeaderboardRank",
+            {"isShared": True, "isTrader": True,
+             "periodType": "WEEKLY", "rankType": "ROI",
+             "statisticsType": "FUTURES", "traderType": "REGULAR"},
+        )
+        rank_list = (raw.get("data") or {}).get("rankList") or []
+    except Exception:
+        rank_list = []
 
     def _base_info(uid):
         try:
@@ -611,15 +609,18 @@ def binance_copytrading(limit: int = 20) -> dict:
             **info,
         }
 
-    results = [None] * len(top)
+    results = [None] * len(rank_list)
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futs = {ex.submit(_entry, row): i for i, row in enumerate(top)}
+        futs = {ex.submit(_entry, row): i for i, row in enumerate(rank_list)}
         for fut in as_completed(futs):
             results[futs[fut]] = fut.result()
 
     traders = [r for r in results if r]
     traders.sort(key=lambda t: t.get("roi_7d") or 0, reverse=True)
-    return {"traders": traders, "source": "Binance Copy Trading"}
+
+    _bn_ct_cache["ts"] = now
+    _bn_ct_cache["data"] = traders
+    return {"traders": traders[:limit], "source": "Binance Copy Trading"}
 
 
 def binance_copytrader_positions(uid: str) -> dict:

@@ -873,3 +873,64 @@ def test_stochastic_is_causal_no_lookahead():
             a, b = full[col].iloc[:k], pref[col]
             assert a.isna().equals(b.isna())
             np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
+
+
+# ─── fib_ema_score() ──────────────────────────────────────────────────────────
+
+def _fib_ema_df(closes):
+    idx = pd.date_range("2024-01-01", periods=len(closes), freq="15min")
+    return pd.DataFrame({
+        "open": closes, "high": closes, "low": closes,
+        "close": closes, "volume": 1.0,
+    }, index=idx)
+
+
+def test_fib_ema_score_returns_series_same_length():
+    from core.signal_engineer import fib_ema_score
+    df = _fib_df(list(range(1, 201)))
+    result = fib_ema_score(df["close"])
+    assert len(result) == len(df)
+
+
+def test_fib_ema_score_uptrend_near_one():
+    """Monotonically rising price → fast EMAs all above slow EMAs → score > 0.85."""
+    from core.signal_engineer import fib_ema_score
+    closes = [100 + i * 0.5 for i in range(300)]
+    score = fib_ema_score(_fib_ema_df(closes)["close"])
+    assert score.iloc[-1] > 0.85
+
+
+def test_fib_ema_score_downtrend_near_zero():
+    """Monotonically falling price → fast EMAs all below slow EMAs → score < 0.15."""
+    from core.signal_engineer import fib_ema_score
+    closes = [300 - i * 0.5 for i in range(300)]
+    score = fib_ema_score(_fib_ema_df(closes)["close"])
+    assert score.iloc[-1] < 0.15
+
+
+def test_fib_ema_score_range_zero_to_one():
+    """Score is always in [0, 1] regardless of price series."""
+    from core.signal_engineer import fib_ema_score
+    rng = np.random.default_rng(42)
+    closes = (100 + rng.normal(0, 2, 500)).tolist()
+    score = fib_ema_score(_fib_ema_df(closes)["close"])
+    valid = score.dropna()
+    assert (valid >= 0.0).all()
+    assert (valid <= 1.0).all()
+
+
+def test_fib_ema_score_short_series_no_crash():
+    """With only 50 bars (< EMA-89 recommended warm-up), must not raise and score in [0,1]."""
+    from core.signal_engineer import fib_ema_score
+    score = fib_ema_score(_fib_ema_df([100.0] * 50)["close"])
+    valid = score.dropna()
+    assert len(score) == 50
+    assert (valid >= 0.0).all() and (valid <= 1.0).all()
+
+
+def test_fib_ema_score_custom_periods():
+    """Custom fast/slow periods produce valid output."""
+    from core.signal_engineer import fib_ema_score
+    closes = [100 + i * 0.3 for i in range(200)]
+    score = fib_ema_score(_fib_ema_df(closes)["close"], fast=(5, 8), slow=(13, 21))
+    assert score.iloc[-1] > 0.75
