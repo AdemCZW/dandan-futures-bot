@@ -289,6 +289,7 @@ def run_optimize_api(strategy: str, source: str = "synthetic",
 _RAILWAY_BOT_URL = os.getenv("RAILWAY_BOT_URL", "").rstrip("/")
 _RAILWAY_BOT_URL_2 = os.getenv("RAILWAY_BOT_URL_2", "").rstrip("/")
 _RAILWAY_BOT_URL_3 = os.getenv("RAILWAY_BOT_URL_3", "").rstrip("/")
+_RAILWAY_BOT_URL_4 = os.getenv("RAILWAY_BOT_URL_4", "").rstrip("/")
 
 
 def _fetch_railway_trades(limit: int = 50, mode: str | None = None,

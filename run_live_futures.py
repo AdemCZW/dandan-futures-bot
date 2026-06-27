@@ -166,7 +166,8 @@ class FuturesLiveTrader:
             from core.trade_journal import read_trades_db
             from core.risk_officer import kelly_fraction
             strategy = os.getenv("BOT_STRATEGY")
-            rows = read_trades_db(limit=50, mode="exit", strategy=strategy)
+            symbol   = os.getenv("BOT_SYMBOL")   # 同策略不同標的（如 Bot3/Bot4 trend_pullback）須分開算 Kelly
+            rows = read_trades_db(limit=50, mode="exit", strategy=strategy, symbol=symbol)
             pnl = [r["pnl"] for r in rows if r.get("pnl") is not None]
             return kelly_fraction(pnl, min_trades=20)
         except Exception:

@@ -98,6 +98,15 @@ def test_live3_endpoint_returns_configured_false_when_url_unset():
         assert d.get("active") is False
 
 
+def test_live4_endpoint_returns_configured_false_when_url_unset():
+    r = client.get("/api/live4")
+    assert r.status_code == 200
+    d = r.json()
+    assert "configured" in d   # RAILWAY_BOT_URL_4 未設定 → configured=False
+    if not d["configured"]:
+        assert d.get("active") is False
+
+
 def test_klines_synthetic_shape():
     r = client.get("/api/klines?source=synthetic")
     assert r.status_code == 200

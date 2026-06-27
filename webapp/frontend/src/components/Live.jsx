@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, cls } from '../api'
 import MiniChart from './MiniChart'
 
-const BOT_COLORS   = ['var(--accent)', '#e0397a', '#9b59b6']
+const BOT_COLORS   = ['var(--accent)', '#e0397a', '#9b59b6', '#f0a020']
 const INIT_CAPITAL = 5000   // 每台機器人起始預算（測試網虛擬資金）
 
 // ── 工具函式 ────────────────────────────────────────────────────────────────
@@ -376,6 +376,7 @@ export default function Live() {
   const [d,    setD]    = useState(null)
   const [e2,   setE2]   = useState(null)
   const [e3,   setE3]   = useState(null)
+  const [e4,   setE4]   = useState(null)
   const [tick, setTick] = useState(0)
   const timer = useRef(null)
 
@@ -383,6 +384,7 @@ export default function Live() {
     try { setD(await api.live()) }   catch { /* ignore */ }
     try { setE2(await api.live2()) } catch { /* ignore */ }
     try { setE3(await api.live3()) } catch { /* ignore */ }
+    try { setE4(await api.live4()) } catch { /* ignore */ }
   }
 
   useEffect(() => {
@@ -391,7 +393,7 @@ export default function Live() {
     return () => clearInterval(timer.current)
   }, [])
 
-  const anyFresh = [d, e2, e3].some(x => x?.age_seconds != null && x.age_seconds < 180)
+  const anyFresh = [d, e2, e3, e4].some(x => x?.age_seconds != null && x.age_seconds < 180)
 
   return (
     <>
@@ -421,6 +423,9 @@ export default function Live() {
         <BotCard data={d}  num={1} color={BOT_COLORS[0]} />
         <BotCard data={e2} num={2} color={BOT_COLORS[1]} />
         <BotCard data={e3} num={3} color={BOT_COLORS[2]} />
+        {e4?.configured && (
+          <BotCard data={e4} num={4} color={BOT_COLORS[3]} />
+        )}
       </div>
     </>
   )

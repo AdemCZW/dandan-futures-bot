@@ -127,6 +127,16 @@ def live3():
     return out
 
 
+@app.get("/api/live4")
+def live4():
+    """第四台 bot 的即時狀態。未設定 RAILWAY_BOT_URL_4 → configured=False。"""
+    if not service._RAILWAY_BOT_URL_4:
+        return {"active": False, "configured": False}
+    out = service.live_status(railway_url=service._RAILWAY_BOT_URL_4)
+    out["configured"] = True
+    return out
+
+
 @app.get("/api/hl-leaderboard")
 def hl_leaderboard(top_n: int = 30):
     try:
