@@ -755,6 +755,7 @@ class FibChannelStrategy(Strategy):
     defaults = {"pivot_left": 5, "pivot_right": 3,
                 "entry_zone": 0.30, "exit_zone": 0.80, "break_buffer": 0.10,
                 "regime_confirm_bars": 1, "min_channel_width_atr": 0.0,
+                "volume_spike_ratio": 0.0,
                 "mode": "trend"}
     allow_short = True
     regime_pref = "trend"
@@ -770,6 +771,9 @@ class FibChannelStrategy(Strategy):
                                     int(self.params["pivot_left"]),
                                     int(self.params["pivot_right"]))
         out["atr"] = se.atr(out, 14)
+        # vol_ratio = 當根成交量 / 10根均量，供進場時暴量過濾使用
+        vol_avg = out["volume"].rolling(10, min_periods=1).mean()
+        out["vol_ratio"] = out["volume"] / vol_avg.replace(0, float("nan"))
         return self._prepare_regime(out)
 
     def signal(self, row, position: int) -> int:
@@ -803,6 +807,13 @@ class FibChannelStrategy(Strategy):
             return 0
         if not self._regime_ok(row):
             return 0
+
+        # 暴量突破過濾：當根成交量 > N × 10根均量時跳過進場（breakout bar 逆勢接刀風險高）
+        spike_ratio = float(self.params.get("volume_spike_ratio", 0.0))
+        if spike_ratio > 0:
+            vol_r = _num(g("vol_ratio"))
+            if vol_r is not None and not pd.isna(vol_r) and vol_r > spike_ratio:
+                return 0
 
         min_w_atr = float(self.params.get("min_channel_width_atr", 0.0))
         if min_w_atr > 0:
@@ -937,13 +948,16 @@ class FibEmaStrategy(Strategy):
         rsi_hi = float(self.params.get("rsi_hi", 65.0))
         in_rsi_zone = rsi is None or (rsi_lo <= rsi <= rsi_hi)
 
-        # exit logic — score reversal
+        # exit logic — score reversal（出場不受 regime 限制）
         if position == 1:
             return 0 if score <= bear else 1
         if position == -1:
             return 0 if score >= bull else -1
 
-        # entry: fib_score alignment is the sole gate for this trend strategy
+        # entry: regime 閘門（trend 盤才進場，盤整盤 whipsaw 太嚴重）
+        if not self._regime_ok(row):
+            return 0
+
         if score >= bull:
             return 1
         if score <= bear:

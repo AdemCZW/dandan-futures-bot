@@ -153,3 +153,45 @@ def test_allow_short_is_true():
 def test_regime_pref_is_trend():
     strat = _make_strategy()
     assert strat.regime_pref == "trend"
+
+
+# ─── regime 閘門（新增）────────────────────────────────────────────────────────
+
+def _row_with_regime(regime_val, score=0.90, rsi=50.0):
+    """Build a minimal row dict with fib_score, rsi, and regime."""
+    return {"fib_score": score, "rsi": rsi, "regime": regime_val}
+
+
+def test_entry_blocked_when_regime_is_range():
+    """regime='range' 時不論 fib_score 多強，空手不進場（whipsaw 防護）。"""
+    strat = _make_strategy()
+    row = _row_with_regime("range", score=1.0)
+    assert strat.signal(row, position=0) == 0
+
+
+def test_entry_allowed_when_regime_is_trend():
+    """regime='trend' 時 fib_score >= score_bull → 正常開多。"""
+    strat = _make_strategy()
+    row = _row_with_regime("trend", score=1.0)
+    assert strat.signal(row, position=0) == 1
+
+
+def test_short_entry_blocked_when_regime_is_range():
+    """regime='range' 時空單訊號也被擋下。"""
+    strat = _make_strategy()
+    row = _row_with_regime("range", score=0.0)
+    assert strat.signal(row, position=0) == 0
+
+
+def test_exit_still_fires_in_range_regime():
+    """持多中即使 regime='range'，score 跌破 bear 仍須出場（出場不受 regime 限制）。"""
+    strat = _make_strategy()
+    row = _row_with_regime("range", score=0.10)
+    assert strat.signal(row, position=1) == 0
+
+
+def test_exit_short_still_fires_in_range_regime():
+    """持空中即使 regime='range'，score 升破 bull 仍須出場。"""
+    strat = _make_strategy()
+    row = _row_with_regime("range", score=0.95)
+    assert strat.signal(row, position=-1) == 0

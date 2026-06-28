@@ -430,3 +430,60 @@ class TestFibChannelModeSwitch:
         strat = build_strategy("fib_channel", mode="reversion")
         row = _regime_row(pos=0.50, ch_dir=1)
         assert strat.signal(row, -1) == -1
+
+
+# ── 暴量突破過濾（volume_spike_ratio，新增）─────────────────────────────────────
+
+def _vol_row(pos=0.10, ch_dir=1, vol_ratio=1.0, regime="range"):
+    """最小 row：含 fib_ch_pos / fib_ch_dir / vol_ratio / regime。"""
+    return {
+        "fib_ch_pos": pos, "fib_ch_dir": float(ch_dir),
+        "fib_ch_0": 100.0, "fib_ch_100": 110.0,
+        "atr": 5.0,
+        "regime": regime,
+        "er": 0.3, "choppiness": 60.0, "adx": 15.0,
+        "vol_ratio": vol_ratio,
+    }
+
+
+class TestVolumeSpike:
+    """volume_spike_ratio 參數：進場時若當根成交量 > N × 10 根均量則跳過進場。"""
+
+    def test_default_spike_ratio_zero_means_disabled(self):
+        """預設 volume_spike_ratio=0 → 暴量不過濾，照常進場。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0)
+        row = _vol_row(pos=0.85, vol_ratio=5.0)
+        assert strat.signal(row, 0) == -1
+
+    def test_spike_blocks_entry_when_vol_too_high(self):
+        """vol_ratio > volume_spike_ratio → 跳過進場，即使其他條件符合。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               volume_spike_ratio=2.0)
+        row = _vol_row(pos=0.85, vol_ratio=2.5)
+        assert strat.signal(row, 0) == 0
+
+    def test_spike_allows_entry_when_vol_normal(self):
+        """vol_ratio <= volume_spike_ratio → 正常進場。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               volume_spike_ratio=2.0)
+        row = _vol_row(pos=0.85, vol_ratio=1.5)
+        assert strat.signal(row, 0) == -1
+
+    def test_spike_does_not_block_exit(self):
+        """暴量不擋出場——空單 pos<(1-exit_zone)=0.20 → 應平倉，不受暴量影響。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               volume_spike_ratio=2.0)
+        row = _vol_row(pos=0.10, vol_ratio=10.0)  # pos=0.10 < 1-0.80=0.20 → exit short
+        assert strat.signal(row, -1) == 0   # exit, not blocked by volume
+
+    def test_spike_ratio_exact_boundary_allows_entry(self):
+        """vol_ratio == volume_spike_ratio（剛好等於）→ 允許進場（嚴格 >）。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               volume_spike_ratio=2.0)
+        row = _vol_row(pos=0.85, vol_ratio=2.0)
+        assert strat.signal(row, 0) == -1
