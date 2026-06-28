@@ -1,27 +1,28 @@
 import { useState } from 'react'
 import { api, pct } from '../api'
+import Hint, { Plain } from './Hint'
 
-// 青→翠綠單色階（--heat-low #0c3a44 → --heat-mid #0f6e56 → --heat-high #34d399）：
-// 低分深青、高分亮綠，單色階讓「只有一兩格亮＝過擬合」一眼可辨
+// 單色藍階（--heat-low → --heat-mid → --heat-high，dark theme triples）：
+// 低分近底色、高分亮藍，單色階讓「只有一兩格亮＝過擬合」一眼可辨
 const HEAT_STOPS = [
-  [12, 58, 68],   // --heat-low  #0c3a44
-  [15, 110, 86],  // --heat-mid  #0f6e56
-  [52, 211, 153], // --heat-high #34d399
+  [22, 22, 26],    // --heat-low  near-bg
+  [47, 74, 134],   // --heat-mid
+  [91, 140, 255],  // --heat-high accent blue
 ]
 function lerp(a, b, t) { return Math.round(a + (b - a) * t) }
 function color(v, min, max) {
-  if (v == null) return 'var(--panel2)'
+  if (v == null) return 'var(--surface-2)'
   const t = max > min ? (v - min) / (max - min) : 0.5
   const seg = t < 0.5 ? 0 : 1
   const lt = t < 0.5 ? t * 2 : (t - 0.5) * 2
   const [a, b] = [HEAT_STOPS[seg], HEAT_STOPS[seg + 1]]
   return `rgb(${lerp(a[0], b[0], lt)},${lerp(a[1], b[1], lt)},${lerp(a[2], b[2], lt)})`
 }
-// 低分端深底用亮字、高分端亮底用深墨字，確保對比
+// 低分端深底用一般字、高分端亮藍底用白字，確保對比
 function heatInk(v, min, max) {
-  if (v == null) return 'var(--muted-dim)'
+  if (v == null) return 'var(--faint)'
   const t = max > min ? (v - min) / (max - min) : 0.5
-  return t > 0.55 ? 'var(--accent-ink)' : 'var(--text)'
+  return t > 0.55 ? '#ffffff' : 'var(--text)'
 }
 
 export default function Optimize() {
@@ -48,6 +49,10 @@ export default function Optimize() {
     <>
       <div className={`panel${loading ? ' is-active' : ''}`}>
         <h3>參數最佳化</h3>
+        <Plain>
+          <b>參數最佳化</b>＝同一個策略，把參數（如均線天數）一格一格試過去，找出歷史上表現最好的組合。
+          重點是<b>別被「剛好過去最好」的數字騙了</b>（過擬合）——所以下面還有 Walk-forward 用「沒看過的資料」驗證它是不是真的有效。
+        </Plain>
         <div className="controls">
           <div className="field"><label>策略</label>
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
@@ -60,7 +65,7 @@ export default function Optimize() {
               <option value="testnet">testnet</option>
             </select>
           </div>
-          <div className="field"><label>目標</label>
+          <div className="field"><label><Hint text="要最佳化哪個目標：sharpe＝賺得最穩、return＝賺最多、return_dd＝報酬除以最大回撤（兼顧賺與抗跌）。">目標</Hint></label>
             <select value={objective} onChange={(e) => setObjective(e.target.value)}>
               {['sharpe', 'return', 'return_dd'].map((o) => <option key={o}>{o}</option>)}
             </select>
@@ -100,8 +105,12 @@ export default function Optimize() {
           </div>
 
           <div className="panel">
-            <h3>Walk-forward（樣本外泛化）</h3>
-            {wf.folds === 0 ? <div className="muted" style={{ color: 'var(--muted-dim)' }}>// 資料不足，切不出 fold</div> : (
+            <h3><Hint text="把時間切成好幾段，每段「用前半段挑最佳參數、拿後半段（沒看過的資料）實測」。如果後半段也賺，才算真有效、不是運氣。">Walk-forward（樣本外泛化）</Hint></h3>
+            <Plain>
+              <b>IS（樣本內）</b>＝拿來挑參數那段；<b>OOS（樣本外）</b>＝沒看過、用來驗證那段。
+              看 <b>OOS 平均報酬</b>是否還是正的、<b>OOS 為正比例</b>越高越好；<b>IS→OOS 衰減</b>越大代表越可能是過擬合（換到新資料就失靈）。
+            </Plain>
+            {wf.folds === 0 ? <div className="muted" style={{ color: 'var(--faint)' }}>// 資料不足，切不出 fold</div> : (
               <>
                 <div className="cards">
                   <div className="card"><div className="v num">{wf.folds}</div><div className="k">fold 數</div></div>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Area, ComposedChart } from 'recharts'
 import { api, pct, cls } from '../api'
+import Hint, { Plain } from './Hint'
 
 export default function Backtest() {
   const [strats, setStrats] = useState([])
@@ -26,6 +27,10 @@ export default function Backtest() {
     <>
       <div className={`panel ${loading ? 'is-active' : ''}`}>
         <h3>回測參數</h3>
+        <Plain>
+          <b>回測</b>＝拿「過去的歷史 K 線」把某個策略從頭跑一遍，看它<b>假如當時這樣做、現在會賺多少</b>。
+          用來比較哪個策略相對好；但歷史不代表未來，數字僅供參考、非保證。
+        </Plain>
         <div className="controls">
           <div className="field"><label>策略</label>
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
@@ -55,23 +60,23 @@ export default function Backtest() {
         <>
           <div className="cards">
             <div className="card">
-              <div className="k">總報酬</div>
+              <div className="k"><Hint text="整段期間結束時的總賺賠百分比（含做多做空）。正=賺、負=賠。">總報酬</Hint></div>
               <div className={`v num signal-glow ${cls(m.total_return)}`}>{pct(m.total_return)}</div>
             </div>
             <div className="card">
-              <div className="k">最大回撤</div>
+              <div className="k"><Hint text="最大回撤：資金從某個高點一路跌到最低點的最大跌幅%。代表「中途最慘會虧多少」，越小越好、越能抱得住。">最大回撤</Hint></div>
               <div className="v num neg">{pct(m.max_drawdown)}</div>
             </div>
             <div className="card">
-              <div className="k">勝率</div>
+              <div className="k"><Hint text="所有平倉交易裡賺錢的比例。70% = 每 10 筆約 7 筆賺。注意：高勝率不等於賺錢（可能贏小賠大）。">勝率</Hint></div>
               <div className="v num">{pct(m.win_rate)}</div>
             </div>
             <div className="card">
-              <div className="k">Sharpe</div>
+              <div className="k"><Hint text="夏普值：每承受一單位波動換到多少報酬，衡量「賺得穩不穩」。>1 不錯、>2 很好、<0 賠錢。越高越好。">Sharpe</Hint></div>
               <div className={`v num ${cls(m.sharpe)}`}>{m.sharpe.toFixed(2)}</div>
             </div>
             <div className="card">
-              <div className="k">交易筆數</div>
+              <div className="k"><Hint text="整段期間總共開平倉幾次。太少（十幾筆）樣本不足、結論別太當真。">交易筆數</Hint></div>
               <div className="v num">{m.trades}</div>
             </div>
           </div>
@@ -92,7 +97,7 @@ export default function Backtest() {
                 <CartesianGrid stroke="var(--chart-grid)" strokeDasharray="3 3" />
                 <XAxis dataKey="t" tick={{ fill: 'var(--muted)', fontSize: 11 }} minTickGap={60} tickFormatter={(t) => t.slice(5, 16)} />
                 <YAxis tick={{ fill: 'var(--muted)', fontSize: 11 }} domain={['auto', 'auto']} width={66} />
-                <Tooltip contentStyle={{ background: 'var(--tooltip-bg)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text)', fontSize: 12 }} />
+                <Tooltip contentStyle={{ background: 'var(--tooltip-bg)', border: '1px solid var(--tooltip-border)', borderRadius: 'var(--radius-sm)', color: 'var(--text)', fontSize: 12 }} />
                 <Area type="monotone" dataKey="equity" stroke="none" fill="url(#bt-equity-fill)" />
                 <Line type="monotone" dataKey="equity" stroke="var(--chart-line)" dot={false} strokeWidth={1.6} />
               </ComposedChart>

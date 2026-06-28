@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, cls } from '../api'
+import { Plain } from './Hint'
 
 const MODES = ['paper', 'backtest', 'live_testnet', 'live_testnet_ws', 'live_futures_testnet']
 
@@ -19,10 +20,14 @@ function labelSide(side) {
   const map = {
     entry:        { text: '進場做多',          color: 'pos', badge: 'badge-long'  },
     entry_short:  { text: '進場做空',          color: 'neg', badge: 'badge-short' },
-    exit_signal:  { text: '出場　信號觸發',    color: '',    badge: 'badge-flat'  },
-    exit_sltp:    { text: '出場　停損 / 停利', color: '',    badge: 'badge-flat'  },
-    exit_sl:      { text: '出場　停損',        color: 'neg', badge: 'badge-short' },
-    exit_tp:      { text: '出場　停利',        color: 'pos', badge: 'badge-long'  },
+    exit_signal:    { text: '出場　訊號反轉',    color: '',    badge: 'badge-flat'   },
+    exit_sltp:      { text: '出場　停損 / 停利', color: '',    badge: 'badge-flat'   },
+    exit_sl:        { text: '出場　停損',        color: 'neg', badge: 'badge-short'  },
+    exit_tp:        { text: '出場　停利目標',    color: 'pos', badge: 'badge-long'   },
+    exit_trail:     { text: '出場　移動停利',    color: 'pos', badge: 'badge-long'   },
+    exit_breakeven: { text: '出場　保本',        color: '',    badge: 'badge-flat'   },
+    scale_out:      { text: '部分了結',          color: 'pos', badge: 'badge-system' },
+    exit_manual:    { text: '出場　手動平倉',    color: '',    badge: 'badge-system' },
   }
   return map[side] ?? { text: side, color: '', badge: 'badge-flat' }
 }
@@ -68,6 +73,11 @@ export default function Journal() {
   return (
     <div className="panel">
       <h3>交易日誌 · JOURNAL</h3>
+      <Plain>
+        四台 bot 每一筆「進場 / 部分了結 / 出場」都記在這。<b>動作說明</b>欄會標明這筆是怎麼結束的
+        （停利目標 / 移動停利 / 保本 / 停損 / 訊號反轉 / 手動平倉）；<b>損益</b>欄是該筆實際賺賠（USDT），
+        進場列不算損益顯示「—」。上方三格是<b>已出場筆數 / 勝率 / 總損益</b>的合計。
+      </Plain>
 
       {/* 控制列：來源篩選 + 重新整理（次要動作走 ghost 描邊） */}
       <div className="controls" style={{ marginBottom: 12, flexWrap: 'wrap', gap: 12 }}>
@@ -152,7 +162,7 @@ export default function Journal() {
           })}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={7} className="num" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--muted-dim)' }}>
+              <td colSpan={7} className="num" style={{ textAlign: 'center', padding: '24px 0', color: 'var(--faint)' }}>
                 // 尚無交易留底（跑 run_live_futures.py 或 run_paper.py 後會自動出現）
               </td>
             </tr>

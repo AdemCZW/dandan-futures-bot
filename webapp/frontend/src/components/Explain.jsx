@@ -1,10 +1,14 @@
 import { Fragment, useEffect, useState } from 'react'
 import { api } from '../api'
+import Hint, { Plain } from './Hint'
 
 const TARGET_LABEL = { 1: '做多 (+1)', 0: '空手 (0)', '-1': '做空 (-1)' }
 const ACT_LABEL = {
-  entry: '進場做多', entry_short: '進場做空', exit_signal: '信號平倉',
-  exit_sltp: '停損/停利', exit_final: '收尾平倉', hold: '續抱', flat: '觀望',
+  entry: '進場做多', entry_short: '進場做空', exit_signal: '訊號平倉',
+  exit_sltp: '停損/停利', exit_tp: '停利目標', exit_sl: '停損',
+  exit_trail: '移動停利', exit_breakeven: '保本出場', scale_out: '部分了結',
+  exit_manual: '手動平倉', exit_final: '收尾平倉', hold: '續抱', flat: '觀望',
+  dcg_blocked: '通道護欄擋進場', ml_rejected: 'ML 過濾否決', skip_anomaly: '暴量跳過',
 }
 
 // 目標倉位 → 徽章語意（多/空/空手），數值雙重編碼保留中文字
@@ -64,7 +68,7 @@ function Detail({ s }) {
       <Stage n="2" role="信號工程師">
         {Object.keys(ind).length
           ? Object.entries(ind).map(([k, v]) => <Fragment key={k}>{k}=<span className="num">{v}</span>{' '}·{' '}</Fragment>)
-          : <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--muted-dim)' }}>// 無指標</span>}
+          : <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--faint)' }}>// 無指標</span>}
       </Stage>
       <Stage n="3" role="量化研究員">
         目前 {TARGET_LABEL[s.pos_before]} → 目標{' '}
@@ -114,6 +118,12 @@ export default function Explain() {
 
   return (
     <>
+      <Plain>
+        這頁把 bot 的<b>「每一根 K 線怎麼做決定」</b>攤開給你看：它像一條生產線，依序經過 6 個角色——
+        看行情 → 算指標 → 決定要做多/做空/空手 → 風控把關（停損停利、倉位大小、熔斷）→ 實際下單。
+        點任一列可展開那一根的逐關判斷。下面表格的英文是技術指標代碼（如 <b>rsi</b> 強弱、<b>atr</b> 波動度、
+        <b>regime</b> 盤勢為趨勢或盤整、<b>fib_pos</b> 價格在費波那契通道的位置），是 bot 判斷的依據。
+      </Plain>
       <div className="panel">
         <Label>SOP 流程 · 6 角色管線</Label>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'stretch', marginTop: 12 }}>
@@ -122,7 +132,7 @@ export default function Explain() {
               <div className="card" style={{ flex: 1, margin: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
                   <span className="num" style={{ color: 'var(--accent)', fontSize: 16, fontWeight: 600 }}>{i + 1}</span>
-                  <span className="display" style={{ color: 'var(--text-bright)', fontSize: 14 }}>{p.role}</span>
+                  <span className="display" style={{ color: 'var(--text-strong)', fontSize: 14 }}>{p.role}</span>
                 </div>
                 <div style={{ color: 'var(--muted)', fontSize: 11, lineHeight: 1.5 }}>{p.does}</div>
               </div>
@@ -179,16 +189,16 @@ export default function Explain() {
                         ? (s.risk.allow
                             ? <span className="badge badge-long">准入 ×{s.risk.qty}</span>
                             : <span className="badge badge-short">否決</span>)
-                        : <span style={{ color: 'var(--muted-dim)' }}>—</span>}
+                        : <span style={{ color: 'var(--faint)' }}>—</span>}
                     </td>
                     <td>{s.actions.map((a) => ACT_LABEL[a.act] || a.act).join('；')}</td>
                     <td style={{ color: 'var(--accent)', textAlign: 'center' }}>{open === i ? '▲' : '▼'}</td>
                   </tr>
-                  {open === i && <tr><td colSpan={6} style={{ background: 'var(--panel2)' }}><Detail s={s} /></td></tr>}
+                  {open === i && <tr><td colSpan={6} style={{ background: 'var(--surface-2)' }}><Detail s={s} /></td></tr>}
                 </Fragment>
               ))}
               {res.steps.length === 0 && (
-                <tr><td colSpan={6} style={{ fontFamily: 'var(--font-mono)', color: 'var(--muted-dim)' }}>// 此區間沒有進出場決策</td></tr>
+                <tr><td colSpan={6} style={{ fontFamily: 'var(--font-mono)', color: 'var(--faint)' }}>// 此區間沒有進出場決策</td></tr>
               )}
             </tbody>
           </table>

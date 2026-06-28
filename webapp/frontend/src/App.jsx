@@ -7,6 +7,7 @@ import Journal from './components/Journal.jsx'
 import Whales from './components/Whales.jsx'
 import Chart from './components/Chart.jsx'
 import CopyTrading from './components/CopyTrading.jsx'
+import { useTheme, toggleTheme } from './lib/theme.js'
 
 const TABS = [
   { key: 'live',        label: '即時監控',   el: <Live /> },
@@ -21,9 +22,10 @@ const TABS = [
 
 export default function App() {
   const [tab, setTab] = useState('live')
+  const theme = useTheme()
   return (
     <div className="wrap">
-      <header className="hud-neon-top">
+      <header>
         <div
           style={{
             display: 'flex',
@@ -37,21 +39,30 @@ export default function App() {
             className="display"
             style={{
               fontSize: 12,
-              fontWeight: 600,
-              letterSpacing: '0.18em',
+              fontWeight: 500,
+              letterSpacing: '0.16em',
               color: 'var(--muted)',
               textTransform: 'uppercase',
             }}
           >
             Dandan Trading Terminal
           </span>
-          <span
-            className="badge badge-system"
-            style={{ marginLeft: 'auto' }}
-            title="幣安合約測試網 · 模擬盤"
-          >
-            合約測試網
-          </span>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span
+              className="badge badge-system"
+              title="幣安合約測試網 · 模擬盤"
+            >
+              合約測試網
+            </span>
+            <button
+              className="theme-toggle"
+              onClick={toggleTheme}
+              aria-label={theme === 'light' ? '切換深色主題' : '切換亮色主題'}
+              title={theme === 'light' ? '切換深色主題' : '切換亮色主題'}
+            >
+              {theme === 'light' ? '◑ 深色' : '◐ 亮色'}
+            </button>
+          </div>
         </div>
         <div className="sub">幣安測試網模擬盤 · 虛擬資金 · 非投資建議</div>
       </header>

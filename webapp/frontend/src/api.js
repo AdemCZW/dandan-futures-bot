@@ -31,6 +31,8 @@ export const api = {
   live2: () => get('/api/live2'),
   live3: () => get('/api/live3'),
   live4: () => get('/api/live4'),
+  // 手動平倉（結算）：n=1~4 對應四台 bot；後端持 CLOSE_TOKEN 轉發
+  closePosition: (n = 1) => post(`/api/live${n === 1 ? '' : n}/close`, {}),
   whales: (symbol = 'BTCUSDT', period = '5m', limit = 30) =>
     get(`/api/whales?symbol=${symbol}&period=${period}&limit=${limit}`),
   hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),

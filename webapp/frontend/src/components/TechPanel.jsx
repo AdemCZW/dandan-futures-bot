@@ -22,15 +22,15 @@ function RsiGauge({ rsi }) {
   const ang = 180 - v * 1.8   // 180° = 0, 0° = 100
   const nx = cx + (r - 14) * Math.cos((ang * Math.PI) / 180)
   const ny = cy - (r - 14) * Math.sin((ang * Math.PI) / 180)
-  const color = v < 30 ? 'var(--green)' : v > 70 ? 'var(--red)' : 'var(--accent)'
+  const color = v < 30 ? 'var(--pos)' : v > 70 ? 'var(--neg)' : 'var(--accent)'
   const label = v < 30 ? '超賣' : v > 70 ? '超買' : v < 50 ? '偏弱' : '偏強'
   return (
     <div style={{ textAlign: 'center' }}>
       <svg viewBox="0 0 120 72" width={130} height={80}>
-        {arc(180, 0, 'var(--border)', 9)}
-        {arc(180, 126, 'var(--green)', 9)}      {/* 0–30 oversold */}
-        {arc(126, 54, 'var(--border)', 9)}{/* 30–70 neutral */}
-        {arc(54, 0, 'var(--red)', 9)}          {/* 70–100 overbought */}
+        {arc(180, 0, 'var(--line)', 9)}
+        {arc(180, 126, 'var(--pos)', 9)}      {/* 0–30 oversold */}
+        {arc(126, 54, 'var(--line)', 9)}{/* 30–70 neutral */}
+        {arc(54, 0, 'var(--neg)', 9)}          {/* 70–100 overbought */}
         <line x1={cx} y1={cy} x2={nx} y2={ny}
           stroke={color} strokeWidth={2.5} strokeLinecap="round" />
         <circle cx={cx} cy={cy} r={3} fill={color} />
@@ -38,8 +38,8 @@ function RsiGauge({ rsi }) {
           fill={color} fontFamily="var(--font-mono)">
           {v.toFixed(1)}
         </text>
-        <text x={10} y={70} fontSize={8} fill="var(--green)">超賣</text>
-        <text x={110} y={70} fontSize={8} fill="var(--red)" textAnchor="end">超買</text>
+        <text x={10} y={70} fontSize={8} fill="var(--pos)">超賣</text>
+        <text x={110} y={70} fontSize={8} fill="var(--neg)" textAnchor="end">超買</text>
       </svg>
       <div style={{ fontSize: 11, color, fontWeight: 600, marginTop: -4 }}>{label}</div>
       <div style={{ fontSize: 10, color: 'var(--muted)' }}>RSI (14)</div>
@@ -59,7 +59,7 @@ function FibBar({ fibPos, fib382, fib618, price }) {
 
   const inLongZone  = pos < 0.382
   const inShortZone = pos > 0.618
-  const dotColor    = inLongZone ? 'var(--green)' : inShortZone ? 'var(--red)' : 'var(--muted)'
+  const dotColor    = inLongZone ? 'var(--pos)' : inShortZone ? 'var(--neg)' : 'var(--muted)'
   const signal      = inLongZone ? '在多單進場區' : inShortZone ? '在空單進場區' : '中性區'
 
   return (
@@ -68,18 +68,18 @@ function FibBar({ fibPos, fib382, fib618, price }) {
         Fib 位置（0=低點 → 1=高點）
       </div>
       <div style={{ position: 'relative', height: 20, borderRadius: 'var(--radius)', overflow: 'hidden',
-        background: 'var(--border)' }}>
+        background: 'var(--line)' }}>
         {/* long entry zone */}
         <div style={{ position: 'absolute', left: 0, width: `${zone382}%`, height: '100%',
-          background: 'var(--green-soft)' }} />
+          background: 'var(--pos-soft)' }} />
         {/* short entry zone */}
         <div style={{ position: 'absolute', left: `${zone618}%`, right: 0, height: '100%',
-          background: 'var(--red-soft)' }} />
+          background: 'var(--neg-soft)' }} />
         {/* exit lines */}
         <div style={{ position: 'absolute', left: `${exit45}%`, top: 0, width: 1, height: '100%',
-          background: 'var(--border-strong)' }} />
+          background: 'var(--line-strong)' }} />
         <div style={{ position: 'absolute', left: `${exit55}%`, top: 0, width: 1, height: '100%',
-          background: 'var(--border-strong)' }} />
+          background: 'var(--line-strong)' }} />
         {/* current marker */}
         <div style={{ position: 'absolute', left: `${Math.min(pct, 99)}%`, top: 0,
           width: 3, height: '100%', background: dotColor,
@@ -87,9 +87,9 @@ function FibBar({ fibPos, fib382, fib618, price }) {
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10,
         color: 'var(--muted)', marginTop: 4 }}>
-        <span style={{ color: 'var(--green)' }}>做多區 &lt;0.382</span>
+        <span style={{ color: 'var(--pos)' }}>做多區 &lt;0.382</span>
         <span className="num">0.5</span>
-        <span style={{ color: 'var(--red)' }}>&gt;0.618 做空區</span>
+        <span style={{ color: 'var(--neg)' }}>&gt;0.618 做空區</span>
       </div>
       {fib382 && fib618 && (
         <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
@@ -133,10 +133,10 @@ function RegimerVote({ er, chop, adx, regime }) {
         {votes.map(v => {
           if (v.value == null) return null
           const isR = v.rangeWhen(Number(v.value))
-          const c = isR ? 'var(--accent)' : 'var(--red)'
+          const c = isR ? 'var(--accent)' : 'var(--neg)'
           return (
-            <div key={v.label} style={{ flex: 1, background: 'var(--panel2)',
-              border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+            <div key={v.label} style={{ flex: 1, background: 'var(--surface-2)',
+              border: '1px solid var(--line)', borderRadius: 'var(--radius)',
               padding: '8px', textAlign: 'center' }}>
               <div style={{ fontSize: 10, color: 'var(--muted)', letterSpacing: '0.5px' }}>{v.label}</div>
               <div className="num" style={{ fontSize: 15, fontWeight: 600, color: c }}>{v.value}</div>
@@ -152,7 +152,7 @@ function RegimerVote({ er, chop, adx, regime }) {
         </span>
       </div>
       {!isRange && (
-        <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 8 }}>
+        <div style={{ fontSize: 11, color: 'var(--neg)', marginTop: 8 }}>
           ⚠ 趨勢盤 — fib_retracement 進場被 Regime 擋住
         </div>
       )}
@@ -166,7 +166,7 @@ function EmaTrend({ price, emaTrend }) {
   const p = Number(price), e = Number(emaTrend)
   const above = p > e
   const pct = ((p - e) / e * 100).toFixed(2)
-  const color = above ? 'var(--green)' : 'var(--red)'
+  const color = above ? 'var(--pos)' : 'var(--neg)'
   const arrow = above ? '↑' : '↓'
   return (
     <div style={{ textAlign: 'center' }}>
@@ -204,11 +204,11 @@ function AtrPanel({ atr, price, sl, tp, entryPrice, inPos, direction }) {
           <div style={{ fontSize: 10, color: 'var(--muted)' }}>ATR (14)</div>
         </div>
         <div style={{ textAlign: 'center' }}>
-          <div className="num" style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-bright)' }}>{atrPct}%</div>
+          <div className="num" style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-strong)' }}>{atrPct}%</div>
           <div style={{ fontSize: 10, color: 'var(--muted)' }}>佔現價比</div>
         </div>
         <div style={{ textAlign: 'center' }}>
-          <div className="num" style={{ fontSize: 18, fontWeight: 600, color: 'var(--green)' }}>{rr.toFixed(1)}R</div>
+          <div className="num" style={{ fontSize: 18, fontWeight: 600, color: 'var(--pos)' }}>{rr.toFixed(1)}R</div>
           <div style={{ fontSize: 10, color: 'var(--muted)' }}>盈虧比</div>
         </div>
       </div>
@@ -218,13 +218,13 @@ function AtrPanel({ atr, price, sl, tp, entryPrice, inPos, direction }) {
             持倉停損 / 停利距離
           </div>
           <div style={{ position: 'relative', height: 12, borderRadius: 'var(--radius)', overflow: 'visible',
-            background: 'var(--border)', marginBottom: 4 }}>
+            background: 'var(--line)', marginBottom: 4 }}>
             {/* SL zone */}
             <div style={{
               position: 'absolute',
               left: direction === 1 ? 0 : `${(tpDist / (slDist + tpDist)) * 100}%`,
               width: `${(slDist / (slDist + tpDist)) * 100}%`,
-              height: '100%', background: 'var(--red-soft)',
+              height: '100%', background: 'var(--neg-soft)',
               borderRadius: direction === 1 ? 'var(--radius) 0 0 var(--radius)' : '0 var(--radius) var(--radius) 0',
             }} />
             {/* TP zone */}
@@ -232,19 +232,19 @@ function AtrPanel({ atr, price, sl, tp, entryPrice, inPos, direction }) {
               position: 'absolute',
               left: direction === 1 ? `${(slDist / (slDist + tpDist)) * 100}%` : 0,
               width: `${(tpDist / (slDist + tpDist)) * 100}%`,
-              height: '100%', background: 'var(--green-soft)',
+              height: '100%', background: 'var(--pos-soft)',
               borderRadius: direction === 1 ? '0 var(--radius) var(--radius) 0' : 'var(--radius) 0 0 var(--radius)',
             }} />
             {/* entry marker */}
             <div style={{ position: 'absolute',
               left: direction === 1 ? `${(slDist / (slDist + tpDist)) * 100}%` : `${(tpDist / (slDist + tpDist)) * 100}%`,
-              top: -2, width: 3, height: 16, background: 'var(--text-bright)',
+              top: -2, width: 3, height: 16, background: 'var(--text-strong)',
               transform: 'translateX(-50%)', borderRadius: 2 }} />
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10 }}>
-            <span style={{ color: 'var(--red)' }}>SL <span className="num">−{slDist.toFixed(1)}</span></span>
+            <span style={{ color: 'var(--neg)' }}>SL <span className="num">−{slDist.toFixed(1)}</span></span>
             <span style={{ color: 'var(--muted)' }}>進場</span>
-            <span style={{ color: 'var(--green)' }}>TP <span className="num">+{tpDist.toFixed(1)}</span></span>
+            <span style={{ color: 'var(--pos)' }}>TP <span className="num">+{tpDist.toFixed(1)}</span></span>
           </div>
         </>
       )}
@@ -291,8 +291,8 @@ function SignalSummary({ ind, target, direction }) {
           { label: `RSI ${rsi != null ? rsi.toFixed(1) : '?'} < 50（做空動能偏弱）`, pass: rsi != null && rsi < 50 },
         ].map(({ label, pass }) => (
           <div key={label} style={{ fontSize: 11, display: 'flex', alignItems: 'center', gap: 8,
-            color: pass ? 'var(--green)' : 'var(--muted)', marginBottom: 4 }}>
-            <span style={{ width: 12, textAlign: 'center', color: pass ? 'var(--green)' : 'var(--muted-dim)' }}>
+            color: pass ? 'var(--pos)' : 'var(--muted)', marginBottom: 4 }}>
+            <span style={{ width: 12, textAlign: 'center', color: pass ? 'var(--pos)' : 'var(--faint)' }}>
               {pass ? '✓' : '✗'}
             </span>
             {label}
@@ -304,7 +304,7 @@ function SignalSummary({ ind, target, direction }) {
 }
 
 function GaugePlaceholder({ label }) {
-  return <div style={{ color: 'var(--muted-dim)', fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'center', padding: 16 }}>// {label} 無資料</div>
+  return <div style={{ color: 'var(--faint)', fontFamily: 'var(--font-mono)', fontSize: 12, textAlign: 'center', padding: 16 }}>// {label} 無資料</div>
 }
 
 /* ── Supertrend：趨勢方向 + 趨勢線 + 距翻轉距離 ───────── */
@@ -314,7 +314,7 @@ function SupertrendCard({ stDir, supertrend, price, atr }) {
   const line = Number(supertrend), p = Number(price)
   const gap = p - line                                   // 多頭時為正（價在線上）
   const atrUnits = atr ? Math.abs(gap) / Number(atr) : null
-  const color = up ? 'var(--green)' : 'var(--red)'
+  const color = up ? 'var(--pos)' : 'var(--neg)'
   return (
     <div style={{ textAlign: 'center' }}>
       <div style={{ fontSize: 34, lineHeight: 1, color }}>{up ? '↑' : '↓'}</div>
@@ -347,14 +347,14 @@ function DonchianCard({ upper, lower, exitLong, exitShort, price, inPos, directi
         價格於通道位置（下軌 → 上軌）
       </div>
       <div style={{ position: 'relative', height: 20, borderRadius: 'var(--radius)',
-        background: 'var(--border)', overflow: 'hidden' }}>
+        background: 'var(--line)', overflow: 'hidden' }}>
         <div style={{ position: 'absolute', left: `${Math.min(pct, 99)}%`, top: 0,
           width: 3, height: '100%', background: 'var(--accent)', transform: 'translateX(-50%)' }} />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10,
         color: 'var(--muted)', marginTop: 4 }}>
-        <span style={{ color: 'var(--red)' }}>跌破 <span className="num">{l.toFixed(0)}</span> 做空</span>
-        <span style={{ color: 'var(--green)' }}>突破 <span className="num">{u.toFixed(0)}</span> 做多</span>
+        <span style={{ color: 'var(--neg)' }}>跌破 <span className="num">{l.toFixed(0)}</span> 做空</span>
+        <span style={{ color: 'var(--pos)' }}>突破 <span className="num">{u.toFixed(0)}</span> 做多</span>
       </div>
       <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
         現價 <span className="num">{p.toFixed(1)}</span>
@@ -372,7 +372,7 @@ function OrderFlowCard({ takerRatio }) {
   const r = Number(takerRatio)
   const pct = Math.min(Math.max(r, 0), 1) * 100
   const buy = r >= 0.5
-  const color = buy ? 'var(--green)' : 'var(--red)'
+  const color = buy ? 'var(--pos)' : 'var(--neg)'
   return (
     <div style={{ width: '100%' }}>
       <div style={{ textAlign: 'center', marginBottom: 8 }}>
@@ -382,11 +382,11 @@ function OrderFlowCard({ takerRatio }) {
         <div style={{ fontSize: 10, color: 'var(--muted)' }}>主動買盤佔比（平滑）</div>
       </div>
       <div style={{ position: 'relative', height: 14, borderRadius: 'var(--radius)',
-        background: 'var(--red-soft)', overflow: 'hidden' }}>
+        background: 'var(--neg-soft)', overflow: 'hidden' }}>
         <div style={{ position: 'absolute', left: 0, width: `${pct}%`, height: '100%',
-          background: 'var(--green-soft)' }} />
+          background: 'var(--pos-soft)' }} />
         <div style={{ position: 'absolute', left: '50%', top: 0, width: 1, height: '100%',
-          background: 'var(--border-strong)' }} />
+          background: 'var(--line-strong)' }} />
       </div>
       <div style={{ fontSize: 11, color, fontWeight: 600, textAlign: 'center', marginTop: 6 }}>
         {buy ? '買盤主導' : '賣盤主導'}
@@ -398,7 +398,7 @@ function OrderFlowCard({ takerRatio }) {
 /* ── 趨勢策略訊號總結（supertrend / donchian） ────────── */
 function TrendSignalSummary({ stDir, dcBreak, target, inPos, direction }) {
   const sig = target === 1 ? 'LONG' : target === -1 ? 'SHORT' : 'FLAT'
-  const sigColor = sig === 'LONG' ? 'var(--green)' : sig === 'SHORT' ? 'var(--red)' : 'var(--muted)'
+  const sigColor = sig === 'LONG' ? 'var(--pos)' : sig === 'SHORT' ? 'var(--neg)' : 'var(--muted)'
   const posLabel = inPos ? (direction === 1 ? '持多' : '持空') : '空手'
   return (
     <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -412,22 +412,22 @@ function TrendSignalSummary({ stDir, dcBreak, target, inPos, direction }) {
       <div style={{ flex: 1, fontSize: 12, color: 'var(--muted)', lineHeight: 1.9 }}>
         <div>目前部位：<b style={{ color: 'var(--text)' }}>{posLabel}</b></div>
         {stDir != null && <div>Supertrend 方向：{Number(stDir) > 0
-          ? <b style={{ color: 'var(--green)' }}>多</b> : <b style={{ color: 'var(--red)' }}>空</b>}</div>}
+          ? <b style={{ color: 'var(--pos)' }}>多</b> : <b style={{ color: 'var(--neg)' }}>空</b>}</div>}
         <div style={{ fontSize: 11 }}>趨勢策略順勢操作：跟隨方向翻轉進出，不逆勢接刀。</div>
       </div>
     </div>
   )
 }
 
-/* ── 區塊小標（HUD 風 mono uppercase + 短豎條） ──────── */
+/* ── 區塊小標（精緻 mono uppercase + 細 accent tick） ──────── */
 function SectionLabel({ children }) {
   return (
     <div style={{
       fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600,
-      color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.12em',
+      color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 'var(--track-label)',
       marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8,
     }}>
-      <span style={{ display: 'inline-block', width: 3, height: 12, background: 'var(--accent)' }} />
+      <span style={{ display: 'inline-block', width: 2, height: 12, background: 'var(--accent)', borderRadius: 1 }} />
       {children}
     </div>
   )

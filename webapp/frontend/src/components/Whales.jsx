@@ -4,6 +4,7 @@ import {
   ResponsiveContainer, CartesianGrid, ReferenceLine,
 } from 'recharts'
 import { api } from '../api'
+import Hint, { Plain } from './Hint'
 
 const PERIODS = ['1m', '5m', '15m', '30m', '1h', '4h']
 
@@ -52,8 +53,8 @@ function Signal({ label, value, threshold, reverse }) {
 const AXIS_TICK = { fontSize: 11, fill: 'var(--muted)' }
 const TOOLTIP_STYLE = {
   background: 'var(--tooltip-bg)',
-  border: '1px solid var(--border)',
-  borderRadius: 4,
+  border: '1px solid var(--tooltip-border)',
+  borderRadius: 'var(--radius-sm)',
   fontSize: 12,
 }
 
@@ -244,11 +245,16 @@ export default function Whales() {
         {err && <div className="err">⚠ {err}</div>}
       </div>
 
+      <Plain>
+        這頁看的是<b>「市場上其他人怎麼下注」</b>（幣安公開籌碼），不是我們 bot 的倉。
+        大戶/散戶偏多偏空、主動買賣力道、未平倉資金規模——當大戶與散戶分歧時常是觀察點。僅供參考、非買賣訊號。
+      </Plain>
+
       {/* ── snapshot cards ───────────────────────────────────── */}
       {s && (
         <div className="cards">
           <Metric
-            label="大戶做多帳戶"
+            label={<Hint text="幣安「持倉前段大戶」帳戶裡，做多的比例。>50% 代表大戶整體偏多。對照下面散戶看分歧。">大戶做多帳戶</Hint>}
             value={s.top_long_pct != null ? `${s.top_long_pct}%` : '—'}
             sub={`做空 ${s.top_short_pct ?? '—'}%`}
             tone={s.top_long_pct > 50 ? 'pos' : 'neg'}
@@ -256,21 +262,21 @@ export default function Whales() {
             side={s.top_long_pct > 50 ? 'long' : 'short'}
           />
           <Metric
-            label="全市場做多帳戶"
+            label={<Hint text="全市場所有帳戶（多為散戶）做多的比例。散戶極度偏多時，行情常反向（散戶常是反指標）。">全市場做多帳戶</Hint>}
             value={s.global_long_pct != null ? `${s.global_long_pct}%` : '—'}
             sub={`做空 ${s.global_short_pct ?? '—'}%`}
             tone={s.global_long_pct > 50 ? 'pos' : 'neg'}
             side={s.global_long_pct > 50 ? 'long' : 'short'}
           />
           <Metric
-            label="主動買入/賣出比"
+            label={<Hint text="主動成交裡「市價買 ÷ 市價賣」的量比。>1 代表主動買盤較兇（追多），<1 代表主動賣壓較重（殺多）。">主動買入/賣出比</Hint>}
             value={s.taker_ratio ?? '—'}
             sub={`買 ${s.taker_buy_vol ?? '—'} / 賣 ${s.taker_sell_vol ?? '—'} BTC`}
             tone={s.taker_ratio > 1 ? 'pos' : 'neg'}
             side={s.taker_ratio > 1 ? 'long' : 'short'}
           />
           <Metric
-            label="未平倉合約"
+            label={<Hint text="未平倉合約（OI）：市場上還沒平掉的合約總額，等於「在場資金規模」。上升=新錢進場（趨勢確認），下降=資金撤離（倉位平掉）。">未平倉合約</Hint>}
             value={fmtOI(s.oi_usdt)}
             sub={`${s.oi_btc ?? '—'} BTC`}
           />
@@ -322,8 +328,8 @@ export default function Whales() {
                 />
                 <ReferenceLine y={50} stroke="var(--muted)" strokeDasharray="4 4" />
                 <Legend formatter={v => v === 'long' ? '做多 %' : '做空 %'} />
-                <Line type="monotone" dataKey="long"  stroke="var(--green)" dot={false} strokeWidth={2} />
-                <Line type="monotone" dataKey="short" stroke="var(--red)"   dot={false} strokeWidth={2} />
+                <Line type="monotone" dataKey="long"  stroke="var(--pos)" dot={false} strokeWidth={2} />
+                <Line type="monotone" dataKey="short" stroke="var(--neg)" dot={false} strokeWidth={2} />
               </LineChart>
             ) : chart === 'oi' ? (
               <LineChart data={chartData} margin={{ top: 4, right: 12, bottom: 4, left: 0 }}>
