@@ -22,6 +22,7 @@ import socketserver
 import threading
 import time
 import traceback
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -32,10 +33,20 @@ from core.quant_researcher import build_strategy
 from core.risk_officer import RiskOfficer
 from core.futures_execution_engineer import FuturesExecutionEngineer
 from core.trade_journal import TradeJournal
-from core.bot_state import BotState
+from core.bot_state import BotState, detect_testnet_reset
 from core.circuit_breaker import CircuitBreaker
+from core.directional_guard import DirectionalChannelGuard
 
 STATE_PATH = "bot_state_futures.json"
+CLOSE_REQUEST_PATH = "close_request.flag"   # 手動平倉旗標：HTTP 緒寫、主迴圈讀（避免跨緒下單競態）
+_CLOSE_EVENT = threading.Event()            # HTTP 緒 set() → 主迴圈從 wait() 立即醒來執行平倉
+
+
+def _close_authorized(header_token: str | None, env_token: str | None) -> bool:
+    """手動平倉端點授權：未設 CLOSE_TOKEN（空）→ 停用；否則 header 須完全相符。"""
+    if not env_token:
+        return False
+    return header_token == env_token
 
 
 def parse_bot_params(raw: str | None) -> dict:
@@ -70,7 +81,18 @@ class FuturesLiveTrader:
         self.peak = self.trough = 0.0       # 進場後極值（Chandelier 追蹤停損用）
         self._scaled_out = False            # Scale-out：本輪持倉已部分獲利了結
         self._entry_sl_dist = 0.0          # 進場時的原始停損距離（scale-out 閾值用）
+        # 交易所掛單式硬停損（EXCHANGE_STOP_ENABLED；預設關，逐台 env 開）：
+        # bot 當機/熔斷/網路斷期間仍由交易所端 STOP_MARKET/TAKE_PROFIT_MARKET 守護倉位。
+        self._exchange_stop = os.getenv("EXCHANGE_STOP_ENABLED", "0").lower() in ("1", "true", "yes")
+        self._stop_oid = None               # 交易所停損單 orderId
+        self._tp_oid = None                 # 交易所停利單 orderId
+        self._stop_sl = None                # 已掛停損單對應的 sl 價（變動時才 cancel/replace）
         self.cb = CircuitBreaker(max_losses=cb_max_losses, pause_hours=cb_pause_hours)
+        # 方向感知通道護欄（fib_channel reversion 連虧防呆）；預設停用，需 env 開啟
+        self._dcg = DirectionalChannelGuard(
+            max_losses=int(os.getenv("DCG_MAX_LOSSES", "3")),
+            cooldown_bars=int(os.getenv("DCG_COOLDOWN_BARS", "8")),
+            enabled=os.getenv("DCG_ENABLED", "0").lower() in ("1", "true", "yes"))
         # PortfolioGuard：跨 bot 同向暴露控制；max_notional 由 env 設定（預設 15000 USDT）
         from core.portfolio_guard import PortfolioGuard
         self._guard = PortfolioGuard()
@@ -88,13 +110,37 @@ class FuturesLiveTrader:
 
     def _save(self) -> None:
         cb_dict = self.cb.to_dict()
-        BotState(in_position=self.dir != 0, direction=self.dir, entry_price=self.entry_price,
-                 sl=self.sl, tp=self.tp, qty=abs(self.qty),
-                 symbol=self.cfg.symbol, strategy=self.cfg.strategy,
-                 cb_consecutive_losses=cb_dict["consecutive_losses"],
-                 cb_paused_until=cb_dict["paused_until"] or "",
-                 scaled_out=self._scaled_out,
-                 entry_sl_dist=self._entry_sl_dist).save(STATE_PATH)
+        bs = BotState(in_position=self.dir != 0, direction=self.dir, entry_price=self.entry_price,
+                      sl=self.sl, tp=self.tp, qty=abs(self.qty),
+                      symbol=self.cfg.symbol, strategy=self.cfg.strategy,
+                      cb_consecutive_losses=cb_dict["consecutive_losses"],
+                      cb_paused_until=cb_dict["paused_until"] or "",
+                      dcg_state=json.dumps(self._dcg.to_dict()),
+                      scaled_out=self._scaled_out,
+                      entry_sl_dist=self._entry_sl_dist,
+                      stop_oid=str(self._stop_oid or ""),
+                      tp_oid=str(self._tp_oid or ""))
+        # Merge into existing file to preserve display fields (mode, interval, last_price, …)
+        # that _write_sop() manages — otherwise a save() between SOP calls strips "mode"
+        # and live_status() defaults to "paper", fetching from local DB → trades vanish.
+        existing: dict = {}
+        try:
+            if os.path.exists(STATE_PATH):
+                with open(STATE_PATH) as fh:
+                    raw = json.load(fh)
+                    if isinstance(raw, dict):
+                        existing = raw
+        except Exception:
+            pass
+        existing.update(asdict(bs))
+        existing["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        tmp = STATE_PATH + ".tmp"
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(existing, fh, default=str)
+            os.replace(tmp, STATE_PATH)
+        except Exception:
+            pass
 
     def _latest_atr(self):
         """抓最近已收盤那根的 ATR（供 restore 重建停損用）；失敗則回 None 退回固定百分比。"""
@@ -132,9 +178,13 @@ class FuturesLiveTrader:
             # 還原 scale-out 狀態，避免重啟後再次觸發已做過的 scale-out
             self._scaled_out = st.scaled_out
             self._entry_sl_dist = st.entry_sl_dist
+            self._stop_oid = st.stop_oid or None
+            self._tp_oid = st.tp_oid or None
+            self._stop_sl = self.sl if self._stop_oid else None
         else:
             self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
             self.peak = self.trough = 0.0
+            self._stop_oid = self._tp_oid = self._stop_sl = None
             msg = "空手啟動（合約無未平倉部位）"
         # 從狀態檔還原 Circuit Breaker
         st = BotState.load(STATE_PATH)
@@ -142,16 +192,189 @@ class FuturesLiveTrader:
             {"consecutive_losses": st.cb_consecutive_losses,
              "paused_until": st.cb_paused_until or None},
             max_losses=self.cb.max_losses, pause_hours=self.cb.pause_hours)
+        # 從狀態檔還原方向感知通道護欄（保留封鎖/冷卻狀態，重啟不放水）
+        try:
+            dcg_data = json.loads(st.dcg_state) if st.dcg_state else {}
+        except (json.JSONDecodeError, TypeError):
+            dcg_data = {}
+        self._dcg = DirectionalChannelGuard.from_dict(
+            dcg_data, max_losses=self._dcg.max_losses,
+            cooldown_bars=self._dcg.cooldown_bars, enabled=self._dcg.enabled)
+        # 交易所掛單式硬停損：還原持倉且啟用 → 撤殘單、依還原 SL/TP 重掛，確保重啟後仍有交易所端保護
+        if self._exchange_stop and self.dir != 0:
+            try:
+                self.execu.cancel_all_stops()
+            except Exception as e:                  # noqa: BLE001
+                print(f"[掛單] 重啟撤殘單失敗：{e}")
+            self._stop_oid = self._tp_oid = self._stop_sl = None
+            self._place_protective("restore")
         self._save()
         print(f"[狀態] {msg}")
 
+    def _classify_exit(self, price) -> str:
+        """細分 SL/TP 觸發的結單原因（只分類標籤，不改變平倉行為）：
+          exit_tp        觸及固定停利目標
+          exit_trail     停損已移到成本之上（吊燈鎖利）→ 移動停利出場（獲利）
+          exit_breakeven 停損在成本附近 → 保本出場（約略打平，多為 scale-out 後）
+          exit_sl        跌破成本 → 真停損（虧損）
+        """
+        d = self.dir
+        if (d == 1 and price >= self.tp) or (d == -1 and price <= self.tp):
+            return "exit_tp"
+        pnl_per = (price - self.entry_price) * d        # 帶號：>0 獲利 / <0 虧損
+        tol = abs(self.entry_price) * 0.0005            # 0.05% 內視為打平（保本）
+        if pnl_per > tol:
+            return "exit_trail"
+        if pnl_per >= -tol:
+            return "exit_breakeven"
+        return "exit_sl"
+
+    # ── 交易所掛單式硬停損：掛單 / 換單 / 撤單 / 對帳（皆受 _exchange_stop 旗標控制）──
+    def _rounded_sl(self):
+        """掛到交易所的 SL 價（對齊 tick）。比較用，避免 sub-tick 漂移造成每根無謂換單。"""
+        try:
+            return self.execu.round_price(self.sl)
+        except Exception:                           # noqa: BLE001 — execu 無 round_price 時退回原值
+            return self.sl
+
+    def _recover_oid(self, order_type):
+        """掛單回應遺漏 orderId（如 HTTP 2xx 空 body）時，從交易所掛單清單反查補回，防孤兒疊單。"""
+        try:
+            for o in self.execu.open_orders() or []:
+                if str(o.get("type")) == order_type:
+                    return o.get("orderId")
+        except Exception:                           # noqa: BLE001
+            pass
+        return None
+
+    def _place_protective(self, bar_time) -> None:
+        """進場後掛 STOP_MARKET@sl + TAKE_PROFIT_MARKET@tp（closePosition）。失敗不影響本地軟停損。"""
+        if not self._exchange_stop or self.dir == 0:
+            return
+        # 現價已穿越 SL/TP（掛了會被幣安 -2021 'would immediately trigger' 拒）→ 改直接市價平倉，不留裸倉
+        try:
+            cur = float(self.execu.mark_price())
+        except Exception:                           # noqa: BLE001 — 取價失敗退回原本 try/except 掛單
+            cur = None
+        if cur is not None:
+            crossed_sl = (self.dir == 1 and cur <= self.sl) or (self.dir == -1 and cur >= self.sl)
+            crossed_tp = (self.dir == 1 and cur >= self.tp) or (self.dir == -1 and cur <= self.tp)
+            if crossed_sl or crossed_tp:
+                reason = "exit_tp" if crossed_tp else self._classify_exit(cur)
+                print(f"[{bar_time}] [掛單] 現價 {cur:.2f} 已穿越 {'TP' if crossed_tp else 'SL'}，改市價平倉")
+                self._go_flat(cur, bar_time, reason)
+                return
+        try:
+            r = self.execu.place_stop(self.dir, self.sl)
+            self._stop_oid = r.get("orderId") if isinstance(r, dict) else None
+            if self._stop_oid is None:
+                self._stop_oid = self._recover_oid("STOP_MARKET")   # 空 body → 反查補回
+            self._stop_sl = self._rounded_sl()
+        except Exception as e:                      # noqa: BLE001 — 掛單失敗仍有軟停損後備
+            self._stop_oid = None
+            print(f"[掛單] 掛停損失敗（仍有軟停損後備）：{e}")
+        try:
+            r = self.execu.place_take_profit(self.dir, self.tp)
+            self._tp_oid = r.get("orderId") if isinstance(r, dict) else None
+            if self._tp_oid is None:
+                self._tp_oid = self._recover_oid("TAKE_PROFIT_MARKET")
+        except Exception as e:                      # noqa: BLE001
+            self._tp_oid = None
+            print(f"[掛單] 掛停利失敗：{e}")
+        if self._stop_oid or self._tp_oid:
+            print(f"[{bar_time}] 交易所掛單保護 STOP@{self.sl:.2f}(#{self._stop_oid}) / "
+                  f"TP@{self.tp:.2f}(#{self._tp_oid})")
+
+    def _cancel_protective(self) -> None:
+        """撤掉本地記錄的 STOP/TP 掛單（容忍已成交/不存在）。平倉收尾用。"""
+        if not self._exchange_stop:
+            return
+        for oid in (self._stop_oid, self._tp_oid):
+            if oid is not None:
+                try:
+                    self.execu.cancel_order(oid)
+                except Exception as e:              # noqa: BLE001 — 多半已觸發/不存在，忽略
+                    print(f"[掛單] 撤單 {oid} 失敗（多半已觸發）：{e}")
+        self._stop_oid = self._tp_oid = self._stop_sl = None
+
+    def _sync_protective_stop(self, bar_time) -> None:
+        """self.sl 變動後（吊燈/scale-out 移成本）→ cancel 舊 STOP、掛新 STOP；TP 不變不動。"""
+        if not self._exchange_stop or self.dir == 0:
+            return
+        if self._stop_sl is not None and self._rounded_sl() == self._stop_sl:
+            return                                  # 對齊 tick 後同價 → 不換單（避免 sub-tick churn）
+        if self._stop_oid is not None:
+            try:
+                self.execu.cancel_order(self._stop_oid)
+            except Exception as e:                  # noqa: BLE001
+                print(f"[掛單] 換停損撤舊單失敗：{e}")
+        try:
+            r = self.execu.place_stop(self.dir, self.sl)
+            self._stop_oid = r.get("orderId") if isinstance(r, dict) else None
+            if self._stop_oid is None:
+                self._stop_oid = self._recover_oid("STOP_MARKET")   # 空 body → 反查補回
+            self._stop_sl = self._rounded_sl()
+            print(f"[{bar_time}] 移動停損→交易所換單 STOP@{self.sl:.2f}(#{self._stop_oid})")
+        except Exception as e:                      # noqa: BLE001
+            self._stop_oid = None
+            print(f"[掛單] 換停損掛新單失敗：{e}")
+
+    def _reconcile_exit(self, price, bar_time) -> str:
+        """交易所掛單已平倉（本地以為持倉、實際 amt≈0）→ 補記平倉、清狀態，不重複下市價單。
+
+        判 fill：優先查交易所成交真相（哪張 oid FILLED + avgPrice），消除「用現價猜方向」在
+        wick/whipsaw 時把停損誤記成停利、PnL 正負號翻轉的問題；查不到才退回用現價保守判。
+        以 _classify_exit(fill) 細分（停利目標/移動停利/保本/真停損）。回傳結單原因字串。
+        """
+        d = self.dir
+        fill = reason = None
+        # ① 交易所真相：哪張條件單 FILLED，用其 avgPrice
+        for oid, kind in ((self._tp_oid, "tp"), (self._stop_oid, "stop")):
+            if oid is None:
+                continue
+            try:
+                o = self.execu.get_order(oid)
+            except Exception:                       # noqa: BLE001 — execu 無 get_order/查單失敗 → 跳過
+                o = None
+            if o and str(o.get("status")) == "FILLED":
+                ap = o.get("avgPrice") or o.get("price")
+                try:
+                    fill = float(ap) if ap not in (None, "", "0", 0) else None
+                except (TypeError, ValueError):
+                    fill = None
+                if fill is None:
+                    fill = self.tp if kind == "tp" else self.sl
+                reason = "exit_tp" if kind == "tp" else self._classify_exit(fill)
+                break
+        # ② fallback：查不到真相 → 用現價保守判（原邏輯）
+        if fill is None:
+            hit_tp = (d == 1 and price >= self.tp) or (d == -1 and price <= self.tp)
+            fill = self.tp if hit_tp else self.sl
+            reason = "exit_tp" if hit_tp else self._classify_exit(fill)
+        pnl = (fill - self.entry_price) * abs(self.qty) * d
+        self.journal.log(reason, fill, abs(self.qty), pnl, ts=bar_time)
+        self.cb.record_trade(pnl)
+        self._dcg.record_trade(d, pnl)
+        print(f"[{bar_time}] [對帳] 交易所掛單已平倉 {reason} @ {fill:.2f}（pnl {pnl:+.2f}）")
+        # 殘留掛單（closePosition 成交後幣安已自動撤另一張）→ 清本地記錄
+        self._stop_oid = self._tp_oid = self._stop_sl = None
+        self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
+        self.peak = self.trough = 0.0
+        self._scaled_out = False
+        self._entry_sl_dist = 0.0
+        self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)
+        self._save()
+        return reason
+
     def _go_flat(self, price, bar_time, reason) -> None:
+        self._cancel_protective()                   # 平倉前先撤殘留掛單，避免幽靈單
         amt = self.execu.position_amt()
         if abs(amt) > 0:
             self.execu.close(abs(amt), self.dir)
             pnl = (price - self.entry_price) * amt    # amt 帶號 → 多空 pnl 方向自動正確
             self.journal.log(reason, price, abs(amt), pnl, ts=bar_time)
             self.cb.record_trade(pnl)                 # Circuit Breaker 記錄本筆損益
+            self._dcg.record_trade(self.dir, pnl)     # 方向感知通道護欄記錄（self.dir 此時仍是平倉方向）
             print(f"[{bar_time}] {reason} @ {price:.2f}")
         self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
         self.peak = self.trough = 0.0
@@ -160,15 +383,40 @@ class FuturesLiveTrader:
         self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)
         self._save()
 
+    def manual_close(self, now=None, reason="exit_manual"):
+        """手動結算：使用者透過儀表板按鈕平掉當前持倉。
+
+        ⚠️ 由主輪詢迴圈在主執行緒呼叫（HTTP 緒只寫旗標），與 on_bar_close 同緒、無下單競態。
+        close-only 語意：只平倉、不暫停 bot，下一根若符合訊號可照常再進場。
+        熔斷暫停中也照平（使用者明確要結算，不受 is_paused 擋）。
+        """
+        if self.dir == 0:
+            return {"ok": False, "msg": "目前空手，無倉可平"}
+        if now is None:
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        try:
+            price = self.execu.mark_price()
+        except Exception:                       # noqa: BLE001 — 取價失敗退回進場價估算
+            price = self.entry_price or 0.0
+        closed_dir, qty = self.dir, abs(self.qty)
+        self._go_flat(price, now, reason)
+        print(f"[手動平倉] 已平 {'多' if closed_dir == 1 else '空'} {qty} @ {price:.2f}")
+        return {"ok": True, "closed_dir": closed_dir, "qty": qty,
+                "price": round(price, 2), "reason": reason}
+
     def _kelly_pct(self) -> float | None:
-        """從 DB 讀近 50 筆平倉紀錄，計算 half-Kelly 倉位比例。樣本不足時回傳 None。"""
+        """從 DB 讀近期平倉紀錄，計算 half-Kelly 倉位比例。樣本不足時回傳 None。
+
+        ⚠️ 平倉與否記在 `side` 欄（exit_*），不是 `mode` 欄（mode 永遠是 live_futures_testnet）。
+        早期誤用 mode="exit" 過濾 → 永遠 0 筆 → Kelly 形同停用；此處改以 side 前綴篩平倉。
+        過濾鍵用已解析的 self.cfg（CLI 可覆蓋 env），避免 env 與 cfg 分歧造成跨 bot 污染。
+        """
         try:
             from core.trade_journal import read_trades_db
             from core.risk_officer import kelly_fraction
-            strategy = os.getenv("BOT_STRATEGY")
-            symbol   = os.getenv("BOT_SYMBOL")   # 同策略不同標的（如 Bot3/Bot4 trend_pullback）須分開算 Kelly
-            rows = read_trades_db(limit=50, mode="exit", strategy=strategy, symbol=symbol)
-            pnl = [r["pnl"] for r in rows if r.get("pnl") is not None]
+            rows = read_trades_db(limit=200, strategy=self.cfg.strategy, symbol=self.cfg.symbol)
+            pnl = [r["pnl"] for r in rows
+                   if r.get("pnl") is not None and str(r.get("side", "")).startswith("exit")]
             return kelly_fraction(pnl, min_trades=20)
         except Exception:
             return None
@@ -213,16 +461,13 @@ class FuturesLiveTrader:
         self.journal.log(side, price, decision.quantity, 0.0, ts=bar_time)
         self._guard.upsert_position(self.cfg.strategy, self.cfg.symbol,
                                     direction, decision.quantity, price)
+        self._place_protective(bar_time)            # 進場後掛交易所硬停損/停利（旗標關時 no-op）
         self._save()
         verb = "進場做多" if direction == 1 else "進場做空"
         print(f"[{bar_time}] {verb} ~{decision.quantity} @ {price:.2f} "
               f"(SL {self.sl:.2f} / TP {self.tp:.2f})")
 
     def on_bar_close(self, bar_time) -> None:
-        if self.cb.is_paused():
-            print(f"[{bar_time}] [熔斷] 暫停中，跳過本輪決策")
-            return
-
         cfg = self.cfg
         df = self.strat.prepare(
             fetch_klines(self.client, cfg.symbol, cfg.interval, 200, futures=True)).dropna()
@@ -234,6 +479,23 @@ class FuturesLiveTrader:
         pos_before = self.dir
         anomaly = bool(detect_anomaly(df.iloc[:-1]))
         acts, risk_rec, target = [], None, None
+
+        # 交易所掛單對帳：啟用且本地以為持倉、但交易所實際已無倉（STOP/TP 觸發平倉）
+        # → 補記平倉、清狀態，不重複下市價單（防 bot 當機/熔斷期間的裸奔缺口）。
+        if self._exchange_stop and self.dir != 0:
+            dust = float(self.execu._filters["min_qty"])
+            if abs(self.execu.position_amt()) <= dust:
+                reason = self._reconcile_exit(price, bar_time)
+                acts.append({"act": reason, "price": round(price, 2), "reconciled": True})
+
+        # 方向感知通道護欄：每根 K 棒推進冷卻、依通道方向(fib_ch_dir)解封
+        ch_dir = row.get("fib_ch_dir") if hasattr(row, "get") else (
+            row["fib_ch_dir"] if "fib_ch_dir" in row.index else 0)
+        try:
+            ch_dir = 0 if ch_dir is None or pd.isna(ch_dir) else int(ch_dir)
+        except (TypeError, ValueError):
+            ch_dir = 0
+        self._dcg.on_bar(ch_dir)
 
         # 信號工程師：擷取本根指標供 SOP 面板顯示（含 regime 閘門判斷依據）
         ind = {}
@@ -249,11 +511,20 @@ class FuturesLiveTrader:
 
         # 風控官：方向性停損停利「永遠先執行」，不受暴量抑制
         if self.dir == 1 and (price <= self.sl or price >= self.tp):
-            self._go_flat(price, bar_time, "exit_sltp")
-            acts.append({"act": "exit_sltp", "price": round(price, 2)})
+            reason = self._classify_exit(price)
+            self._go_flat(price, bar_time, reason)
+            acts.append({"act": reason, "price": round(price, 2)})
         elif self.dir == -1 and (price >= self.sl or price <= self.tp):
-            self._go_flat(price, bar_time, "exit_sltp")
-            acts.append({"act": "exit_sltp", "price": round(price, 2)})
+            reason = self._classify_exit(price)
+            self._go_flat(price, bar_time, reason)
+            acts.append({"act": reason, "price": round(price, 2)})
+
+        # 熔斷暫停：上方「方向性停損停利 + 對帳」已先執行（持倉不裸奔），此後只擋新進場/加碼
+        if self.cb.is_paused():
+            print(f"[{bar_time}] [熔斷] 暫停中（停損停利已先檢查），跳過新進場/加碼")
+            acts.append({"act": "cb_paused"})
+            self._write_sop(price, bar_time, row, ind, pos_before, target, risk_rec, acts, anomaly)
+            return
 
         if anomaly:
             acts.append({"act": "skip_anomaly"})
@@ -264,6 +535,11 @@ class FuturesLiveTrader:
                 if self.dir != 0:
                     self._go_flat(price, bar_time, "exit_signal")
                     acts.append({"act": "exit_signal", "price": round(price, 2)})
+                if target in (1, -1) and self._dcg.blocks(target):
+                    side_txt = "做多" if target == 1 else "做空"
+                    print(f"[{bar_time}] [通道護欄] 連續{side_txt}虧損暫停中，跳過進場")
+                    acts.append({"act": "dcg_blocked", "dir": target})
+                    target = 0
                 if target in (1, -1):
                     self._last_risk = None
                     atr_val = float(row["atr"]) if "atr" in row.index and not pd.isna(row["atr"]) else None
@@ -299,7 +575,11 @@ class FuturesLiveTrader:
             if self.risk.check_scale_out(
                 self.entry_price, price, self._entry_sl_dist, self.dir, self._scaled_out
             ):
-                half_qty = self.qty / 2
+                # 用 floor 後的實際送出量記帳，避免 self.qty 與交易所殘量 sub-step 漂移
+                try:
+                    half_qty = float(self.execu.round_qty(self.qty / 2))
+                except Exception:                   # noqa: BLE001 — execu 無 round_qty 時退回原值
+                    half_qty = self.qty / 2
                 ok, _msg = self.execu.valid_order(half_qty, price)
                 if ok and half_qty > 0:
                     self.execu.close(half_qty, self.dir)
@@ -308,6 +588,9 @@ class FuturesLiveTrader:
                     self.qty -= half_qty
                     self.sl = self.entry_price      # 剩餘半倉停損移到成本（保本）
                     self._scaled_out = True
+                    # 同步共用 DB 暴露為減半後的真實倉量，避免他台 check_exposure 高估而誤擋進場
+                    self._guard.upsert_position(self.cfg.strategy, self.cfg.symbol,
+                                                self.dir, self.qty, self.entry_price)
                     self._save()
                     acts.append({"act": "scale_out", "price": round(price, 2),
                                  "qty": round(half_qty, 6)})
@@ -325,6 +608,9 @@ class FuturesLiveTrader:
             self.trough = min(self.trough, float(row["low"]))
             self.sl = self.risk.update_trailing_stop(self.sl, self.trough, atr_now, -1)
 
+        # self.sl 若被 scale-out/吊燈移動 → 同步交易所掛單式停損（cancel/replace；旗標關時 no-op）
+        self._sync_protective_stop(bar_time)
+
         self._write_sop(price, bar_time, row, ind, pos_before, target, risk_rec, acts, anomaly)
 
     def _write_sop(self, price, bar_time, row, ind, pos_before, target, risk_rec, acts, anomaly) -> None:
@@ -334,17 +620,20 @@ class FuturesLiveTrader:
         except Exception:
             equity = None
 
-        # 測試網重置偵測：餘額大幅下滑 → 清空持倉狀態
-        if equity is not None:
-            from core.bot_state import BotState, detect_testnet_reset
-            st = BotState.load(STATE_PATH)
-            if detect_testnet_reset(current=equity, last=st.last_balance):
-                print(f"[{bar_time}] ⚠️  測試網重置偵測：餘額 {equity:.2f} << {st.last_balance:.2f}，清空持倉狀態")
-                self.dir = 0
-                self.entry_price = self.sl = self.tp = self.qty = 0.0
-            # 更新 last_balance 並持久化
-            st.last_balance = equity
-            st.save(STATE_PATH)
+        # 讀回上次持久化（取 last_balance 比較；prev 也保住未在此函式更新的欄位語意）
+        prev = BotState.load(STATE_PATH)
+
+        # 測試網重置偵測：餘額大幅下滑 → 清空持倉狀態（含共用 DB 殘列，避免幽靈暴露）
+        if equity is not None and detect_testnet_reset(current=equity, last=prev.last_balance):
+            print(f"[{bar_time}] ⚠️  測試網重置偵測：餘額 {equity:.2f} << {prev.last_balance:.2f}，清空持倉狀態")
+            self.dir = 0
+            self.entry_price = self.sl = self.tp = self.qty = 0.0
+            self.peak = self.trough = 0.0
+            self._scaled_out = False
+            self._entry_sl_dist = 0.0
+            self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)   # 清共用 DB 殘列
+            self._cancel_protective()                                        # 撤殘留掛單（旗標關時 no-op）
+        last_balance = equity if equity is not None else prev.last_balance
 
         last_decision = {
             "ts": str(bar_time),
@@ -361,17 +650,24 @@ class FuturesLiveTrader:
             "pos_after": self.dir,
             "equity": equity,
         }
+        # 關鍵：以完整 BotState 為底寫檔（保住 cb/dcg/scaled_out/entry_sl_dist/stop_oid/tp_oid/last_balance），
+        # 再疊上前端顯示欄位。否則每根 K 棒覆寫會抹掉持久化欄位 → 重啟熔斷/護欄/scale-out 全歸零。
+        cb_dict = self.cb.to_dict()
+        bs = BotState(
+            in_position=self.dir != 0, direction=self.dir, entry_price=self.entry_price,
+            sl=self.sl, tp=self.tp, qty=abs(self.qty),
+            symbol=self.cfg.symbol, strategy=self.cfg.strategy,
+            cb_consecutive_losses=cb_dict["consecutive_losses"],
+            cb_paused_until=cb_dict["paused_until"] or "",
+            dcg_state=json.dumps(self._dcg.to_dict()),
+            last_balance=last_balance,
+            scaled_out=self._scaled_out, entry_sl_dist=self._entry_sl_dist,
+            stop_oid=str(self._stop_oid or ""), tp_oid=str(self._tp_oid or ""),
+        )
         state = {
-            "in_position": self.dir != 0,
-            "direction": self.dir,
-            "entry_price": self.entry_price,
-            "sl": self.sl,
-            "tp": self.tp,
-            "qty": abs(self.qty),
-            "cash": equity,         # USDT 保證金餘額（前端顯示用）
-            "base": abs(self.qty),  # 持幣量 BTC（前端未實現損益估算用）
-            "symbol": self.cfg.symbol,
-            "strategy": self.cfg.strategy,
+            **asdict(bs),
+            "cash": equity,            # USDT 保證金餘額（前端顯示用）
+            "base": abs(self.qty),     # 持幣量（前端未實現損益估算用）
             "interval": self.cfg.interval,
             "last_price": price,
             "poll": self.cfg.poll_seconds,
@@ -461,6 +757,33 @@ def _start_state_server() -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def _reply(self, code, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            # 手動平倉：寫旗標檔，由主輪詢迴圈在主執行緒實際平倉（HTTP 緒不直接下單）。
+            if self.path == "/close":
+                token = os.getenv("CLOSE_TOKEN", "")
+                if not _close_authorized(self.headers.get("X-Close-Token"), token):
+                    # 未設 CLOSE_TOKEN → 端點停用；token 不符 → 拒絕（bot 端點公開，必須擋）
+                    self._reply(403, {"ok": False, "msg": "未授權（CLOSE_TOKEN 未設或不符）"})
+                    return
+                try:
+                    with open(CLOSE_REQUEST_PATH, "w") as f:
+                        f.write(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                    _CLOSE_EVENT.set()   # 即時喚醒主迴圈，不等下一個 poll 週期
+                    self._reply(200, {"ok": True, "queued": True, "msg": "已排入平倉，下一輪執行"})
+                except OSError as e:
+                    self._reply(500, {"ok": False, "msg": f"寫入平倉旗標失敗：{e}"})
+                return
+            self.send_response(404)
+            self.end_headers()
+
         def log_message(self, *_):
             pass  # suppress per-request stdout noise
 
@@ -539,22 +862,33 @@ def main():
     last_bar = None
     while True:
         try:
+            # 手動平倉旗標（儀表板按鈕 → HTTP /close 寫入）：主執行緒平倉，無跨緒競態。
+            if os.path.exists(CLOSE_REQUEST_PATH):
+                try:
+                    os.remove(CLOSE_REQUEST_PATH)
+                except OSError:
+                    pass
+                print("[手動平倉] 收到結算請求", trader.manual_close())
+
             df = fetch_klines(client, cfg.symbol, cfg.interval, 3, futures=True)
             bar_time = df.index[-2]
             live_price = float(df["close"].iloc[-1])
             if bar_time == last_bar:
                 trader._heartbeat(live_price)   # 刷新 updated_at，前端綠燈不熄
-                time.sleep(cfg.poll_seconds)
+                _CLOSE_EVENT.wait(timeout=cfg.poll_seconds)
+                _CLOSE_EVENT.clear()
                 continue
             last_bar = bar_time
             trader.on_bar_close(bar_time)
-            time.sleep(cfg.poll_seconds)
+            _CLOSE_EVENT.wait(timeout=cfg.poll_seconds)
+            _CLOSE_EVENT.clear()
         except KeyboardInterrupt:
             print("\n[結束] 使用者中斷")
             break
         except Exception:
             print("[錯誤]", traceback.format_exc())
-            time.sleep(cfg.poll_seconds)
+            _CLOSE_EVENT.wait(timeout=cfg.poll_seconds)
+            _CLOSE_EVENT.clear()
 
 
 if __name__ == "__main__":
