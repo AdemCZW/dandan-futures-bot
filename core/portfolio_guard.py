@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import contextmanager
 from typing import Optional
 
 _DATABASE_URL = os.getenv("DATABASE_URL")
@@ -39,11 +40,30 @@ class PortfolioGuard:
 
     # ── 內部 ──────────────────────────────────────────────────────────────
 
+    @contextmanager
     def _conn(self):
+        """連線 context manager：離開時 commit 並【關閉】連線。
+
+        psycopg2 的 `with conn:` 只 commit/rollback、不關閉 TCP 連線；PortfolioGuard 是長壽物件
+        （每台 bot 一個、跑數天），原本每次呼叫新開連線又不關 → Railway Postgres 連線緩慢洩漏、
+        最終 too many connections 拖垮 TradeJournal 寫入與儀表板查詢。此處 finally 確保關閉。
+        """
         if self._url:
             import psycopg2
-            return psycopg2.connect(self._url)
-        return sqlite3.connect(self._db_path)
+            conn = psycopg2.connect(self._url)
+        else:
+            conn = sqlite3.connect(self._db_path)
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
 
     def _ph(self) -> str:
         return "%s" if self._url else "?"

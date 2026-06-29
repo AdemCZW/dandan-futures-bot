@@ -76,6 +76,46 @@ class FuturesExecutionEngineer:
         side = "SELL" if current_dir == 1 else "BUY"
         return self.client.futures_create_order(**self.order_params(side, qty, reduce_only=True))
 
+    # ── 交易所掛單式停損/停利（硬停損：bot 當機/熔斷期間仍由交易所守護）──
+    def stop_order_params(self, current_dir: int, trigger_price: float,
+                          order_type: str = "STOP_MARKET") -> dict:
+        """建立 STOP_MARKET / TAKE_PROFIT_MARKET 條件單參數（純函式，方便測試）。
+
+        side 永遠是「平倉側」（多單→SELL、空單→BUY）；觸發方向由 order_type 決定：
+          - STOP_MARKET：價格不利穿越 stopPrice 觸發（多單跌破、空單突破）→ 停損
+          - TAKE_PROFIT_MARKET：價格有利穿越 stopPrice 觸發（多單突破、空單跌破）→ 停利
+        closePosition='true'：整倉市價平、倉位歸零後幣安自動撤銷此單（免管 qty 精度、scale-out 後也對）。
+        workingType='CONTRACT_PRICE'：以最新成交價判定，對齊本地軟停損（用 close 比價）。
+        """
+        side = "SELL" if current_dir == 1 else "BUY"
+        return {
+            "symbol": self.symbol, "side": side, "type": order_type,
+            "stopPrice": self.round_price(trigger_price),
+            "closePosition": "true", "workingType": "CONTRACT_PRICE",
+        }
+
+    def place_stop(self, current_dir: int, stop_price: float):
+        """掛保護性停損單（STOP_MARKET, closePosition）。回傳含 orderId 的下單回應。"""
+        return self.client.futures_create_order(
+            **self.stop_order_params(current_dir, stop_price, "STOP_MARKET"))
+
+    def place_take_profit(self, current_dir: int, tp_price: float):
+        """掛停利單（TAKE_PROFIT_MARKET, closePosition）。回傳含 orderId 的下單回應。"""
+        return self.client.futures_create_order(
+            **self.stop_order_params(current_dir, tp_price, "TAKE_PROFIT_MARKET"))
+
+    def cancel_order(self, order_id):
+        """撤單（薄包裝）。已成交/不存在的單會由 client 丟錯，由呼叫端決定是否容忍。"""
+        return self.client.futures_cancel_order(symbol=self.symbol, orderId=order_id)
+
+    def cancel_all_stops(self):
+        """撤掉本 symbol 所有掛單（平倉收尾用，清乾淨殘留條件單）。"""
+        return self.client.futures_cancel_all_open_orders(symbol=self.symbol)
+
+    def open_orders(self) -> list:
+        """本 symbol 目前掛單清單（重啟對帳用）。"""
+        return self.client.futures_get_open_orders(symbol=self.symbol)
+
     def position_amt(self) -> float:
         """帶號持倉量：+多 / -空 / 0。"""
         info = self.client.futures_position_information(symbol=self.symbol)

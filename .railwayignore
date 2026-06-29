@@ -27,3 +27,4 @@ docs/
 .github/
 .git/
 .DS_Store
+close_request.flag

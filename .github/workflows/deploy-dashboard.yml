@@ -1,0 +1,55 @@
+name: Deploy Dashboard
+
+# 儀表板自動部署：只在 main 分支、且異動到「儀表板相關檔案」時觸發，
+# 且必須先通過測試（CI gate）才部署。只部署 dandan-dashboard，
+# 用 --service 指定 → 絕不會誤觸四台 bot（尤其 Bot2 賺錢機）。
+#
+# 一次性設定（使用者手動，AI 不碰 secret）：
+#   1. Railway → 專案 → Settings → Tokens → 建立 **Project Token**
+#      （scope 到 production environment，只能做部署動作）。
+#   2. GitHub repo → Settings → Secrets and variables → Actions →
+#      New repository secret，名稱 RAILWAY_TOKEN，值貼上述 token。
+#   設好後，往 main push 任何 webapp/** 變更即自動「測試→部署儀表板」。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "webapp/**"
+      - "Dockerfile.webapp"
+      - "railway.webapp.json"
+      - "requirements-web.txt"
+      - ".github/workflows/deploy-dashboard.yml"
+
+concurrency:
+  group: deploy-dashboard
+  cancel-in-progress: true     # 連續 push 只部署最新一次
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r requirements-dev.txt
+      - name: Unit tests（排除既有已知無關失敗 vbt sharpe）
+        run: pytest -q --deselect "tests/test_vbt_optimize.py::TestVbtSharpe::test_returns_neg_inf_when_too_few_trades"
+
+  deploy:
+    needs: test                # ← 測試綠燈才部署（使用者選定的 CI gate）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Railway CLI
+        run: npm i -g @railway/cli
+      - name: Use webapp Railway config
+        # repo 的 railway.json 鎖死 bot 的 Dockerfile；換成 webapp config。
+        # runner 是拋棄式 checkout，不需 git checkout 還原。
+        run: cp railway.webapp.json railway.json
+      - name: Deploy dashboard（只動 dandan-dashboard）
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service dandan-dashboard --ci

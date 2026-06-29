@@ -75,14 +75,20 @@ class RiskOfficer:
         """固定比例風險法：本筆最多虧 risk_per_trade，反推可下數量。
 
         同時受 max_position_pct（單倉佔比上限）限制。
-        kelly_pct 有值時以 Kelly 比例取代 cfg.max_position_pct 作為上限。
+        kelly_pct 有值時取「Kelly 與 max_position_pct 的較小者」作為上限——Kelly 只會「收緊」、
+        永遠不超過 --budget 換算的 max_position_pct（避免 Kelly 比例脫鉤膨脹到數倍餘額）。
         """
         risk_amount = equity * self.cfg.risk_per_trade
         per_unit_loss = max(abs(price - stop_price), 1e-9)
         qty_by_risk = risk_amount / per_unit_loss
 
         leverage = max(getattr(self.cfg, "futures_leverage", 1), 1)
-        pct = kelly_pct if kelly_pct is not None else self.cfg.max_position_pct
+        # Kelly 只在「有正訊號且比 budget 小」時縮倉；Kelly≤0（負期望/無訊號）退回 budget 上限，
+        # 不把倉位歸零（避免一啟用 Kelly 就讓負期望的 bot 完全停止交易）。
+        if kelly_pct is not None and kelly_pct > 0:
+            pct = min(kelly_pct, self.cfg.max_position_pct)
+        else:
+            pct = self.cfg.max_position_pct
         max_notional = equity * pct * leverage
         qty_by_cap = max_notional / price
 

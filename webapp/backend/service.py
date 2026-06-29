@@ -290,6 +290,30 @@ _RAILWAY_BOT_URL = os.getenv("RAILWAY_BOT_URL", "").rstrip("/")
 _RAILWAY_BOT_URL_2 = os.getenv("RAILWAY_BOT_URL_2", "").rstrip("/")
 _RAILWAY_BOT_URL_3 = os.getenv("RAILWAY_BOT_URL_3", "").rstrip("/")
 _RAILWAY_BOT_URL_4 = os.getenv("RAILWAY_BOT_URL_4", "").rstrip("/")
+_CLOSE_TOKEN = os.getenv("CLOSE_TOKEN", "")   # 手動平倉共用密鑰；空=停用平倉代理
+
+
+def close_position(base_url: str | None, token: str, *, opener=None) -> dict:
+    """代理手動平倉：POST {base_url}/close，帶 X-Close-Token 密鑰。
+
+    回傳 bot 的 JSON（{ok, queued, ...}）或錯誤 dict。opener 可注入以利測試。
+    base_url 空（本機模式無遠端 bot）或 token 空（未設 CLOSE_TOKEN）→ 直接回錯誤、不發請求。
+    """
+    import json, urllib.request
+    if not base_url:
+        return {"ok": False, "msg": "此 bot 無遠端 URL（本機模式不支援遠端平倉）"}
+    if not token:
+        return {"ok": False, "msg": "儀表板未設 CLOSE_TOKEN，平倉功能停用"}
+    opener = opener or urllib.request.urlopen
+    req = urllib.request.Request(
+        f"{base_url}/close", data=b"", method="POST",
+        headers={"X-Close-Token": token, "Content-Type": "application/json"})
+    try:
+        with opener(req, timeout=10) as r:
+            data = json.loads(r.read())
+        return data if isinstance(data, dict) else {"ok": False, "msg": "bot 回應格式異常"}
+    except Exception as e:                       # noqa: BLE001 — 連線/逾時/解析失敗統一回錯
+        return {"ok": False, "msg": f"平倉請求失敗：{e}"}
 
 
 def _fetch_railway_trades(limit: int = 50, mode: str | None = None,
@@ -309,6 +333,81 @@ def _fetch_railway_trades(limit: int = 50, mode: str | None = None,
         return data if isinstance(data, list) else []
     except Exception:
         return []
+
+
+def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
+    """全量成交列 → 進階統計：最大回撤%、每筆夏普、多/空拆分勝率損益。
+
+    輸入順序與 read_trades 一致（newest-first / id DESC）；內部反轉成時間正序後，
+    用 entry/entry_short 狀態機把每筆平倉事件（exit_* 或 scale_out，pnl!=0）歸到當下開倉方向。
+
+      - max_drawdown_pct：以 init_capital 為基底、逐筆已實現權益曲線的最大峰谷回撤 %（正數，越大越糟）。
+      - sharpe：每筆 ROI=pnl/(price*qty) 的 mean/std（樣本標準差），不足兩筆或 std=0 → None。未年化。
+      - long_/short_ trades/wins/pnl：配對推方向；entry 在視窗外的孤兒平倉不計入多空，但仍進回撤曲線。
+    """
+    chrono = list(reversed(all_hist))   # newest-first → 時間正序
+
+    cur_dir = 0                          # +1 多 / -1 空 / 0 空手
+    events: list[tuple[int, float, float | None]] = []   # (dir, pnl, notional)
+    for t in chrono:
+        side = str(t.get("side", ""))
+        pnl = t.get("pnl")
+        if side == "entry":
+            cur_dir = 1
+        elif side == "entry_short":
+            cur_dir = -1
+        elif side == "scale_out" or side.startswith("exit"):
+            if pnl is not None and pnl != 0:
+                try:
+                    notional = float(t.get("price") or 0) * float(t.get("qty") or 0)
+                except (TypeError, ValueError):
+                    notional = 0.0
+                events.append((cur_dir, float(pnl), notional or None))
+            if side.startswith("exit"):
+                cur_dir = 0              # 平倉後回空手（scale_out 維持開倉方向）
+
+    def _fin(x):
+        try:
+            return float(x) if x is not None and math.isfinite(float(x)) else None
+        except (TypeError, ValueError):
+            return None
+
+    long_pnls  = [pnl for d, pnl, _ in events if d == 1]
+    short_pnls = [pnl for d, pnl, _ in events if d == -1]
+
+    # 最大回撤：逐筆已實現權益曲線（含孤兒事件）
+    max_dd_pct = None
+    if events:
+        running = peak = init_capital
+        worst = 0.0
+        for _, pnl, _ in events:
+            running += pnl
+            if running > peak:
+                peak = running
+            if peak > 0:
+                worst = max(worst, (peak - running) / peak)
+        max_dd_pct = round(worst * 100, 2)
+
+    # 每筆夏普：ROI 序列的 mean/std（樣本，ddof=1）
+    sharpe = None
+    rois = [pnl / notional for _, pnl, notional in events if notional]
+    if len(rois) >= 2:
+        mean = sum(rois) / len(rois)
+        var = sum((r - mean) ** 2 for r in rois) / (len(rois) - 1)
+        std = math.sqrt(var)
+        if std > 0:
+            sharpe = round(mean / std, 3)
+
+    return {
+        "max_drawdown_pct": _fin(max_dd_pct),
+        "sharpe": _fin(sharpe),
+        "long_trades": len(long_pnls),
+        "long_wins": sum(1 for p in long_pnls if p > 0),
+        "long_pnl": round(sum(long_pnls), 2),
+        "short_trades": len(short_pnls),
+        "short_wins": sum(1 for p in short_pnls if p > 0),
+        "short_pnl": round(sum(short_pnls), 2),
+    }
 
 
 def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
@@ -436,6 +535,7 @@ def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
     realized_pnl = round(sum(t["pnl"] for t in closed), 2)
     total_trades  = len(closed)
     win_trades    = sum(1 for t in closed if t["pnl"] > 0)
+    stats = trade_stats(all_hist)          # 最大回撤% / 每筆夏普 / 多空拆分
 
     return {
         "active": bool(st),
@@ -450,6 +550,12 @@ def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
         "realized_pnl": realized_pnl,
         "total_trades": total_trades,
         "win_trades": win_trades,
+        "max_drawdown_pct": stats["max_drawdown_pct"],
+        "sharpe": stats["sharpe"],
+        "long_trades": stats["long_trades"], "long_wins": stats["long_wins"],
+        "long_pnl": stats["long_pnl"],
+        "short_trades": stats["short_trades"], "short_wins": stats["short_wins"],
+        "short_pnl": stats["short_pnl"],
         "updated_at": updated, "age_seconds": age, "poll": st.get("poll"),
         "last_decision": st.get("last_decision"),
         "recent_trades": recent,

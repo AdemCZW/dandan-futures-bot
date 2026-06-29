@@ -137,6 +137,40 @@ def live4():
     return out
 
 
+_BOT_URLS = {
+    1: lambda: service._RAILWAY_BOT_URL,
+    2: lambda: service._RAILWAY_BOT_URL_2,
+    3: lambda: service._RAILWAY_BOT_URL_3,
+    4: lambda: service._RAILWAY_BOT_URL_4,
+}
+
+
+def _close_bot(n: int) -> dict:
+    """代理第 n 台 bot 的手動平倉（持 CLOSE_TOKEN 轉發到 bot /close）。"""
+    base = _BOT_URLS[n]()
+    return service.close_position(base, service._CLOSE_TOKEN)
+
+
+@app.post("/api/live/close")
+def live_close():
+    return _close_bot(1)
+
+
+@app.post("/api/live2/close")
+def live2_close():
+    return _close_bot(2)
+
+
+@app.post("/api/live3/close")
+def live3_close():
+    return _close_bot(3)
+
+
+@app.post("/api/live4/close")
+def live4_close():
+    return _close_bot(4)
+
+
 @app.get("/api/hl-leaderboard")
 def hl_leaderboard(top_n: int = 30):
     try:
