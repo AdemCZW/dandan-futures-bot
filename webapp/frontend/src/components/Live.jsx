@@ -174,6 +174,22 @@ function BotCard({ data, num, color }) {
     return () => clearInterval(t)
   }, [])
 
+  // ── Binance mark price WS：即時現價 → 即時浮盈浮虧 ─────────────────────────
+  // 訂閱 @markPrice@1s（~1 秒一次）；fallback 到 REST data.price。
+  const [livePrice, setLivePrice] = useState(null)
+  useEffect(() => {
+    if (!data?.symbol) return
+    const ws = new WebSocket(`wss://fapi.binance.com/ws/${data.symbol.toLowerCase()}@markPrice@1s`)
+    ws.onmessage = (e) => {
+      try {
+        const p = parseFloat(JSON.parse(e.data).p)
+        if (p > 0) setLivePrice(p)
+      } catch {}
+    }
+    ws.onclose = ws.onerror = () => {}
+    return () => ws.close()
+  }, [data?.symbol])
+
   async function handleClose() {
     const sym = String(data?.symbol || '').replace('USDT', '')
     if (!window.confirm(
@@ -200,16 +216,25 @@ function BotCard({ data, num, color }) {
 
   const fresh    = data.age_seconds != null && data.age_seconds < (data.poll ? data.poll * 3 : 180)
   const realized = data.realized_pnl ?? 0
-  const unreal   = data.unrealized_pnl ?? 0
+  const dir      = data.direction ?? 0
+  const posBase  = data.base ?? 0
+
+  // 即時現價：WS mark price 優先，REST 兜底
+  const price = livePrice ?? data.price ?? null
+
+  // 即時浮盈浮虧：有持倉 + 有即時現價 + 有進場價 → 前端即時計算；否則用 REST 快照
+  const unrealLive = data.in_position && price && data.entry_price && posBase && dir !== 0
+    ? (price - data.entry_price) * posBase * dir
+    : null
+  const unreal   = unrealLive ?? (data.unrealized_pnl ?? 0)
+
   const netVal   = INIT_CAPITAL + realized + unreal
   const netPct   = (realized + unreal) / INIT_CAPITAL * 100
   const winPct   = data.total_trades > 0
     ? Math.round((data.win_trades / data.total_trades) * 100)
     : null
 
-  const dir     = data.direction ?? 0
-  const posBase = data.base ?? 0
-  const posVal  = data.in_position && data.price ? Math.round(posBase * data.price) : 0
+  const posVal  = data.in_position && price ? Math.round(posBase * price) : 0
 
   const pairs  = pairTrades(data.recent_trades)
   const bals   = calcBalances(pairs, INIT_CAPITAL)
@@ -219,10 +244,10 @@ function BotCard({ data, num, color }) {
   const openRow   = pairs.find(p => p.open)
   const scaledOut = openRow && openRow.orig_qty != null && openRow.qty < openRow.orig_qty - 1e-6
   const holdStr   = openRow ? holdDuration(openRow.entry_ts, nowUtcStr()) : '—'
-  const distSL    = data.in_position && data.sl && data.price
-    ? Math.abs(data.price - data.sl) / data.price * 100 : null
-  const distTP    = data.in_position && data.tp && data.price
-    ? Math.abs(data.tp - data.price) / data.price * 100 : null
+  const distSL    = data.in_position && data.sl && price
+    ? Math.abs(price - data.sl) / price * 100 : null
+  const distTP    = data.in_position && data.tp && price
+    ? Math.abs(data.tp - price) / price * 100 : null
   const posRoi    = roiPct(unreal, posVal)
 
   return (
@@ -380,8 +405,8 @@ function BotCard({ data, num, color }) {
             <span>
               倉位 <span className="num" style={{ color }}>${posVal.toLocaleString()}</span>
             </span>
-            {data.price != null && (
-              <span>現價 <span className="num">${fmt(data.price)}</span></span>
+            {price != null && (
+              <span>現價 <span className="num">${fmt(price)}</span></span>
             )}
             <span className={`${unreal >= 0 ? 'pos' : 'neg'}`} style={{ marginLeft: 'auto', fontWeight: 600 }}>
               {fmtSign(unreal)} {posRoi != null && `(${fmtPct(posRoi)})`}
@@ -389,7 +414,7 @@ function BotCard({ data, num, color }) {
           </div>
 
           {/* SL←現價→TP 即時情況條 */}
-          <PositionBar entry={data.entry_price} sl={data.sl} tp={data.tp} price={data.price} dir={dir} />
+          <PositionBar entry={data.entry_price} sl={data.sl} tp={data.tp} price={price} dir={dir} />
           <div style={{ display: 'flex', gap: 14, fontSize: 11 }}>
             <span className="neg">距 SL {distSL != null ? distSL.toFixed(2) + '%' : '—'}</span>
             <span className="pos">距 TP {distTP != null ? distTP.toFixed(2) + '%' : '—'}</span>
@@ -418,8 +443,8 @@ function BotCard({ data, num, color }) {
       ) : (
         <div style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
           <span className="badge badge-flat">空手</span>
-          {data.price != null && (
-            <span className="muted">現價 ${fmt(data.price)}</span>
+          {price != null && (
+            <span className="muted">現價 ${fmt(price)}</span>
           )}
         </div>
       )}
