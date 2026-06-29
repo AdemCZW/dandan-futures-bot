@@ -562,24 +562,27 @@ export default function Live() {
     .filter(Boolean).map(b => b.symbol).filter(Boolean)
     .sort().join(',')
 
+  // 每 1 秒輪詢 Binance Futures REST 取現價（每個 symbol 獨立 request，可靠無編碼問題）
   useEffect(() => {
     if (!symbolKey) return
-    const symbols  = symbolKey.split(',')
-    const sockets  = {}
-    for (const sym of symbols) {
-      const ws = new WebSocket(
-        `wss://fstream.binance.com/ws/${sym.toLowerCase()}@aggTrade`
-      )
-      ws.onmessage = ev => {
+    const symbols = symbolKey.split(',')
+
+    async function fetchPrices() {
+      const update = {}
+      await Promise.all(symbols.map(async sym => {
         try {
-          const p = parseFloat(JSON.parse(ev.data).p)
-          if (p > 0) setLivePrices(prev => ({ ...prev, [sym]: p }))
+          const res  = await fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`)
+          const data = await res.json()
+          const p    = parseFloat(data.price)
+          if (p > 0) update[sym] = p
         } catch {}
-      }
-      ws.onerror = ws.onclose = () => {}
-      sockets[sym] = ws
+      }))
+      if (Object.keys(update).length) setLivePrices(prev => ({ ...prev, ...update }))
     }
-    return () => Object.values(sockets).forEach(ws => ws.close())
+
+    fetchPrices()
+    const t = setInterval(fetchPrices, 1000)
+    return () => clearInterval(t)
   }, [symbolKey])
 
   const anyFresh = [d, e2, e3, e4].some(x => x?.age_seconds != null && x.age_seconds < 180)
