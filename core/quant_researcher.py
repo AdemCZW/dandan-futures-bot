@@ -755,7 +755,8 @@ class FibChannelStrategy(Strategy):
     defaults = {"pivot_left": 5, "pivot_right": 3,
                 "entry_zone": 0.30, "exit_zone": 0.80, "break_buffer": 0.10,
                 "regime_confirm_bars": 1, "min_channel_width_atr": 0.0,
-                "volume_spike_ratio": 0.0,
+                "volume_spike_ratio": 0.0, "momentum_window": 3,
+                "momentum_max_pct": 0.0,
                 "mode": "trend"}
     allow_short = True
     regime_pref = "trend"
@@ -774,6 +775,9 @@ class FibChannelStrategy(Strategy):
         # vol_ratio = 當根成交量 / 10根均量，供進場時暴量過濾使用
         vol_avg = out["volume"].rolling(10, min_periods=1).mean()
         out["vol_ratio"] = out["volume"] / vol_avg.replace(0, float("nan"))
+        # mom_pct = 過去 N 根 K 棒的絕對漲跌幅 (%)，供動能閘門使用
+        win = max(1, int(self.params.get("momentum_window", 3)))
+        out["mom_pct"] = out["close"].pct_change(win).abs() * 100
         return self._prepare_regime(out)
 
     def signal(self, row, position: int) -> int:
@@ -813,6 +817,14 @@ class FibChannelStrategy(Strategy):
         if spike_ratio > 0:
             vol_r = _num(g("vol_ratio"))
             if vol_r is not None and not pd.isna(vol_r) and vol_r > spike_ratio:
+                return 0
+
+        # 短期動能閘門：過去 N 根 K 棒合計漲跌 > 門檻 (%) 時跳過進場
+        # 用途：急漲/急跌行情阻止均值回歸策略逆勢接刀
+        mom_max = float(self.params.get("momentum_max_pct", 0.0))
+        if mom_max > 0:
+            mom = _num(g("mom_pct"))
+            if mom is not None and not pd.isna(mom) and mom > mom_max:
                 return 0
 
         min_w_atr = float(self.params.get("min_channel_width_atr", 0.0))

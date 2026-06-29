@@ -487,3 +487,80 @@ class TestVolumeSpike:
                                volume_spike_ratio=2.0)
         row = _vol_row(pos=0.85, vol_ratio=2.0)
         assert strat.signal(row, 0) == -1
+
+
+# ── 短期動能閘門（momentum_max_pct，新增）────────────────────────────────────────
+
+def _mom_row(pos=0.85, ch_dir=1, mom_pct=0.2, vol_ratio=1.0, regime="range"):
+    """含 mom_pct 欄位的最小 row。"""
+    return {
+        "fib_ch_pos": pos, "fib_ch_dir": float(ch_dir),
+        "fib_ch_0": 100.0, "fib_ch_100": 110.0,
+        "atr": 5.0,
+        "regime": regime,
+        "er": 0.3, "choppiness": 60.0, "adx": 15.0,
+        "vol_ratio": vol_ratio,
+        "mom_pct": mom_pct,
+    }
+
+
+class TestMomentumGate:
+    """momentum_max_pct 參數：3 根 K 棒合計漲跌幅超過門檻時拒絕新進場。
+
+    用途：過濾急漲/急跌行情中的逆勢接刀（reversion 策略在趨勢行情最常虧損）。
+    """
+
+    def test_default_disabled_allows_entry(self):
+        """momentum_max_pct 預設 0（關閉），高動能也照常進場。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0)
+        row = _mom_row(pos=0.85, mom_pct=2.0)   # 高動能但過濾關閉
+        assert strat.signal(row, 0) == -1
+
+    def test_blocks_entry_when_momentum_exceeds_threshold(self):
+        """mom_pct > momentum_max_pct → 拒絕進場，即使其他條件符合。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               momentum_max_pct=0.7)
+        row = _mom_row(pos=0.85, mom_pct=1.0)   # 1.0% > 0.7% 門檻
+        assert strat.signal(row, 0) == 0, "高動能應拒絕進場"
+
+    def test_allows_entry_when_momentum_below_threshold(self):
+        """mom_pct < momentum_max_pct → 正常進場。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               momentum_max_pct=0.7)
+        row = _mom_row(pos=0.85, mom_pct=0.3)   # 0.3% < 0.7% 門檻
+        assert strat.signal(row, 0) == -1
+
+    def test_exact_boundary_allows_entry(self):
+        """mom_pct == momentum_max_pct（剛好等於）→ 允許進場（嚴格 >）。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               momentum_max_pct=0.7)
+        row = _mom_row(pos=0.85, mom_pct=0.7)
+        assert strat.signal(row, 0) == -1
+
+    def test_does_not_block_exit(self):
+        """高動能不擋出場：空單 pos<0.20 → 應平倉，不受動能影響。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               momentum_max_pct=0.7)
+        row = _mom_row(pos=0.10, mom_pct=2.0)   # exit_zone=0.80 → 1-0.80=0.20 > 0.10 → exit short
+        assert strat.signal(row, -1) == 0
+
+    def test_nan_mom_skips_gate(self):
+        """mom_pct 欄缺失（NaN）→ 跳過過濾，不因缺欄阻擋進場。"""
+        strat = build_strategy("fib_channel", mode="reversion",
+                               er_trend=0.0, chop_trend=100.0, adx_trend=0.0,
+                               momentum_max_pct=0.7)
+        row = _mom_row(pos=0.85, mom_pct=float("nan"))
+        assert strat.signal(row, 0) == -1
+
+    def test_prepare_adds_mom_pct_column(self):
+        """prepare() 必須輸出 mom_pct 欄位供 signal() 使用。"""
+        strat = build_strategy("fib_channel", momentum_window=3)
+        df = _df(120, "up")
+        out = strat.prepare(df)
+        assert "mom_pct" in out.columns, "prepare() 應輸出 mom_pct 欄位"
+        assert out["mom_pct"].dropna().ge(0).all(), "mom_pct 應為非負絕對值 %"
