@@ -19,7 +19,9 @@ const colorForBot = (c, names, strat) => {
 // mode → 中文標籤（標明回測 vs 真實）
 const MODE_LABEL = { backtest: '回測', live_futures_testnet: '測試網', paper: '模擬' }
 const modeLabel = (mode) => MODE_LABEL[mode] || mode
-const AUTO_OPTS = [{ label: '關閉', sec: 0 }, { label: '3s', sec: 3 }, { label: '10s', sec: 10 }, { label: '30s', sec: 30 }]
+// Binance 公開合約 kline WebSocket（不需 API key）
+const BINANCE_WS = (symbol, tf) =>
+  `wss://fapi.binance.com/ws/${symbol.toLowerCase()}@kline_${tf}`
 
 // indicator catalogue — only ST + EMA200 on by default。
 // `ckey` 指向 getChartColors() 的欄位（canvas 線色 + chip 標籤色都用它），主題切換時即時取色。
@@ -69,8 +71,7 @@ export default function Chart() {
   const [lastTs,    setLastTs]    = useState(null)
   const [livePrice, setLivePrice] = useState(null)
   const [prevPrice, setPrevPrice] = useState(null)
-  const [autoSec,   setAutoSec]   = useState(3)
-  const [countdown, setCountdown] = useState(0)
+  const [wsReady,   setWsReady]   = useState(false)
   const [refresh,   setRefresh]   = useState(0)
 
   // ── chart init ──────────────────────────────────────────────────────
@@ -154,30 +155,41 @@ export default function Chart() {
       .catch(e => { setErrMsg(e.message); setLoading(false) })
   }, [symbol, tf, refresh]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── live price poll ──────────────────────────────────────────────────
+  // ── Binance WS kline（即時更新最後一根 K 棒，不需 API key）────────────
   useEffect(() => {
-    if (autoSec === 0) { setCountdown(0); return }
-    setCountdown(autoSec)
-    const tick = () => {
-      api.price(symbol).then(d => {
-        if (!d.price) return
-        setPrevPrice(p => { return p ?? d.price })
-        setLivePrice(prev => { setPrevPrice(prev); return d.price })
-        const candles = dataRef.current.candles
-        if (!candles?.length) return
-        const last = candles[candles.length - 1]
-        const upd = { time: last.time, open: last.open,
-          high: Math.max(last.high, d.price), low: Math.min(last.low, d.price), close: d.price }
+    setWsReady(false)
+    const ws = new WebSocket(BINANCE_WS(symbol, tf))
+    ws.onopen = () => setWsReady(true)
+    ws.onclose = () => setWsReady(false)
+    ws.onerror = () => setWsReady(false)
+    ws.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data)
+        const k = msg.k
+        if (!k) return
+        const price = parseFloat(k.c)
+        const time  = Math.floor(k.t / 1000)   // ms → s（lightweight-charts 用秒）
+        setPrevPrice(p => p ?? price)
+        setLivePrice(prev => { setPrevPrice(prev); return price })
+        setLastTs(Math.floor(Date.now() / 1000))
+        const upd = { time,
+          open:  parseFloat(k.o), high: parseFloat(k.h),
+          low:   parseFloat(k.l), close: price }
         seriesRef.current.candles?.update(upd)
-        dataRef.current.candles[candles.length - 1] = upd
-        setLastTs(d.ts)
-      }).catch(() => {})
+        // 同步本地快取（其他 effect 讀 dataRef）
+        const candles = dataRef.current.candles
+        if (candles?.length) {
+          const last = candles[candles.length - 1]
+          if (last.time === time) {
+            dataRef.current.candles[candles.length - 1] = upd
+          } else if (time > last.time) {
+            dataRef.current.candles.push(upd)
+          }
+        }
+      } catch { /* 忽略解析錯誤 */ }
     }
-    const ivP = setInterval(tick, autoSec * 1000)
-    let cd = autoSec
-    const ivC = setInterval(() => { cd -= 1; if (cd <= 0) cd = autoSec; setCountdown(cd) }, 1000)
-    return () => { clearInterval(ivP); clearInterval(ivC) }
-  }, [autoSec, symbol]) // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { ws.close() }
+  }, [symbol, tf]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 交易標記：依 bot 配色 + 進出場形狀 + 聚合筆數，套到 K 線 ──────────────
   const applyMarkers = useCallback((raw, botNames, show, hidden) => {
@@ -268,12 +280,10 @@ export default function Chart() {
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 4, marginLeft: 8 }}>
-          {autoSec > 0 && (
-            <span style={{ fontSize: 10, color: 'var(--pos)', fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--pos)', display: 'inline-block', animation: 'pulse 1.5s infinite' }} />
-              LIVE · {countdown}s
-            </span>
-          )}
+          <span style={{ fontSize: 10, color: wsReady ? 'var(--pos)' : 'var(--faint)', fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: wsReady ? 'var(--pos)' : 'var(--faint)', display: 'inline-block', animation: wsReady ? 'pulse 1.5s infinite' : 'none' }} />
+            {wsReady ? 'LIVE · WS' : '連線中…'}
+          </span>
           {lastTs && (
             <span style={{ fontSize: 10, color: 'var(--faint)', fontFamily: 'var(--font-display)' }}>
               K棒：{new Date(lastTs * 1000).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
@@ -295,13 +305,6 @@ export default function Chart() {
         {TFS.map(t => (
           <button key={t} onClick={() => setTf(t)} style={chip(tf === t, 'var(--accent)')}>
             {t}
-          </button>
-        ))}
-        <div style={{ width: 1, height: 16, background: 'var(--line-strong)', margin: '0 2px' }} />
-        {/* auto-refresh */}
-        {AUTO_OPTS.map(o => (
-          <button key={o.sec} onClick={() => setAutoSec(o.sec)} style={chip(autoSec === o.sec, 'var(--pos)')}>
-            {o.label}
           </button>
         ))}
         {/* manual refresh */}
