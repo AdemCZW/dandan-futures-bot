@@ -157,6 +157,23 @@ function BotCard({ data, num, color }) {
   const [closing, setClosing] = useState(false)
   const [closeMsg, setCloseMsg] = useState(null)
 
+  // 讓 age 顯示每秒遞增（REST poll 每 5s 一次，中間不能凍在同一個數字）
+  const baseAgeRef  = useRef(data?.age_seconds ?? 0)
+  const baseTsRef   = useRef(Date.now())
+  const [displayAge, setDisplayAge] = useState(data?.age_seconds ?? 0)
+  useEffect(() => {
+    if (data?.age_seconds == null) return
+    baseAgeRef.current = data.age_seconds
+    baseTsRef.current  = Date.now()
+    setDisplayAge(data.age_seconds)
+  }, [data?.age_seconds])
+  useEffect(() => {
+    const t = setInterval(() => {
+      setDisplayAge(Math.round(baseAgeRef.current + (Date.now() - baseTsRef.current) / 1000))
+    }, 1000)
+    return () => clearInterval(t)
+  }, [])
+
   async function handleClose() {
     const sym = String(data?.symbol || '').replace('USDT', '')
     if (!window.confirm(
@@ -229,7 +246,7 @@ function BotCard({ data, num, color }) {
             background: fresh ? 'var(--pos)' : 'var(--faint)', display: 'inline-block',
           }} />
           <span className="muted" style={{ fontSize: 10 }}>
-            {fresh ? `${data.age_seconds}s 前` : '離線'}
+            {fresh ? `${displayAge}s 前` : '離線'}
           </span>
         </span>
       </div>
