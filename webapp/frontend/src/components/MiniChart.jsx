@@ -166,6 +166,27 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
     }
   }, [symbol, tf, strategy, theme])         // theme 變動時整圖重建以套用新色
 
+  // ── Binance 公開 WS：即時更新最後一根 K 棒（不需 API key）────────────────────
+  useEffect(() => {
+    if (!symbol) return
+    const url = `wss://fapi.binance.com/ws/${symbol.toLowerCase()}@kline_${tf}`
+    const ws = new WebSocket(url)
+    ws.onmessage = (e) => {
+      try {
+        const k = JSON.parse(e.data)?.k
+        if (!k || !candleRef.current) return
+        candleRef.current.update({
+          time:  Math.floor(k.t / 1000),
+          open:  parseFloat(k.o),
+          high:  parseFloat(k.h),
+          low:   parseFloat(k.l),
+          close: parseFloat(k.c),
+        })
+      } catch { /* 忽略解析錯誤 */ }
+    }
+    return () => ws.close()
+  }, [symbol, tf])
+
   // ── 進場/SL/TP 價格線（持倉或數值變動時即時重畫）──────────────────────────
   useEffect(() => {
     const candle = candleRef.current
