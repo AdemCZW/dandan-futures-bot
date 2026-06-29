@@ -1028,3 +1028,29 @@ def test_warmup_bars_has_floor_for_short_lookback_strategies():
 def test_warmup_bars_base_default_is_floor():
     s = Strategy()
     assert s.warmup_bars() == 200                  # 無已知週期 → floor 200
+
+
+# ── OPT-16：CVD 背離竭盡過濾閘門（use_cvd_filter 預設關，default-off）──────
+def test_cvd_filter_off_by_default_does_not_block():
+    s = build_strategy("trend_pullback")
+    # 即使有頂背離欄，預設關 → _cvd_ok 一律放行
+    row = pd.Series({"cvd_div": -1.0})
+    assert s._cvd_ok(row, 1) is True
+
+
+def test_cvd_filter_blocks_long_on_top_divergence():
+    s = build_strategy("trend_pullback", use_cvd_filter=True)
+    assert s._cvd_ok(pd.Series({"cvd_div": -1.0}), 1) is False   # 頂背離擋多
+    assert s._cvd_ok(pd.Series({"cvd_div": 0.0}), 1) is True
+    assert s._cvd_ok(pd.Series({"cvd_div": 1.0}), 1) is True     # 底背離不擋多
+
+
+def test_cvd_filter_blocks_short_on_bottom_divergence():
+    s = build_strategy("fib_ema", use_cvd_filter=True)
+    assert s._cvd_ok(pd.Series({"cvd_div": 1.0}), -1) is False   # 底背離擋空
+    assert s._cvd_ok(pd.Series({"cvd_div": -1.0}), -1) is True
+
+
+def test_cvd_filter_missing_column_passes():
+    s = build_strategy("fib_ema", use_cvd_filter=True)
+    assert s._cvd_ok(pd.Series({"close": 100.0}), 1) is True     # 缺 cvd_div → 放行

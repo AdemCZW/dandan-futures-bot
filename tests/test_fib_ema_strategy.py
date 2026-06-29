@@ -195,3 +195,22 @@ def test_exit_short_still_fires_in_range_regime():
     strat = _make_strategy()
     row = _row_with_regime("range", score=0.95)
     assert strat.signal(row, position=-1) == 0
+
+
+# ── OPT-17：出場死區可調（exit_mid，預設 None=現行 0.33/0.67 死區，default-off）──
+def test_exit_mid_none_keeps_current_deadzone():
+    strat = _make_strategy()                         # 未設 exit_mid
+    # 持多、score=0.5（在 0.33–0.67 死區內）→ 維持多單（現行行為不變）
+    assert strat.signal(pd.Series({"fib_score": 0.5, "rsi": 50.0}), 1) == 1
+
+
+def test_exit_mid_tightens_long_exit():
+    strat = _make_strategy(exit_mid=0.5)
+    assert strat.signal(pd.Series({"fib_score": 0.45, "rsi": 50.0}), 1) == 0   # <0.5 → 出
+    assert strat.signal(pd.Series({"fib_score": 0.60, "rsi": 50.0}), 1) == 1   # ≥0.5 → 抱
+
+
+def test_exit_mid_tightens_short_exit():
+    strat = _make_strategy(exit_mid=0.5)             # 空單對稱門檻 = 1-0.5 = 0.5
+    assert strat.signal(pd.Series({"fib_score": 0.55, "rsi": 50.0}), -1) == 0  # >0.5 → 出
+    assert strat.signal(pd.Series({"fib_score": 0.40, "rsi": 50.0}), -1) == -1 # ≤0.5 → 抱

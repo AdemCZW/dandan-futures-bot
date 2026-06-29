@@ -172,6 +172,28 @@ def cvd(df: pd.DataFrame) -> pd.Series:
     return delta.cumsum()
 
 
+def cvd_price_divergence(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """價格與 CVD 的背離（訂單流竭盡過濾，OPT-16）。causal：只用 ≤t 的滾動變化。
+
+    比較過去 window 根的價格淨變化與 CVD 淨變化：
+      -1 頂背離：價漲(price_chg>0) 但 CVD 走低(cvd_chg<0)＝買盤竭盡/上方吸收 → 別追多。
+      +1 底背離：價跌(price_chg<0) 但 CVD 走高(cvd_chg>0)＝賣盤被吸收 → 別追空。
+       0 無背離 / 缺 taker_base（合成資料）/ 暖機不足。
+
+    用既有 K 線自帶 taker_base，零外部資料。不單獨進場，僅當合流/矛盾的降風險閘門。
+    """
+    c = cvd(df)
+    out = pd.Series(0.0, index=df.index)
+    if c.isna().all():
+        return out                                   # 缺 taker_base → 全 0，優雅退化
+    w = max(int(window), 1)
+    price_chg = df["close"] - df["close"].shift(w)
+    cvd_chg = c - c.shift(w)
+    out[(price_chg > 0) & (cvd_chg < 0)] = -1.0       # 頂背離（買盤竭盡）
+    out[(price_chg < 0) & (cvd_chg > 0)] = 1.0        # 底背離（賣盤吸收）
+    return out
+
+
 def donchian(df: pd.DataFrame, entry_period: int = 20, exit_period: int = 10) -> pd.DataFrame:
     """Donchian 通道（Turtle 海龜突破）。
 

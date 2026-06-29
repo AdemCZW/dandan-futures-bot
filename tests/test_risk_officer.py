@@ -370,3 +370,34 @@ class TestLiquidationGuard:
         officer = RiskOfficer(cfg)
         dec = officer.check_entry(10_000.0, 100.0, "2026-01-01", direction=1, atr=5.0)
         assert dec.allow is True
+
+
+class TestUseFixedTP:
+    """OPT-02：趨勢策略可關固定 TP（預設 True=現行），讓 Chandelier 接管趨勢尾段。"""
+
+    def test_default_keeps_fixed_tp(self):
+        cfg = Config()                       # use_fixed_tp 預設 True
+        sl, tp = RiskOfficer(cfg).exit_levels(100.0, direction=1, atr=2.0)
+        # 預設：tp = entry + tp_R_mult×atr_mult_sl×ATR = 100 + 2×2×2 = 108
+        assert tp == pytest.approx(108.0)
+        assert sl == pytest.approx(96.0)
+
+    def test_use_fixed_tp_false_pushes_tp_far_long(self):
+        cfg_on = Config(); cfg_off = Config(use_fixed_tp=False)
+        _, tp_on = RiskOfficer(cfg_on).exit_levels(100.0, 1, atr=2.0)
+        sl_off, tp_off = RiskOfficer(cfg_off).exit_levels(100.0, 1, atr=2.0)
+        assert tp_off > tp_on                # TP 推遠 → 不在 2R 截斷
+        assert sl_off == pytest.approx(96.0) # SL 不變（Chandelier 仍由 sl 端保護）
+
+    def test_use_fixed_tp_false_pushes_tp_far_short(self):
+        cfg_on = Config(); cfg_off = Config(use_fixed_tp=False)
+        _, tp_on = RiskOfficer(cfg_on).exit_levels(100.0, -1, atr=2.0)
+        sl_off, tp_off = RiskOfficer(cfg_off).exit_levels(100.0, -1, atr=2.0)
+        assert tp_off < tp_on                # 空單 TP 在下方，推遠＝更低
+        assert sl_off == pytest.approx(104.0)
+
+    def test_use_fixed_tp_false_fixed_pct_path(self):
+        """無 atr 的固定百分比路徑也要遵守 use_fixed_tp。"""
+        cfg_off = Config(use_fixed_tp=False)
+        _, tp_off = RiskOfficer(cfg_off).exit_levels(100.0, 1, atr=None)
+        assert tp_off > 100.0 * (1 + Config().take_profit_pct)

@@ -25,6 +25,10 @@ class Config:
     # ATR 動態停損停利（有傳入 atr 時優先於固定百分比）：
     atr_mult_sl: float = 2.0          # 停損 = entry ∓ atr_mult_sl × ATR（波動度自適應）
     tp_R_mult: float = 2.0            # 停利距離 = tp_R_mult × 停損距離（鎖定恆定風報比 R）
+    # OPT-02：固定停利開關（預設 True=現行）。趨勢策略設 False → TP 推到極遠（tp_R_mult×far_factor），
+    # 不在 2R 硬截斷，改由 Chandelier 追蹤停損主導出趨勢尾段。
+    use_fixed_tp: bool = True
+    tp_far_factor: float = 5.0        # use_fixed_tp=False 時 TP 距離放大倍數（≈極端止盈）
     chand_mult: float = 3.0           # Chandelier 追蹤停損的 ATR 倍數（趨勢單保利）
     fee_rate: float = 0.001           # 手續費 0.1%（回測估算用）
     taker_fee_rate: float = 0.0004    # 實盤合約 taker 單邊費率（OPT-01：實盤平倉記帳扣費，與回測 fee_rate 分離）

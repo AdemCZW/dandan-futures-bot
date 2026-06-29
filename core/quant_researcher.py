@@ -49,6 +49,9 @@ class Strategy:
     # warmup_bars() 掃 params 時，哪些 key 視為「回看週期」。
     _LOOKBACK_KEYS = ("ema", "period", "window", "slow", "trend", "lookback", "smooth")
 
+    # OPT-16 CVD/價格背離竭盡過濾共用參數（use_cvd_filter 預設 False＝關，向後相容）。
+    CVD_DEFAULTS = {"use_cvd_filter": False, "cvd_window": 14}
+
     def __init__(self, **params):
         # 使用者傳入的值覆蓋預設值
         self.params = {**self.defaults, **params}
@@ -114,6 +117,35 @@ class Strategy:
         p = {**self.STRUCTURE_DEFAULTS, **self.params}
         out["taker_ratio_s"] = se.taker_buy_ratio(out, smooth=int(p["of_smooth"]))
         return out
+
+    def _prepare_cvd(self, out: pd.DataFrame) -> pd.DataFrame:
+        """把 cvd_div（CVD/價格背離 ∈ {-1,0,1}）算進 DataFrame（OPT-16）。
+
+        缺 taker_base（合成/舊快取）→ 全 0、_cvd_ok 一律放行。use_cvd_filter 關時仍算欄位
+        但不影響進場（零成本、可供前端/分析觀察）。
+        """
+        p = {**self.CVD_DEFAULTS, **self.params}
+        out["cvd_div"] = se.cvd_price_divergence(out, window=int(p["cvd_window"]))
+        return out
+
+    def _cvd_ok(self, row: pd.Series, direction: int) -> bool:
+        """空手想開新倉時呼叫：訂單流背離與進場方向衝突時擋下（竭盡過濾，OPT-16）。
+
+        use_cvd_filter=False（預設）/ 缺 cvd_div 欄 / 值為 NaN → 一律放行（向後相容）。
+        做多遇頂背離(cvd_div<0，買盤竭盡)→擋；做空遇底背離(cvd_div>0，賣盤吸收)→擋。
+        """
+        p = {**self.CVD_DEFAULTS, **self.params}
+        if not p["use_cvd_filter"]:
+            return True
+        val = row.get("cvd_div") if hasattr(row, "get") else None
+        if val is None or (isinstance(val, float) and math.isnan(val)):
+            return True
+        val = float(val)
+        if direction == 1 and val < 0:
+            return False
+        if direction == -1 and val > 0:
+            return False
+        return True
 
     def _structure_ok(self, row: pd.Series, direction: int) -> bool:
         """空手想開新倉時呼叫：訂單流與進場方向不衝突才放行。
@@ -911,6 +943,7 @@ class TrendPullbackStrategy(Strategy):
         out["kd_gold"] = ((k > d) & (k.shift(1) <= d.shift(1))).astype(float)
         out["kd_dead"] = ((k < d) & (k.shift(1) >= d.shift(1))).astype(float)
         out["atr"] = se.atr(out, 14)
+        out = self._prepare_cvd(out)               # OPT-16：背離欄（use_cvd_filter 關時不影響進場）
         return self._prepare_regime(out)
 
     def signal(self, row, position: int) -> int:
@@ -933,9 +966,9 @@ class TrendPullbackStrategy(Strategy):
         in_zone = lo <= rsi <= hi
         gold = (_num(g("kd_gold")) or 0.0) > 0.5
         dead = (_num(g("kd_dead")) or 0.0) > 0.5
-        if close > et and ef > es and in_zone and gold:
+        if close > et and ef > es and in_zone and gold and self._cvd_ok(row, 1):
             return 1
-        if close < et and ef < es and in_zone and dead:
+        if close < et and ef < es and in_zone and dead and self._cvd_ok(row, -1):
             return -1
         return 0
 
@@ -958,6 +991,9 @@ class FibEmaStrategy(Strategy):
         "rsi_hi": 65.0,
         "score_bull": 0.67,
         "score_bear": 0.33,
+        # OPT-17：出場死區門檻。None=現行（持多等 score≤bear=0.33 才出，死區大→回吐浮盈）；
+        # 設值(如 0.5)→持多 score≤exit_mid 即出、持空 score≥1−exit_mid 即出（縮小死區）。預設關。
+        "exit_mid": None,
     }
     allow_short = True
     regime_pref = "trend"
@@ -969,6 +1005,7 @@ class FibEmaStrategy(Strategy):
         out["fib_score"] = se.fib_ema_score(out["close"])
         out["rsi"] = se.rsi(out["close"], int(p["rsi_period"]))
         out["atr"] = se.atr(out, 14)
+        out = self._prepare_cvd(out)               # OPT-16：背離欄（use_cvd_filter 關時不影響進場）
         return self._prepare_regime(out)
 
     def signal(self, row, position: int) -> int:
@@ -988,18 +1025,22 @@ class FibEmaStrategy(Strategy):
         in_rsi_zone = rsi is None or (rsi_lo <= rsi <= rsi_hi)
 
         # exit logic — score reversal（出場不受 regime 限制）
+        # OPT-17：exit_mid 有設時用較緊的中位門檻出場，縮小 bear/bull 死區以減少浮盈回吐。
+        exit_mid = self.params.get("exit_mid")
+        long_exit_thr = bear if exit_mid is None else float(exit_mid)
+        short_exit_thr = bull if exit_mid is None else (1.0 - float(exit_mid))
         if position == 1:
-            return 0 if score <= bear else 1
+            return 0 if score <= long_exit_thr else 1
         if position == -1:
-            return 0 if score >= bull else -1
+            return 0 if score >= short_exit_thr else -1
 
         # entry: regime 閘門（trend 盤才進場，盤整盤 whipsaw 太嚴重）
         if not self._regime_ok(row):
             return 0
 
-        if score >= bull:
+        if score >= bull and self._cvd_ok(row, 1):       # OPT-16：頂背離時不追多
             return 1
-        if score <= bear:
+        if score <= bear and self._cvd_ok(row, -1):      # OPT-16：底背離時不追空
             return -1
         return 0
 

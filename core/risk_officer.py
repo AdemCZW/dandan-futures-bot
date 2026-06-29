@@ -210,16 +210,20 @@ class RiskOfficer:
         atr 有值：停損 = entry ∓ atr_mult_sl×ATR，停利距離 = tp_R_mult×停損距離（恆定 R）。
         atr=None：退回固定百分比（stop_loss_pct / take_profit_pct），與舊版相同。
         """
+        # OPT-02：use_fixed_tp=False → TP 推遠（×tp_far_factor），讓 Chandelier 主導趨勢尾段出場。
+        tp_scale = 1.0 if getattr(self.cfg, "use_fixed_tp", True) \
+            else float(getattr(self.cfg, "tp_far_factor", 5.0))
         if atr is not None and atr > 0:
             sl_dist = self.cfg.atr_mult_sl * atr
-            tp_dist = self.cfg.tp_R_mult * sl_dist
+            tp_dist = self.cfg.tp_R_mult * sl_dist * tp_scale
             if direction == 1:
                 return entry_price - sl_dist, entry_price + tp_dist
             return entry_price + sl_dist, entry_price - tp_dist
+        tp_pct = self.cfg.take_profit_pct * tp_scale
         if direction == 1:
             sl = entry_price * (1 - self.cfg.stop_loss_pct)
-            tp = entry_price * (1 + self.cfg.take_profit_pct)
+            tp = entry_price * (1 + tp_pct)
         else:
             sl = entry_price * (1 + self.cfg.stop_loss_pct)
-            tp = entry_price * (1 - self.cfg.take_profit_pct)
+            tp = entry_price * (1 - tp_pct)
         return sl, tp

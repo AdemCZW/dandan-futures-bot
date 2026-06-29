@@ -934,3 +934,65 @@ def test_fib_ema_score_custom_periods():
     closes = [100 + i * 0.3 for i in range(200)]
     score = fib_ema_score(_fib_ema_df(closes)["close"], fast=(5, 8), slow=(13, 21))
     assert score.iloc[-1] > 0.75
+
+
+# ── OPT-16：CVD/價格背離指標（竭盡過濾，causal）──────────────────────────
+def _cvd_df(closes, taker, vol=100.0):
+    import numpy as _np
+    closes = _np.asarray(closes, dtype=float)
+    n = len(closes)
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    return pd.DataFrame({
+        "open": closes, "high": closes * 1.001, "low": closes * 0.999,
+        "close": closes, "volume": _np.full(n, vol),
+        "taker_base": _np.asarray(taker, dtype=float),
+    }, index=idx)
+
+
+def test_cvd_divergence_bearish_when_price_up_cvd_down():
+    """價漲但 CVD 走低（買盤竭盡）→ -1 頂背離。"""
+    n = 30
+    closes = np.linspace(100, 120, n)
+    taker = np.concatenate([np.full(15, 70.0), np.full(15, 30.0)])  # delta +40→-40
+    div = se.cvd_price_divergence(_cvd_df(closes, taker), window=10)
+    assert div.iloc[-1] == -1.0
+
+
+def test_cvd_divergence_bullish_when_price_down_cvd_up():
+    """價跌但 CVD 走高（賣盤被吸收）→ +1 底背離。"""
+    n = 30
+    closes = np.linspace(120, 100, n)
+    taker = np.concatenate([np.full(15, 30.0), np.full(15, 70.0)])  # delta -40→+40
+    div = se.cvd_price_divergence(_cvd_df(closes, taker), window=10)
+    assert div.iloc[-1] == 1.0
+
+
+def test_cvd_divergence_zero_when_aligned():
+    """價漲且 CVD 同向上升 → 無背離 0。"""
+    n = 30
+    closes = np.linspace(100, 120, n)
+    taker = np.full(n, 70.0)        # delta 恆 +40 → CVD 持續上升，與價同向
+    div = se.cvd_price_divergence(_cvd_df(closes, taker), window=10)
+    assert div.iloc[-1] == 0.0
+
+
+def test_cvd_divergence_is_causal():
+    """末根值不依賴未來：去掉最後一根，倒數第二根的值不變。"""
+    n = 30
+    closes = np.linspace(100, 120, n)
+    taker = np.concatenate([np.full(15, 70.0), np.full(15, 30.0)])
+    df = _cvd_df(closes, taker)
+    full = se.cvd_price_divergence(df, window=10)
+    trunc = se.cvd_price_divergence(df.iloc[:-1], window=10)
+    assert full.iloc[-2] == trunc.iloc[-1]
+
+
+def test_cvd_divergence_no_taker_base_returns_zeros():
+    """缺 taker_base（合成/舊快取）→ 全 0（優雅退化，不影響進場）。"""
+    n = 20
+    closes = np.linspace(100, 110, n)
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    df = pd.DataFrame({"open": closes, "high": closes, "low": closes,
+                       "close": closes, "volume": np.full(n, 100.0)}, index=idx)
+    div = se.cvd_price_divergence(df, window=5)
+    assert (div == 0.0).all()
