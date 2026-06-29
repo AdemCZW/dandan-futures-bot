@@ -797,6 +797,70 @@ def _start_state_server() -> None:
     print(f"[狀態 API] 監聽 :{port}  GET /state → {STATE_PATH}")
 
 
+def _make_ws_handler(trader, last_closed: list, lock) -> callable:
+    """WS callback 工廠（可獨立測試）：每 tick 刷新心跳；K 棒收盤才觸發決策。
+
+    Args:
+        trader: FuturesLiveTrader 實例
+        last_closed: 長度 1 的 list，儲存上一根已處理的 K 棒時間戳（去重用）
+        lock: threading.Lock，保護 trader 方法不跨緒競態
+    """
+    def handle(msg):
+        k = msg.get("k") if isinstance(msg, dict) else None
+        if not k:
+            return
+        live_price = float(k.get("c", 0))
+        with lock:
+            trader._heartbeat(live_price)
+        if not k.get("x"):        # K 棒未收盤，只更新心跳
+            return
+        bt = k.get("t")
+        if bt == last_closed[0]:  # 去重：同一根 K 棒的重播
+            return
+        last_closed[0] = bt
+        try:
+            with lock:
+                trader.on_bar_close(pd.to_datetime(bt, unit="ms"))
+        except Exception:
+            print("[錯誤/WS]", traceback.format_exc())
+    return handle
+
+
+def _ws_main(trader, cfg) -> None:
+    """WebSocket 主迴圈：Binance 合約 K 線事件驅動，心跳毫秒級更新。
+
+    交易邏輯（on_bar_close）仍在 K 棒收盤後才觸發，策略參數不需改變。
+    手動平倉旗標由主執行緒每 5 秒檢查，確保在主緒執行。
+    """
+    from binance import ThreadedWebsocketManager
+
+    _trade_lock = threading.Lock()
+    last_closed = [None]
+    handle = _make_ws_handler(trader, last_closed, _trade_lock)
+
+    twm = ThreadedWebsocketManager(
+        api_key=cfg.futures_api_key, api_secret=cfg.futures_api_secret, testnet=True
+    )
+    twm.start()
+    twm.start_kline_futures_socket(callback=handle, symbol=cfg.symbol, interval=cfg.interval)
+    print(f"[WS] 訂閱合約 K 線 {cfg.symbol}@kline_{cfg.interval}，K 棒收盤即觸發決策…")
+
+    try:
+        while True:
+            _CLOSE_EVENT.wait(timeout=5)
+            _CLOSE_EVENT.clear()
+            if os.path.exists(CLOSE_REQUEST_PATH):
+                try:
+                    os.remove(CLOSE_REQUEST_PATH)
+                except OSError:
+                    pass
+                with _trade_lock:
+                    print("[手動平倉] 收到結算請求", trader.manual_close())
+    except KeyboardInterrupt:
+        print("\n[結束] 使用者中斷")
+        twm.stop()
+
+
 def main():
     cfg = Config()
     ap = argparse.ArgumentParser(description="合約測試網模擬盤（多/空，可做空）。")
@@ -818,6 +882,9 @@ def main():
     ap.add_argument("--cb-pause-hours", type=float,
                     default=float(os.getenv("CB_PAUSE_HOURS", "24")),
                     help="Circuit Breaker：暫停幾小時（預設 24）")
+    ap.add_argument("--ws", action="store_true",
+                    default=bool(int(os.getenv("BOT_WS", "0"))),
+                    help="改用 WebSocket K 線串流（價格毫秒級即時；不影響交易信號時間框架）")
     args = ap.parse_args()
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
     cfg.futures_leverage, cfg.poll_seconds = args.leverage, args.poll
@@ -862,6 +929,10 @@ def main():
         print("[致命] 交易初始化失敗（保持存活供診斷）：\n" + traceback.format_exc())
         while True:
             time.sleep(30)
+
+    if args.ws:
+        _ws_main(trader, cfg)
+        return
 
     last_bar = None
     while True:

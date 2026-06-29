@@ -710,3 +710,93 @@ def test_go_flat_pnl_sign_correct_for_short(patched):
     # FakeJournal 只記 side，需要升級才能驗 pnl；但至少確認 close 有被呼叫
     close_calls = [o for o in ex.orders if o[0] == "close"]
     assert len(close_calls) == 1 and close_calls[0][1] == 21.0
+
+
+# ── WebSocket Handler ─────────────────────────────────────────────────────────
+# _make_ws_handler 為可測試的 callback 工廠：
+#   - 每個 tick 呼叫 _heartbeat（儀表板即時刷新）
+#   - k["x"]=True（K 棒收盤）才呼叫 on_bar_close
+#   - 同一 bt 去重，防止重複觸發
+#   - 無效訊息不崩潰
+
+def _ws_msg(closed: bool, bt: int = 1000, price: str = "100.0") -> dict:
+    return {"k": {"c": price, "x": closed, "t": bt}}
+
+
+def test_ws_handler_heartbeat_on_every_tick(patched):
+    """WS handler：每個 tick 不論收盤與否都呼叫 _heartbeat。"""
+    import threading
+    heartbeats = []
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t._heartbeat = lambda price: heartbeats.append(price)
+    lock = threading.Lock()
+    handle = M._make_ws_handler(t, [None], lock)
+
+    handle(_ws_msg(closed=False, price="99.5"))
+    assert len(heartbeats) == 1 and heartbeats[0] == 99.5
+
+    handle(_ws_msg(closed=True, price="100.0"))
+    assert len(heartbeats) == 2 and heartbeats[1] == 100.0
+
+
+def test_ws_handler_no_on_bar_close_when_not_closed(patched):
+    """WS handler：k["x"]=False 時不呼叫 on_bar_close。"""
+    import threading
+    bar_closes = []
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t._heartbeat = lambda price: None
+    t.on_bar_close = lambda bt: bar_closes.append(bt)
+    lock = threading.Lock()
+    handle = M._make_ws_handler(t, [None], lock)
+
+    handle(_ws_msg(closed=False))
+    assert len(bar_closes) == 0
+
+
+def test_ws_handler_on_bar_close_when_closed(patched):
+    """WS handler：k["x"]=True 時呼叫 on_bar_close 並傳入正確時間戳。"""
+    import threading
+    bar_closes = []
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t._heartbeat = lambda price: None
+    t.on_bar_close = lambda bt: bar_closes.append(bt)
+    lock = threading.Lock()
+    handle = M._make_ws_handler(t, [None], lock)
+
+    handle(_ws_msg(closed=True, bt=1_000_000))
+    assert len(bar_closes) == 1
+    assert bar_closes[0] == pd.to_datetime(1_000_000, unit="ms")
+
+
+def test_ws_handler_dedupes_same_bar(patched):
+    """WS handler：同一 bt 送兩次，on_bar_close 只觸發一次。"""
+    import threading
+    bar_closes = []
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t._heartbeat = lambda price: None
+    t.on_bar_close = lambda bt: bar_closes.append(bt)
+    lock = threading.Lock()
+    handle = M._make_ws_handler(t, [None], lock)
+
+    handle(_ws_msg(closed=True, bt=999))
+    handle(_ws_msg(closed=True, bt=999))   # 重複，應被去重
+    assert len(bar_closes) == 1
+
+
+def test_ws_handler_ignores_invalid_msg(patched):
+    """WS handler：無 'k' 鍵的訊息不崩潰、不呼叫任何方法。"""
+    import threading
+    heartbeats = []
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t._heartbeat = lambda price: heartbeats.append(price)
+    lock = threading.Lock()
+    handle = M._make_ws_handler(t, [None], lock)
+
+    handle({"type": "ping"})           # 無 k 鍵
+    handle({})                         # 空 dict
+    assert len(heartbeats) == 0
