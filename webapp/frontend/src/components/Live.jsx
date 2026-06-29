@@ -208,8 +208,11 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
     : null
   const unreal   = unrealLive ?? (data.unrealized_pnl ?? 0)
 
-  const netVal   = INIT_CAPITAL + realized + unreal
-  const netPct   = (realized + unreal) / INIT_CAPITAL * 100
+  // 優先用交易所回報的真實現金餘額（cash），避免漏記歷史交易造成誤差。
+  // 無持倉時 netVal = cash；有持倉時加上即時浮盈（unreal 已含方向）。
+  const cashBase = data.cash != null ? data.cash : (INIT_CAPITAL + realized)
+  const netVal   = cashBase + (data.in_position ? unreal : 0)
+  const netPct   = (netVal - INIT_CAPITAL) / INIT_CAPITAL * 100
   const winPct   = data.total_trades > 0
     ? Math.round((data.win_trades / data.total_trades) * 100)
     : null
@@ -606,7 +609,7 @@ export default function Live() {
       </div>
 
       <Plain>
-        四台 bot 同時在<b>幣安合約測試網（虛擬資金、不是真錢）</b>自動交易。每張卡：<b>淨值</b>＝本金 $5,000 加減賺賠的現值；
+        四台 bot 同時在<b>幣安合約測試網（虛擬資金、不是真錢）</b>自動交易。每張卡：<b>淨值</b>＝交易所實際帳戶餘額（含持倉浮盈）；
         <b>已實現</b>＝平倉落袋的賺賠、<b>未實現</b>＝目前持倉的浮動賺賠；下方<b>進階統計</b>看回撤/夏普/多空拆分。
         持倉中會出現<b>「手動平倉」</b>鈕可立即結算該倉。
       </Plain>
