@@ -368,11 +368,15 @@ class FuturesLiveTrader:
 
     def _go_flat(self, price, bar_time, reason) -> None:
         self._cancel_protective()                   # 平倉前先撤殘留掛單，避免幽靈單
-        amt = self.execu.position_amt()
-        if abs(amt) > 0:
-            self.execu.close(abs(amt), self.dir)
-            pnl = (price - self.entry_price) * amt    # amt 帶號 → 多空 pnl 方向自動正確
-            self.journal.log(reason, price, abs(amt), pnl, ts=bar_time)
+        # 用本地追蹤的 self.qty 而非 position_amt()：testnet API 在 scale_out 後
+        # 有時間差，position_amt() 可能回 0 → close 被跳過 → 交易所倉位殘留 → 幽靈倉疊加。
+        qty = abs(self.qty)
+        if qty == 0:
+            qty = abs(self.execu.position_amt())    # 兜底：self.qty 異常為 0 時才問交易所
+        if qty > 0:
+            self.execu.close(qty, self.dir)
+            pnl = (price - self.entry_price) * qty * self.dir   # dir 帶號 → 多空 pnl 方向正確
+            self.journal.log(reason, price, qty, pnl, ts=bar_time)
             self.cb.record_trade(pnl)                 # Circuit Breaker 記錄本筆損益
             self._dcg.record_trade(self.dir, pnl)     # 方向感知通道護欄記錄（self.dir 此時仍是平倉方向）
             print(f"[{bar_time}] {reason} @ {price:.2f}")
