@@ -150,6 +150,43 @@ def signals_from_prepared(
         se = cross_dn
         sx = cross_up
 
+    elif strategy_name == "fib_ema":
+        score     = prepared.get("fib_score", pd.Series(np.nan, index=idx))
+        rsi       = prepared.get("rsi",        pd.Series(50.0,  index=idx))
+        regime_ok = _regime_mask(prepared, "trend")
+        bull = float(params.get("score_bull", 0.67))
+        bear = float(params.get("score_bear", 0.33))
+        rsi_lo = float(params.get("rsi_lo", 35.0))
+        rsi_hi = float(params.get("rsi_hi", 65.0))
+
+        in_rsi = (rsi >= rsi_lo) & (rsi <= rsi_hi)
+        le = (score >= bull) & in_rsi & regime_ok
+        lx = score <= bear
+        se = (score <= bear) & in_rsi & regime_ok
+        sx = score >= bull
+
+    elif strategy_name == "trend_pullback":
+        close_s = prepared.get("close",   pd.Series(np.nan, index=idx))
+        ema_t   = prepared.get("ema_t",   pd.Series(np.nan, index=idx))
+        ema_f   = prepared.get("ema_f",   pd.Series(np.nan, index=idx))
+        ema_s   = prepared.get("ema_s",   pd.Series(np.nan, index=idx))
+        rsi     = prepared.get("rsi",     pd.Series(50.0,  index=idx))
+        kd_gold = prepared.get("kd_gold", pd.Series(0.0,   index=idx)).fillna(0)
+        kd_dead = prepared.get("kd_dead", pd.Series(0.0,   index=idx)).fillna(0)
+        rsi_lo = float(params.get("rsi_lo", 40.0))
+        rsi_hi = float(params.get("rsi_hi", 60.0))
+
+        above_t = (close_s > ema_t).fillna(False)
+        below_t = (close_s < ema_t).fillna(False)
+        bull_mo = (ema_f > ema_s).fillna(False)
+        bear_mo = (ema_f < ema_s).fillna(False)
+        in_rsi  = (rsi >= rsi_lo) & (rsi <= rsi_hi)
+
+        le = above_t & bull_mo & in_rsi & (kd_gold > 0.5)
+        lx = below_t | bear_mo
+        se = below_t & bear_mo & in_rsi & (kd_dead > 0.5)
+        sx = above_t | bull_mo
+
     else:
         return false.copy(), false.copy(), false.copy(), false.copy()
 

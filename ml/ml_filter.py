@@ -17,43 +17,66 @@ import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
 
-FEATURE_COLS = ["atr", "adx", "rsi", "er", "choppiness",
-                "atr_pct", "vol_z"]
+# 基礎 7 個 + 策略專屬欄位（缺失時 fillna(median) 降級，不影響無此欄位的策略）
+FEATURE_COLS = [
+    # ── 通用市場微結構 ──
+    "atr", "adx", "rsi", "er", "choppiness", "atr_pct", "vol_z",
+    # ── fib_ema 專屬 ──
+    "fib_score",        # Fibonacci EMA 排列強度 0~1
+    # ── trend_pullback 專屬 ──
+    "ema_t_dist",       # (close - EMA200) / close，趨勢偏離程度
+    "stoch_k",          # Stochastic %K
+    "stoch_d",          # Stochastic %D
+    # ── fib_channel 專屬 ──
+    "fib_ch_pos",       # 價格在費波那契通道的相對位置 0~1
+]
 
 
 def extract_features(prepared: pd.DataFrame,
                      events: pd.DatetimeIndex) -> pd.DataFrame:
-    """從 prepared DataFrame 的 events 時間點擷取特徵。"""
+    """從 prepared DataFrame 的 events 時間點擷取特徵。
+
+    策略專屬欄位（fib_score / ema_t_dist / stoch_k / stoch_d / fib_ch_pos）缺失時
+    填 NaN 後由 fillna(median) 補，等同「此策略不使用該特徵」。
+    """
+    if "volume" in prepared.columns:
+        v_mean = prepared["volume"].mean()
+        v_std  = prepared["volume"].std() + 1e-9
+    else:
+        v_mean = v_std = None
+
     rows = []
     for t in events:
         if t not in prepared.index:
             rows.append({c: np.nan for c in FEATURE_COLS})
             continue
         r = prepared.loc[t]
-        close  = float(r.get("close", np.nan))
-        atr    = float(r.get("atr", np.nan))
-        vol    = float(r.get("volume", np.nan))
+        close = float(r.get("close", np.nan))
+        atr   = float(r.get("atr",   np.nan))
+        vol   = float(r.get("volume", np.nan))
 
-        # 成交量 z-score（用整個 prepared 的 volume 計算）
-        if "volume" in prepared.columns:
-            v_mean = prepared["volume"].mean()
-            v_std  = prepared["volume"].std() + 1e-9
-            vol_z  = (vol - v_mean) / v_std
-        else:
-            vol_z = 0.0
+        vol_z = (vol - v_mean) / v_std if v_mean is not None and not np.isnan(vol) else 0.0
+
+        ema_t = float(r.get("ema_t", np.nan))
+        ema_t_dist = (close - ema_t) / close if (close and not np.isnan(ema_t)) else np.nan
 
         rows.append({
             "atr":        atr,
-            "adx":        float(r.get("adx", np.nan)),
-            "rsi":        float(r.get("rsi", np.nan)),
-            "er":         float(r.get("er", np.nan)),
-            "choppiness": float(r.get("choppiness", np.nan)),
-            "atr_pct":    atr / close if close and not np.isnan(atr) else np.nan,
+            "adx":        float(r.get("adx",        np.nan)),
+            "rsi":        float(r.get("rsi",         np.nan)),
+            "er":         float(r.get("er",          np.nan)),
+            "choppiness": float(r.get("choppiness",  np.nan)),
+            "atr_pct":    atr / close if (close and not np.isnan(atr)) else np.nan,
             "vol_z":      vol_z,
+            "fib_score":  float(r.get("fib_score",  np.nan)),
+            "ema_t_dist": ema_t_dist,
+            "stoch_k":    float(r.get("stoch_k",    np.nan)),
+            "stoch_d":    float(r.get("stoch_d",    np.nan)),
+            "fib_ch_pos": float(r.get("fib_ch_pos", np.nan)),
         })
 
     df = pd.DataFrame(rows, index=events)[FEATURE_COLS]
-    df = df.fillna(df.median())   # 缺失值用中位數補
+    df = df.fillna(df.median())
     return df
 
 
