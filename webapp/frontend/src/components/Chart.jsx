@@ -19,9 +19,15 @@ const colorForBot = (c, names, strat) => {
 // mode → 中文標籤（標明回測 vs 真實）
 const MODE_LABEL = { backtest: '回測', live_futures_testnet: '測試網', paper: '模擬' }
 const modeLabel = (mode) => MODE_LABEL[mode] || mode
-// Binance 公開合約 kline WebSocket（不需 API key）
-const BINANCE_WS = (symbol, tf) =>
-  `wss://fapi.binance.com/ws/${symbol.toLowerCase()}@kline_${tf}`
+// Binance 公開合約 kline REST（不需 API key；瀏覽器直連，比 WS 穩定）
+const BINANCE_KLINES = (symbol, tf, limit = 2) =>
+  `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${tf}&limit=${limit}`
+// REST kline 陣列 → lightweight-charts candle 物件（時間用秒）
+const mapKline = (k) => ({
+  time:  Math.floor(k[0] / 1000),
+  open:  parseFloat(k[1]), high: parseFloat(k[2]),
+  low:   parseFloat(k[3]), close: parseFloat(k[4]),
+})
 
 // indicator catalogue — only ST + EMA200 on by default。
 // `ckey` 指向 getChartColors() 的欄位（canvas 線色 + chip 標籤色都用它），主題切換時即時取色。
@@ -155,40 +161,44 @@ export default function Chart() {
       .catch(e => { setErrMsg(e.message); setLoading(false) })
   }, [symbol, tf, refresh]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Binance WS kline（即時更新最後一根 K 棒，不需 API key）────────────
+  // ── Binance REST kline 輪詢（每 1.5 秒更新最後一根 K 棒；WS 在部分環境收不到訊息）──
   useEffect(() => {
     setWsReady(false)
-    const ws = new WebSocket(BINANCE_WS(symbol, tf))
-    ws.onopen = () => setWsReady(true)
-    ws.onclose = () => setWsReady(false)
-    ws.onerror = () => setWsReady(false)
-    ws.onmessage = (e) => {
+    let alive = true
+
+    async function poll() {
       try {
-        const msg = JSON.parse(e.data)
-        const k = msg.k
-        if (!k) return
-        const price = parseFloat(k.c)
-        const time  = Math.floor(k.t / 1000)   // ms → s（lightweight-charts 用秒）
-        setPrevPrice(p => p ?? price)
-        setLivePrice(prev => { setPrevPrice(prev); return price })
-        setLastTs(Math.floor(Date.now() / 1000))
-        const upd = { time,
-          open:  parseFloat(k.o), high: parseFloat(k.h),
-          low:   parseFloat(k.l), close: price }
-        seriesRef.current.candles?.update(upd)
-        // 同步本地快取（其他 effect 讀 dataRef）
-        const candles = dataRef.current.candles
-        if (candles?.length) {
-          const last = candles[candles.length - 1]
-          if (last.time === time) {
-            dataRef.current.candles[candles.length - 1] = upd
-          } else if (time > last.time) {
-            dataRef.current.candles.push(upd)
+        const res = await fetch(BINANCE_KLINES(symbol, tf, 2))
+        const arr = await res.json()
+        if (!alive || !Array.isArray(arr) || !arr.length) return
+        const series = seriesRef.current.candles
+        if (!series) return
+        const cache = dataRef.current?.candles
+        // 只更新 >= 現有最後一根的 K 棒，避免 lightweight-charts update() 對舊資料報錯
+        const lastTime = cache?.length ? cache[cache.length - 1].time : 0
+        let latest = null
+        for (const k of arr) {
+          const candle = mapKline(k)
+          if (candle.time < lastTime) continue
+          series.update(candle)
+          latest = candle
+          if (cache?.length) {
+            const last = cache[cache.length - 1]
+            if (last.time === candle.time) cache[cache.length - 1] = candle
+            else if (candle.time > last.time) cache.push(candle)
           }
         }
-      } catch { /* 忽略解析錯誤 */ }
+        if (latest) {
+          setLivePrice(prev => { setPrevPrice(prev); return latest.close })
+          setLastTs(Math.floor(Date.now() / 1000))
+          setWsReady(true)
+        }
+      } catch { /* 網路異常靜默，下一輪再試 */ }
     }
-    return () => { ws.close() }
+
+    poll()
+    const t = setInterval(poll, 1500)
+    return () => { alive = false; clearInterval(t) }
   }, [symbol, tf]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 交易標記：依 bot 配色 + 進出場形狀 + 聚合筆數，套到 K 線 ──────────────
@@ -282,7 +292,7 @@ export default function Chart() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 4, marginLeft: 8 }}>
           <span style={{ fontSize: 10, color: wsReady ? 'var(--pos)' : 'var(--faint)', fontFamily: 'var(--font-display)', display: 'flex', alignItems: 'center', gap: 4 }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: wsReady ? 'var(--pos)' : 'var(--faint)', display: 'inline-block', animation: wsReady ? 'pulse 1.5s infinite' : 'none' }} />
-            {wsReady ? 'LIVE · WS' : '連線中…'}
+            {wsReady ? 'LIVE' : '連線中…'}
           </span>
           {lastTs && (
             <span style={{ fontSize: 10, color: 'var(--faint)', fontFamily: 'var(--font-display)' }}>

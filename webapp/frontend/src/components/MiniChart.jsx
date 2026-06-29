@@ -44,6 +44,7 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
   const priceLinesRef = useRef([])
   const markersRef    = useRef(null)         // createSeriesMarkers plugin
   const tradesRef     = useRef([])
+  const lastCandleTimeRef = useRef(0)         // 最後一根 K 棒時間（秒），REST 輪詢防舊資料 update
   tradesRef.current = trades || []           // 最新成交供 load() 使用（避免 stale closure）
 
   const theme = useTheme()                    // 'dark'|'light'；切換主題時觸發重繪
@@ -99,6 +100,7 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
         const d = await api.klines(symbol, tf, 60)
         if (cancelled || !d?.candles?.length) return
         candle.setData(d.candles)
+        lastCandleTimeRef.current = d.candles[d.candles.length - 1].time
         for (const s of overlaySeries.splice(0)) chart.removeSeries(s)
         for (const o of (overlays[strategy] || defaultOverlay)) {
           const arr = (d[o.key] || []).filter(p => p && p.value != null)
@@ -166,25 +168,36 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
     }
   }, [symbol, tf, strategy, theme])         // theme 變動時整圖重建以套用新色
 
-  // ── Binance 公開 WS：即時更新最後一根 K 棒（不需 API key）────────────────────
+  // ── Binance 公開 REST 輪詢：即時更新最後一根 K 棒（不需 API key；WS 在部分環境收不到）──
   useEffect(() => {
     if (!symbol) return
-    const url = `wss://fapi.binance.com/ws/${symbol.toLowerCase()}@kline_${tf}`
-    const ws = new WebSocket(url)
-    ws.onmessage = (e) => {
+    let alive = true
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${tf}&limit=2`
+
+    async function poll() {
       try {
-        const k = JSON.parse(e.data)?.k
-        if (!k || !candleRef.current) return
-        candleRef.current.update({
-          time:  Math.floor(k.t / 1000),
-          open:  parseFloat(k.o),
-          high:  parseFloat(k.h),
-          low:   parseFloat(k.l),
-          close: parseFloat(k.c),
-        })
-      } catch { /* 忽略解析錯誤 */ }
+        const res = await fetch(url)
+        const arr = await res.json()
+        if (!alive || !Array.isArray(arr) || !candleRef.current) return
+        const lastTime = lastCandleTimeRef.current || 0
+        for (const k of arr) {
+          const time = Math.floor(k[0] / 1000)
+          if (time < lastTime) continue   // 跳過比現有更舊的 K 棒，避免 update() 報錯
+          candleRef.current.update({
+            time,
+            open:  parseFloat(k[1]),
+            high:  parseFloat(k[2]),
+            low:   parseFloat(k[3]),
+            close: parseFloat(k[4]),
+          })
+          lastCandleTimeRef.current = time
+        }
+      } catch { /* 網路異常靜默，下一輪再試 */ }
     }
-    return () => ws.close()
+
+    poll()
+    const t = setInterval(poll, 2000)
+    return () => { alive = false; clearInterval(t) }
   }, [symbol, tf])
 
   // ── 進場/SL/TP 價格線（持倉或數值變動時即時重畫）──────────────────────────
