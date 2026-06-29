@@ -31,6 +31,18 @@ CREATE TABLE IF NOT EXISTS open_positions (
 )
 """
 
+# OPT-05：組合層淨值表。每台 bot 記自己當前淨值與運行期峰值，供組合級回撤熔斷彙總。
+_CREATE_EQUITY_SQL = """
+CREATE TABLE IF NOT EXISTS portfolio_equity (
+    strategy   TEXT,
+    symbol     TEXT,
+    equity     REAL,
+    peak       REAL,
+    updated_at TEXT,
+    PRIMARY KEY (strategy, symbol)
+)
+"""
+
 
 class PortfolioGuard:
     def __init__(self, db_path: str = "trades.db", database_url: Optional[str] = None):
@@ -73,6 +85,7 @@ class PortfolioGuard:
             with self._conn() as conn:
                 cur = conn.cursor()
                 cur.execute(_CREATE_SQL)
+                cur.execute(_CREATE_EQUITY_SQL)
                 self._migrate_to_composite_key(conn, cur)
         except Exception:
             pass
@@ -194,12 +207,19 @@ class PortfolioGuard:
         new_notional: float,
         max_notional: float,
         own_symbol: Optional[str] = None,
+        symbol_cap: Optional[float] = None,
+        corr_symbols: Optional[list] = None,
     ) -> tuple[bool, str]:
         """開倉前呼叫：檢查同向暴露是否超過上限。
 
         自己（identity = own_strategy + own_symbol）的舊持倉不計入同向暴露；
         own_symbol 未指定時退回只比對 strategy（向後相容）。
         其他 bot（含同策略但不同 symbol）的同向倉位都計入。
+
+        OPT-13 集中度子上限（symbol_cap 為 None 時全部略過，向後相容）：
+          - 預設：同一 own_symbol 的他台同向名目 + new ≤ symbol_cap（三台 SOL 真正被擋）。
+          - corr_symbols 有給且 own_symbol 在其中：把整個相關性桶（如 SOL+ETH）的他台
+            同向名目一起加總比對 symbol_cap（高相關標的視為近乎同一風險源）。
         回傳 (allow, reason)。DB 出錯時放行（fail-open）。
         """
         def _is_own(p) -> bool:
@@ -215,5 +235,87 @@ class PortfolioGuard:
         )
         total = same_dir + new_notional
         if total > max_notional:
+            # 全組合同向暴露超限（先比這個；下方還有集中度子上限）
             return False, (f"跨 bot 同向暴露超過上限：{total:.0f} > {max_notional:.0f} USDT")
+
+        # ── 集中度子上限：per-symbol 或相關性桶 ──
+        if symbol_cap is not None and own_symbol is not None:
+            if corr_symbols and own_symbol in corr_symbols:
+                bucket = set(corr_symbols)
+                label = "+".join(sorted(s.replace("USDT", "") for s in bucket))
+            else:
+                bucket = {own_symbol}
+                label = own_symbol.replace("USDT", "")
+            bucket_dir = sum(
+                p["notional"]
+                for p in positions
+                if not _is_own(p) and p["direction"] == direction and p["symbol"] in bucket
+            )
+            bucket_total = bucket_dir + new_notional
+            if bucket_total > symbol_cap:
+                return False, (f"{label} 同向集中度超過子上限："
+                               f"{bucket_total:.0f} > {symbol_cap:.0f} USDT")
+
+        return True, "ok"
+
+    # ── OPT-05 組合層淨值/回撤 kill-switch ──────────────────────────────────
+
+    def upsert_equity(self, strategy: str, symbol: str, equity: float) -> None:
+        """寫入該 bot 當前淨值，並維護運行期峰值（peak = max(舊 peak, 當前淨值)）。
+
+        on_bar_close 每根呼叫。identity = (strategy, symbol)，與持倉表一致。fail-open。
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        ph = self._ph()
+        sql = f"""
+            INSERT INTO portfolio_equity (strategy, symbol, equity, peak, updated_at)
+            VALUES ({ph},{ph},{ph},{ph},{ph})
+            ON CONFLICT(strategy, symbol) DO UPDATE SET
+                equity=excluded.equity,
+                peak=CASE WHEN excluded.equity > portfolio_equity.peak
+                          THEN excluded.equity ELSE portfolio_equity.peak END,
+                updated_at=excluded.updated_at
+        """
+        try:
+            with self._conn() as conn:
+                cur = conn.cursor()
+                cur.execute(sql, (strategy, symbol, equity, equity, now))
+        except Exception:
+            pass
+
+    def portfolio_drawdown(self) -> tuple[float, float, float]:
+        """回傳 (組合現值總和, 組合峰值總和, 回撤比例)。
+
+        回撤 = (現值總和 − 峰值總和) / 峰值總和（≤0）。各 bot 峰值在不同時點 → 峰值總和
+        略高於真實同時峰值，使回撤偏保守（早一點觸發），對 kill-switch 是安全方向。
+        無資料 → (0, 0, 0)。
+        """
+        try:
+            with self._conn() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT equity, peak FROM portfolio_equity")
+                rows = cur.fetchall()
+        except Exception:
+            return 0.0, 0.0, 0.0
+        if not rows:
+            return 0.0, 0.0, 0.0
+        eq = sum(float(r[0]) for r in rows)
+        peak = sum(float(r[1]) for r in rows)
+        dd = (eq - peak) / peak if peak > 0 else 0.0
+        return eq, peak, dd
+
+    def check_portfolio_drawdown(self, max_dd: float) -> tuple[bool, str]:
+        """開倉前呼叫：組合層回撤超過 max_dd 就拒絕新倉（只擋進場，不碰既有倉）。
+
+        max_dd<=0 → 停用（一律放行）。無資料/DB 出錯 → 放行（fail-open）。
+        """
+        if max_dd <= 0:
+            return True, "ok"
+        eq, peak, dd = self.portfolio_drawdown()
+        if peak <= 0:
+            return True, "ok"
+        if dd <= -max_dd:
+            return False, (f"組合層回撤熔斷：總淨值 {eq:.0f} 自峰值 {peak:.0f} "
+                           f"回落 {abs(dd) * 100:.1f}% ≥ {max_dd * 100:.0f}%，暫停新倉")
         return True, "ok"

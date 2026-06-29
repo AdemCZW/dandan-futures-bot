@@ -148,6 +148,103 @@ class TestSameStrategyDifferentSymbol:
         assert ok is True, "自己（strategy+symbol 相同）的舊倉不該計入"
 
 
+class TestConcentrationSubCap:
+    """OPT-13：per-symbol / 相關性桶同向子上限，讓三台 SOL 集中度真正被擋。"""
+
+    def test_per_symbol_cap_blocks_third_same_symbol_long(self, guard):
+        guard.upsert_position("bot_a", "SOLUSDT", 1, 40.0, 100.0)   # 4000
+        guard.upsert_position("bot_b", "SOLUSDT", 1, 40.0, 100.0)   # 4000
+        ok, reason = guard.check_exposure(
+            "bot_c", direction=1, new_notional=4000.0, max_notional=10 ** 9,
+            own_symbol="SOLUSDT", symbol_cap=10000.0)               # 8000+4000>10000
+        assert ok is False and "SOL" in reason.upper()
+
+    def test_per_symbol_cap_allows_opposite_direction(self, guard):
+        guard.upsert_position("bot_a", "SOLUSDT", 1, 40.0, 100.0)
+        guard.upsert_position("bot_b", "SOLUSDT", 1, 40.0, 100.0)
+        ok, _ = guard.check_exposure(
+            "bot_c", direction=-1, new_notional=4000.0, max_notional=10 ** 9,
+            own_symbol="SOLUSDT", symbol_cap=10000.0)               # 空單不與多單疊加
+        assert ok is True
+
+    def test_corr_bucket_aggregates_sol_and_eth(self, guard):
+        guard.upsert_position("bot_a", "SOLUSDT", 1, 60.0, 100.0)   # SOL 多 6000
+        ok, reason = guard.check_exposure(
+            "bot_eth", direction=1, new_notional=5000.0, max_notional=10 ** 9,
+            own_symbol="ETHUSDT", symbol_cap=10000.0,
+            corr_symbols=["SOLUSDT", "ETHUSDT"])                    # 6000+5000>10000
+        assert ok is False
+
+    def test_corr_bucket_does_not_aggregate_unrelated_symbol(self, guard):
+        guard.upsert_position("bot_a", "BTCUSDT", 1, 0.1, 60000.0)  # BTC 多 6000（不在桶內）
+        ok, _ = guard.check_exposure(
+            "bot_eth", direction=1, new_notional=5000.0, max_notional=10 ** 9,
+            own_symbol="ETHUSDT", symbol_cap=10000.0,
+            corr_symbols=["SOLUSDT", "ETHUSDT"])                    # BTC 不計入 → 5000<10000
+        assert ok is True
+
+    def test_symbol_cap_none_is_backward_compatible(self, guard):
+        guard.upsert_position("bot_a", "SOLUSDT", 1, 40.0, 100.0)
+        ok, _ = guard.check_exposure(
+            "bot_c", direction=1, new_notional=4000.0, max_notional=10 ** 9,
+            own_symbol="SOLUSDT")                                   # 不傳 cap → 只看全組合
+        assert ok is True
+
+    def test_global_cap_still_enforced_alongside_symbol_cap(self, guard):
+        """全組合 max_notional 與 per-symbol cap 同時生效，任一超過即擋。"""
+        guard.upsert_position("bot_a", "SOLUSDT", 1, 40.0, 100.0)   # 4000
+        ok, _ = guard.check_exposure(
+            "bot_c", direction=1, new_notional=2000.0, max_notional=5000.0,
+            own_symbol="SOLUSDT", symbol_cap=10000.0)              # symbol ok 但全組合 4000+2000>5000
+        assert ok is False
+
+
+class TestPortfolioKillSwitch:
+    """OPT-05：組合層淨值/回撤 kill-switch，補上唯一缺的組合級熔斷。"""
+
+    def test_upsert_equity_tracks_peak(self, guard):
+        guard.upsert_equity("bot_a", "SOLUSDT", 5000.0)
+        guard.upsert_equity("bot_a", "SOLUSDT", 4000.0)   # 跌 → peak 仍 5000
+        eq, peak, dd = guard.portfolio_drawdown()
+        assert eq == pytest.approx(4000.0)
+        assert peak == pytest.approx(5000.0)
+        assert dd == pytest.approx(-0.20)
+
+    def test_portfolio_drawdown_aggregates_across_bots(self, guard):
+        guard.upsert_equity("bot_a", "SOLUSDT", 5000.0)   # peak 5000
+        guard.upsert_equity("bot_a", "SOLUSDT", 4000.0)   # 現值 4000
+        guard.upsert_equity("bot_b", "ETHUSDT", 5000.0)   # peak 5000
+        guard.upsert_equity("bot_b", "ETHUSDT", 4500.0)   # 現值 4500
+        eq, peak, dd = guard.portfolio_drawdown()
+        assert eq == pytest.approx(8500.0)
+        assert peak == pytest.approx(10000.0)
+        assert dd == pytest.approx(-0.15)
+
+    def test_check_blocks_when_drawdown_exceeds(self, guard):
+        guard.upsert_equity("bot_a", "SOLUSDT", 5000.0)
+        guard.upsert_equity("bot_a", "SOLUSDT", 4200.0)   # dd -0.16
+        ok, reason = guard.check_portfolio_drawdown(max_dd=0.15)
+        assert ok is False and "回撤" in reason
+
+    def test_check_allows_when_drawdown_within_limit(self, guard):
+        guard.upsert_equity("bot_a", "SOLUSDT", 5000.0)
+        guard.upsert_equity("bot_a", "SOLUSDT", 4800.0)   # dd -0.04
+        ok, _ = guard.check_portfolio_drawdown(max_dd=0.15)
+        assert ok is True
+
+    def test_check_allows_when_no_equity_data(self, guard):
+        """無資料（剛啟動/DB 空）→ 放行（fail-open，不阻斷交易）。"""
+        ok, _ = guard.check_portfolio_drawdown(max_dd=0.15)
+        assert ok is True
+
+    def test_check_disabled_when_max_dd_zero(self, guard):
+        """max_dd=0 → 停用組合熔斷（一律放行）。"""
+        guard.upsert_equity("bot_a", "SOLUSDT", 5000.0)
+        guard.upsert_equity("bot_a", "SOLUSDT", 1000.0)   # dd -0.80
+        ok, _ = guard.check_portfolio_drawdown(max_dd=0.0)
+        assert ok is True
+
+
 class TestLegacySchemaMigration:
     """舊版單一主鍵 (strategy) 的表，初始化時應遷移成 (strategy, symbol) 並保留資料。"""
 

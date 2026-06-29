@@ -3,6 +3,7 @@
 只測 core/risk_officer.py 的對外行為，不修改任何 source。
 所有數值用確定性資料，方便明確 assert。
 """
+import math
 import os
 import sys
 
@@ -243,42 +244,62 @@ class TestKellyFraction:
 
     def test_all_losses_returns_zero(self):
         """Kelly 公式算出負值時夾在 0，不建議反押。"""
-        pnl = [-50.0] * 20
-        result = kelly_fraction(pnl, min_trades=20)
+        pnl = [-50.0] * 30
+        result = kelly_fraction(pnl, min_trades=30)
         assert result == 0.0
 
-    def test_all_wins_capped_at_max(self):
-        """連贏算出 Kelly=1；half-Kelly=0.5；最終夾在 0.5（保守上限）。"""
-        pnl = [100.0] * 20
-        result = kelly_fraction(pnl, min_trades=20)
-        assert result == pytest.approx(0.5)
+    def test_all_wins_returns_none_not_full_kelly(self):
+        """OPT-15：全勝（無虧損樣本）無法估盈虧比 → 回 None（保守退回 budget），不再給滿格 1.0。"""
+        pnl = [100.0] * 30
+        assert kelly_fraction(pnl, min_trades=30) is None
 
-    def test_sixty_win_one_to_one_ratio(self):
-        """60% 勝率，盈虧比 1:1 → Kelly = p - q/b = 0.6 - 0.4 = 0.2 → half = 0.1"""
-        wins  = [100.0] * 12
-        losses = [-100.0] * 8
-        result = kelly_fraction(wins + losses, min_trades=20)
-        assert result == pytest.approx(0.10, abs=1e-9)
+    def test_default_min_trades_raised_to_30(self):
+        """OPT-15：min_trades 預設由 20 提到 30（20 筆樣本噪音過大）。"""
+        wins = [200.0] * 15
+        losses = [-100.0] * 10        # 25 筆 < 30 → None
+        assert kelly_fraction(wins + losses) is None
+        # 補到 30 筆才算得出
+        assert kelly_fraction(wins + losses + [200.0] * 3 + [-100.0] * 2) is not None
 
-    def test_sixty_win_two_to_one_ratio(self):
-        """60% 勝率，盈虧比 2:1 → Kelly = 0.6 - 0.4/2 = 0.4 → half = 0.2"""
-        wins  = [200.0] * 12
-        losses = [-100.0] * 8
-        result = kelly_fraction(wins + losses, min_trades=20)
-        assert result == pytest.approx(0.20, abs=1e-9)
+    def test_uses_wilson_lower_bound_on_win_rate(self):
+        """OPT-15：勝率取 Wilson 信賴下界（z=1），小樣本不高估 → Kelly 比點估計保守。"""
+        wins = [200.0] * 18
+        losses = [-100.0] * 12        # n=30, p̂=0.6, b=2
+        result = kelly_fraction(wins + losses, min_trades=30, z=1.0)
+        # 獨立用 Wilson 公式算期望值
+        n, p_hat, z, b = 30, 0.6, 1.0, 2.0
+        denom = 1 + z * z / n
+        centre = p_hat + z * z / (2 * n)
+        margin = z * math.sqrt(p_hat * (1 - p_hat) / n + z * z / (4 * n * n))
+        p_lb = (centre - margin) / denom
+        expected = max(0.0, (p_lb - (1 - p_lb) / b) / 2.0)   # half-Kelly
+        assert result == pytest.approx(expected, abs=1e-9)
+        point_est = (0.6 - 0.4 / b) / 2.0                    # = 0.20，點估計
+        assert result < point_est                            # 信賴下界更保守
+
+    def test_zero_when_lower_bound_edge_negative(self):
+        """60% 勝率配 1:1，在較保守下界(z=2)下邊際轉負 → Kelly 夾 0（不靠噪音下注）。"""
+        wins = [100.0] * 18
+        losses = [-100.0] * 12        # n=30, b=1, p̂=0.6
+        assert kelly_fraction(wins + losses, min_trades=30, z=2.0) == 0.0
+        # z=1 時邊際仍微正，但遠小於點估計 half-Kelly 0.10
+        assert kelly_fraction(wins + losses, min_trades=30, z=1.0) < 0.02
 
     def test_half_kelly_false_returns_full_kelly(self):
-        """half_kelly=False 時回傳完整 Kelly（仍夾在 [0, 0.5]）。"""
-        wins  = [200.0] * 12
-        losses = [-100.0] * 8
-        result = kelly_fraction(wins + losses, min_trades=20, half_kelly=False)
-        assert result == pytest.approx(0.40, abs=1e-9)
+        """half_kelly=False 回傳完整 Kelly（仍用 Wilson 下界、夾 [0, max_kelly]）。"""
+        wins = [200.0] * 18
+        losses = [-100.0] * 12
+        full = kelly_fraction(wins + losses, min_trades=30, half_kelly=False, z=1.0)
+        half = kelly_fraction(wins + losses, min_trades=30, half_kelly=True, z=1.0)
+        assert full == pytest.approx(half * 2.0, abs=1e-9)
+        assert full < 0.40            # 點估計 full 為 0.40，下界更低
 
-    def test_custom_min_trades(self):
-        """min_trades=5 → 5 筆就夠了。"""
-        pnl = [100.0] * 5
-        result = kelly_fraction(pnl, min_trades=5)
-        assert result is not None
+    def test_max_kelly_quarter_cap_for_leveraged(self):
+        """OPT-15：可傳更緊的 max_kelly（如槓桿 bot 用 quarter-Kelly 0.25）夾住。"""
+        wins = [500.0] * 27
+        losses = [-50.0] * 3          # 高勝率高盈虧比 → 點估計很大
+        capped = kelly_fraction(wins + losses, min_trades=30, max_kelly=0.25)
+        assert capped <= 0.25 + 1e-9
 
     def test_position_size_uses_kelly_pct(self):
         """kelly_pct 傳入時，position_size 以 kelly_pct 取代 cfg.max_position_pct。"""
@@ -307,3 +328,45 @@ class TestKellyFraction:
 
         assert dec_kelly.allow is True
         assert dec_kelly.quantity < dec_default.quantity
+
+
+class TestLiquidationGuard:
+    """OPT-18：高槓桿下若 ATR 停損距離 ≥ 清算距離，停損會失效→先被強平。須擋下。"""
+
+    def _officer(self, leverage):
+        cfg = Config()
+        cfg.futures_leverage = leverage
+        cfg.atr_mult_sl = 2.0
+        cfg.max_daily_loss_pct = 1.0       # 關單日熔斷免干擾
+        cfg.max_peak_drawdown_pct = 0.0    # 關峰值熔斷
+        return RiskOfficer(cfg)
+
+    def test_blocks_entry_when_atr_stop_beyond_liquidation(self):
+        """10x（清算距離≈9.5%），ATR 停損 2×ATR=10 → 10% > 9.5% → 拒單。"""
+        officer = self._officer(10)
+        dec = officer.check_entry(10_000.0, 100.0, "2026-01-01", direction=1, atr=5.0)
+        assert dec.allow is False and "清算" in dec.reason
+
+    def test_allows_entry_when_atr_stop_within_liquidation(self):
+        """10x，正常 ATR：2×1=2 → 2% < 9.5% → 放行。"""
+        officer = self._officer(10)
+        dec = officer.check_entry(10_000.0, 100.0, "2026-01-01", direction=1, atr=1.0)
+        assert dec.allow is True
+
+    def test_guard_inactive_at_1x_leverage(self):
+        """1x：清算距離≈99.5%，任何合理 ATR 停損都在內 → 不受守衛影響。"""
+        officer = self._officer(1)
+        dec = officer.check_entry(10_000.0, 100.0, "2026-01-01", direction=1, atr=5.0)
+        assert dec.allow is True
+
+    def test_guard_can_be_disabled(self):
+        """liq_guard_enabled=False → 即使停損超過清算距離也放行（明確關閉）。"""
+        cfg = Config()
+        cfg.futures_leverage = 10
+        cfg.atr_mult_sl = 2.0
+        cfg.liq_guard_enabled = False
+        cfg.max_daily_loss_pct = 1.0
+        cfg.max_peak_drawdown_pct = 0.0
+        officer = RiskOfficer(cfg)
+        dec = officer.check_entry(10_000.0, 100.0, "2026-01-01", direction=1, atr=5.0)
+        assert dec.allow is True

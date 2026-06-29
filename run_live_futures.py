@@ -97,6 +97,16 @@ class FuturesLiveTrader:
         from core.portfolio_guard import PortfolioGuard
         self._guard = PortfolioGuard()
         self._guard_max = float(os.getenv("PORTFOLIO_MAX_NOTIONAL", "15000"))
+        # OPT-13 集中度子上限（預設關＝None，與舊行為相容；Railway 設 env 才生效）：
+        #   PORTFOLIO_SYMBOL_MAX_NOTIONAL：同 symbol（或相關性桶）同向名目上限
+        #   PORTFOLIO_CORR_SYMBOLS：逗號分隔的相關性桶，如 "SOLUSDT,ETHUSDT"（高相關視為同一風險源）
+        _sym_cap = os.getenv("PORTFOLIO_SYMBOL_MAX_NOTIONAL", "").strip()
+        self._guard_symbol_cap = float(_sym_cap) if _sym_cap else None
+        _corr = os.getenv("PORTFOLIO_CORR_SYMBOLS", "").strip()
+        self._guard_corr_symbols = [s.strip().upper() for s in _corr.split(",") if s.strip()] or None
+        # OPT-05 組合層回撤 kill-switch（預設 0＝關，與舊行為相容）：四台合計淨值自峰值
+        # 回落超過此比例 → 暫停所有 bot 開新倉（只擋進場、不碰既有倉），補單台熔斷看不到的組合風險。
+        self._guard_max_dd = float(os.getenv("PORTFOLIO_MAX_DRAWDOWN", "0") or "0")
         # ML Filter：若模型檔存在則載入；不存在則靜默跳過（不影響原有邏輯）
         self._ml_model    = None
         self._ml_threshold = ml_threshold
@@ -447,7 +457,10 @@ class FuturesLiveTrader:
             rows = read_trades_db(limit=200, strategy=self.cfg.strategy, symbol=self.cfg.symbol)
             pnl = [r["pnl"] for r in rows
                    if r.get("pnl") is not None and str(r.get("side", "")).startswith("exit")]
-            return kelly_fraction(pnl, min_trades=20)
+            # OPT-15：min_trades 提到 30（20 筆噪音過大）；加槓桿 bot 用 quarter-Kelly(0.25) 上限。
+            lev = max(int(getattr(self.cfg, "futures_leverage", 1)), 1)
+            max_k = 0.25 if lev > 1 else 0.5
+            return kelly_fraction(pnl, min_trades=30, max_kelly=max_k)
         except Exception:
             return None
 
@@ -457,11 +470,18 @@ class FuturesLiveTrader:
         kelly_pct = self._kelly_pct()
         decision = self.risk.check_entry(bal, price, bar_time, direction=direction, atr=atr,
                                          kelly_pct=kelly_pct)
+        if decision.allow and self._guard_max_dd > 0:
+            # OPT-05：組合層回撤熔斷（先於暴露檢查；只擋新倉）
+            pf_ok, pf_reason = self._guard.check_portfolio_drawdown(self._guard_max_dd)
+            if not pf_ok:
+                decision = type(decision)(False, 0.0, pf_reason)
         if decision.allow:
             notional = decision.quantity * price
             ok, reason = self._guard.check_exposure(
                 self.cfg.strategy, direction, notional, self._guard_max,
-                own_symbol=self.cfg.symbol)
+                own_symbol=self.cfg.symbol,
+                symbol_cap=self._guard_symbol_cap,
+                corr_symbols=self._guard_corr_symbols)
             if not ok:
                 decision = type(decision)(False, 0.0, reason)
         kelly_tag = f" Kelly={kelly_pct:.1%}" if kelly_pct is not None else ""
@@ -651,6 +671,10 @@ class FuturesLiveTrader:
             equity = round(self.execu.balance(self.cfg.quote_asset), 2)
         except Exception:
             equity = None
+
+        # OPT-05：把本台當前淨值寫進共用 DB，供組合層回撤熔斷彙總（fail-open，啟用與否都寫不傷）
+        if equity is not None:
+            self._guard.upsert_equity(self.cfg.strategy, self.cfg.symbol, equity)
 
         # 讀回上次持久化（取 last_balance 比較；prev 也保住未在此函式更新的欄位語意）
         prev = BotState.load(STATE_PATH)

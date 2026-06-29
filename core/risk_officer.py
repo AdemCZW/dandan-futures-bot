@@ -3,21 +3,42 @@
 策略只說「想不想進場」，能不能進、進多少、何時被迫出場，由這裡決定。
 這層是把「漂亮回測」和「不會一夜歸零」分開的關鍵。
 """
+import math
 from dataclasses import dataclass
 from typing import List, Optional
 
 
+def _wilson_lower_bound(p_hat: float, n: int, z: float = 1.0) -> float:
+    """二項比例的 Wilson 信賴區間下界（單邊）。
+
+    小樣本時 p_hat（觀察勝率）噪音極大，直接拿去算 Kelly 會系統性高估倉位。
+    用下界當「保守勝率」：樣本越少、下界離 p_hat 越遠（越保守）；樣本越多越接近 p_hat。
+    z=1.0 約一個標準誤；z 越大越保守。
+    """
+    if n <= 0:
+        return 0.0
+    denom = 1.0 + z * z / n
+    centre = p_hat + z * z / (2.0 * n)
+    margin = z * math.sqrt(p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n))
+    return (centre - margin) / denom
+
+
 def kelly_fraction(
     pnl_list: List[float],
-    min_trades: int = 20,
+    min_trades: int = 30,
     half_kelly: bool = True,
     max_kelly: float = 0.5,
+    z: float = 1.0,
 ) -> Optional[float]:
-    """Kelly Criterion 最佳倉位比例。
+    """Kelly Criterion 最佳倉位比例（小樣本保守版，OPT-15）。
 
     f* = p - q/b，其中 p=勝率, q=1-p, b=平均盈/虧比。
-    half_kelly=True（預設）回傳 f*/2 以降低波動。
-    回傳值夾在 [0, max_kelly]；樣本不足時回傳 None（保守退回預設）。
+    - 勝率 p 取 Wilson 信賴下界（z 個標準誤），小樣本不高估。
+    - half_kelly=True（預設）回傳 f*/2 降低波動。
+    - min_trades 預設 30（20 筆的 p、b 標準誤過大）。
+    - 無虧損樣本（losses 為空）→ 回 None（無法估盈虧比，保守退回 budget），
+      不再給滿格 f=1.0（原本的脆弱分支）。
+    回傳值夾在 [0, max_kelly]；樣本不足或無法估計時回 None。
     """
     if len(pnl_list) < min_trades:
         return None
@@ -27,17 +48,15 @@ def kelly_fraction(
 
     if not wins:
         return 0.0
+    if not losses:
+        return None                       # 無虧損樣本 → 估不出盈虧比 → 保守退回 budget
 
-    p = len(wins) / len(pnl_list)
+    p = _wilson_lower_bound(len(wins) / len(pnl_list), len(pnl_list), z)
     q = 1.0 - p
     avg_win  = sum(wins) / len(wins)
-    avg_loss = abs(sum(losses) / len(losses)) if losses else 0.0
-
-    if avg_loss == 0.0:
-        f = 1.0
-    else:
-        b = avg_win / avg_loss
-        f = p - q / b
+    avg_loss = abs(sum(losses) / len(losses))
+    b = avg_win / avg_loss
+    f = p - q / b
 
     if half_kelly:
         f /= 2.0
@@ -132,6 +151,19 @@ class RiskOfficer:
         # 做多停損在下方、做空停損在上方；距離由 ATR 或固定百分比決定
         dist = self._stop_distance(price, atr)
         stop_price = price - dist if direction == 1 else price + dist
+
+        # 清算距離守衛（OPT-18）：停損距離佔比 ≥ 清算距離 → 停損會在強平後才觸發、形同失效。
+        # 拒單（這種行情該降槓桿或不進，而非帶著無效停損進場）。1x 時清算距離≈99.5%，等同不生效。
+        if getattr(self.cfg, "liq_guard_enabled", True) and price > 0:
+            lev = max(int(getattr(self.cfg, "futures_leverage", 1)), 1)
+            maint = float(getattr(self.cfg, "maint_margin_rate", 0.005))
+            liq_dist_pct = max(1.0 / lev - maint, 0.0)
+            if lev > 1 and (dist / price) >= liq_dist_pct:
+                return RiskDecision(
+                    False, 0.0,
+                    f"ATR 停損距離 {dist / price * 100:.1f}% ≥ 清算距離 {liq_dist_pct * 100:.1f}%"
+                    f"（{lev}x），停損將失效，拒單（建議降槓桿或等波動收斂）")
+
         qty = self.position_size(equity, price, stop_price, kelly_pct=kelly_pct)
         if qty <= 0:
             return RiskDecision(False, 0.0, "風控算出倉位為 0")

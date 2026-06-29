@@ -47,6 +47,10 @@ class Config:
     futures_api_key: str = field(default_factory=lambda: os.getenv("BINANCE_FUTURES_TESTNET_API_KEY", ""))
     futures_api_secret: str = field(default_factory=lambda: os.getenv("BINANCE_FUTURES_TESTNET_API_SECRET", ""))
     futures_leverage: int = 1         # 預設不放大槓桿，降低爆倉風險
+    # OPT-18 清算距離守衛：ATR 停損距離 ≥ 清算距離(≈1/槓桿−維持保證金率) 時拒單
+    # （否則停損比清算還遠 → 先被強平、停損形同失效）。1x 時清算距離≈99.5%，等同不生效。
+    maint_margin_rate: float = 0.005  # 維持保證金率估值（幣安主流合約約 0.4–0.5%）
+    liq_guard_enabled: bool = True    # 清算距離守衛總開關
 
     # 實盤輪詢間隔（秒）。5m K 線就每 ~30s 輪詢一次足夠
     poll_seconds: int = 30
