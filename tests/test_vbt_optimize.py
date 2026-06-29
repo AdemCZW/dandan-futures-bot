@@ -116,9 +116,9 @@ class TestVbtSharpe:
         assert isinstance(result, float)
 
     def test_returns_neg_inf_when_too_few_trades(self):
-        """entry_zone ≈ 0 → almost never enters → returns -inf."""
+        """entry_zone=0 → pos<0 is never true → 0 signals → returns -inf."""
         df = make_df(500)
-        result = vbt_sharpe(df, "fib_channel", entry_zone=0.001, exit_zone=0.999)
+        result = vbt_sharpe(df, "fib_channel", entry_zone=0.0, exit_zone=1.0)
         assert result == float("-inf")
 
     def test_returns_finite_value_for_normal_params(self):

@@ -489,6 +489,18 @@ h3::before { display: none; }
   100% { background: transparent; }
 }
 
+/* 即時價格閃色（漲綠跌紅）*/
+@keyframes price-up {
+  0%   { color: var(--pos); }
+  100% { color: var(--text); }
+}
+@keyframes price-down {
+  0%   { color: var(--neg); }
+  100% { color: var(--text); }
+}
+.price-flash-up   { animation: price-up   0.6s ease-out forwards; }
+.price-flash-down { animation: price-down 0.6s ease-out forwards; }
+
 /* 卡片帶入（首次進場輕微滑入；prefers-reduced-motion 關閉）*/
 @keyframes slide-in {
   from { opacity: 0; transform: translateY(12px); }

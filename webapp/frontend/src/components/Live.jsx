@@ -152,43 +152,23 @@ const winPctOf = (trades, wins) => (trades > 0 ? Math.round((wins / trades) * 10
 
 // ── BotCard ─────────────────────────────────────────────────────────────────
 
-function BotCard({ data, num, color }) {
+function BotCard({ data, num, color, livePrice: propLivePrice }) {
   // 手動平倉狀態（hooks 必須無條件在最上方，故置於 !data 早退之前）
   const [closing, setClosing] = useState(false)
   const [closeMsg, setCloseMsg] = useState(null)
 
-  // 讓 age 顯示每秒遞增（REST poll 每 5s 一次，中間不能凍在同一個數字）
-  const baseAgeRef  = useRef(data?.age_seconds ?? 0)
-  const baseTsRef   = useRef(Date.now())
-  const [displayAge, setDisplayAge] = useState(data?.age_seconds ?? 0)
+  // 即時價格方向追蹤：漲 → 綠閃、跌 → 紅閃
+  const prevPriceRef            = useRef(null)
+  const [priceDir, setPriceDir] = useState(0)   // 1=漲 -1=跌 0=持平
+  const [flashKey, setFlashKey] = useState(0)
   useEffect(() => {
-    if (data?.age_seconds == null) return
-    baseAgeRef.current = data.age_seconds
-    baseTsRef.current  = Date.now()
-    setDisplayAge(data.age_seconds)
-  }, [data?.age_seconds])
-  useEffect(() => {
-    const t = setInterval(() => {
-      setDisplayAge(Math.round(baseAgeRef.current + (Date.now() - baseTsRef.current) / 1000))
-    }, 1000)
-    return () => clearInterval(t)
-  }, [])
-
-  // ── Binance mark price WS：即時現價 → 即時浮盈浮虧 ─────────────────────────
-  // 訂閱 @markPrice@1s（~1 秒一次）；fallback 到 REST data.price。
-  const [livePrice, setLivePrice] = useState(null)
-  useEffect(() => {
-    if (!data?.symbol) return
-    const ws = new WebSocket(`wss://fapi.binance.com/ws/${data.symbol.toLowerCase()}@markPrice@1s`)
-    ws.onmessage = (e) => {
-      try {
-        const p = parseFloat(JSON.parse(e.data).p)
-        if (p > 0) setLivePrice(p)
-      } catch {}
+    if (propLivePrice == null) return
+    if (prevPriceRef.current != null && propLivePrice !== prevPriceRef.current) {
+      setPriceDir(propLivePrice > prevPriceRef.current ? 1 : -1)
+      setFlashKey(k => k + 1)
     }
-    ws.onclose = ws.onerror = () => {}
-    return () => ws.close()
-  }, [data?.symbol])
+    prevPriceRef.current = propLivePrice
+  }, [propLivePrice])
 
   async function handleClose() {
     const sym = String(data?.symbol || '').replace('USDT', '')
@@ -219,8 +199,8 @@ function BotCard({ data, num, color }) {
   const dir      = data.direction ?? 0
   const posBase  = data.base ?? 0
 
-  // 即時現價：WS mark price 優先，REST 兜底
-  const price = livePrice ?? data.price ?? null
+  // 即時現價：WS aggTrade 優先，REST 兜底
+  const price = propLivePrice ?? data.price ?? null
 
   // 即時浮盈浮虧：有持倉 + 有即時現價 + 有進場價 → 前端即時計算；否則用 REST 快照
   const unrealLive = data.in_position && price && data.entry_price && posBase && dir !== 0
@@ -257,23 +237,40 @@ function BotCard({ data, num, color }) {
     }}>
 
       {/* ── 標頭 ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, color }}>
-          Bot #{num}
-        </span>
-        <span style={{ fontFamily: 'var(--font-display)', fontSize: 12, fontWeight: 600 }}>
-          {String(data.strategy || '').toUpperCase()}
-        </span>
-        <span className="muted" style={{ fontSize: 11 }}>{data.symbol} · {data.interval}</span>
-        <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{
-            width: 6, height: 6, borderRadius: '50%',
-            background: fresh ? 'var(--pos)' : 'var(--faint)', display: 'inline-block',
-          }} />
-          <span className="muted" style={{ fontSize: 10 }}>
-            {fresh ? `${displayAge}s 前` : '離線'}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {/* 第一列：名稱 / 策略 / 幣對 + 在線點 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, color }}>
+            Bot #{num}
           </span>
-        </span>
+          <span style={{ fontFamily: 'var(--font-display)', fontSize: 12, fontWeight: 600 }}>
+            {String(data.strategy || '').toUpperCase()}
+          </span>
+          <span className="muted" style={{ fontSize: 11 }}>{data.symbol} · {data.interval}</span>
+          <span
+            style={{ marginLeft: 'auto', width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+              background: fresh ? 'var(--pos)' : 'var(--faint)', display: 'inline-block' }}
+            title={fresh ? '在線' : '離線'}
+          />
+        </div>
+        {/* 第二列：即時現價（隨行情跳動，漲綠跌紅）*/}
+        {price != null && (
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
+            <span
+              key={flashKey}
+              className={priceDir > 0 ? 'price-flash-up' : priceDir < 0 ? 'price-flash-down' : ''}
+              style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 700, letterSpacing: '-0.5px' }}
+            >
+              {priceDir !== 0 && (
+                <span style={{ fontSize: 11, marginRight: 3, opacity: 0.8 }}>
+                  {priceDir > 0 ? '▲' : '▼'}
+                </span>
+              )}
+              ${fmt(price)}
+            </span>
+            <span className="muted" style={{ fontSize: 10 }}>{data.symbol?.replace('USDT', '')}/USDT</span>
+          </div>
+        )}
       </div>
 
       {/* ── 連續同方向虧損警示（通道方向可能已反轉）── */}
@@ -539,11 +536,12 @@ function BotCard({ data, num, color }) {
 // ── Live ─────────────────────────────────────────────────────────────────────
 
 export default function Live() {
-  const [d,    setD]    = useState(null)
-  const [e2,   setE2]   = useState(null)
-  const [e3,   setE3]   = useState(null)
-  const [e4,   setE4]   = useState(null)
-  const [tick, setTick] = useState(0)
+  const [d,          setD]         = useState(null)
+  const [e2,         setE2]        = useState(null)
+  const [e3,         setE3]        = useState(null)
+  const [e4,         setE4]        = useState(null)
+  const [tick,       setTick]      = useState(0)
+  const [livePrices, setLivePrices]= useState({})   // { SOLUSDT: 168.42, ETHUSDT: 3245.1 }
   const timer = useRef(null)
 
   async function load() {
@@ -558,6 +556,31 @@ export default function Live() {
     timer.current = setInterval(() => { load(); setTick(t => t + 1) }, 5000)
     return () => clearInterval(timer.current)
   }, [])
+
+  // ── 每個不同 symbol 開一條 aggTrade WS，隨每筆成交即時更新現價 ──────────────
+  const symbolKey = [d, e2, e3, e4]
+    .filter(Boolean).map(b => b.symbol).filter(Boolean)
+    .sort().join(',')
+
+  useEffect(() => {
+    if (!symbolKey) return
+    const symbols  = symbolKey.split(',')
+    const sockets  = {}
+    for (const sym of symbols) {
+      const ws = new WebSocket(
+        `wss://fstream.binance.com/ws/${sym.toLowerCase()}@aggTrade`
+      )
+      ws.onmessage = ev => {
+        try {
+          const p = parseFloat(JSON.parse(ev.data).p)
+          if (p > 0) setLivePrices(prev => ({ ...prev, [sym]: p }))
+        } catch {}
+      }
+      ws.onerror = ws.onclose = () => {}
+      sockets[sym] = ws
+    }
+    return () => Object.values(sockets).forEach(ws => ws.close())
+  }, [symbolKey])
 
   const anyFresh = [d, e2, e3, e4].some(x => x?.age_seconds != null && x.age_seconds < 180)
 
@@ -587,11 +610,11 @@ export default function Live() {
 
       {/* ── 機器人卡片並排（桌面 2 欄、手機 1 欄）── */}
       <div className="bots-grid">
-        <BotCard data={d}  num={1} color={BOT_COLORS[0]} />
-        <BotCard data={e2} num={2} color={BOT_COLORS[1]} />
-        <BotCard data={e3} num={3} color={BOT_COLORS[2]} />
+        <BotCard data={d}  num={1} color={BOT_COLORS[0]} livePrice={livePrices[d?.symbol]} />
+        <BotCard data={e2} num={2} color={BOT_COLORS[1]} livePrice={livePrices[e2?.symbol]} />
+        <BotCard data={e3} num={3} color={BOT_COLORS[2]} livePrice={livePrices[e3?.symbol]} />
         {e4?.configured && (
-          <BotCard data={e4} num={4} color={BOT_COLORS[3]} />
+          <BotCard data={e4} num={4} color={BOT_COLORS[3]} livePrice={livePrices[e4?.symbol]} />
         )}
       </div>
     </>

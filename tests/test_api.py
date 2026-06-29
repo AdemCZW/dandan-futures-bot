@@ -58,7 +58,7 @@ def test_explain_returns_pipeline_and_decision_trace():
     r = client.post("/api/explain", json={"strategy": "ema_cross", "source": "synthetic"})
     assert r.status_code == 200
     d = r.json()
-    assert len(d["pipeline"]) == 5 and d["pipeline"][0]["role"] == "市場分析師"
+    assert len(d["pipeline"]) == 6 and d["pipeline"][0]["role"] == "市場分析師"
     assert d["decision_points"] >= 1 and len(d["steps"]) == d["decision_points"]
     s = d["steps"][0]
     assert set(["ts", "close", "ind", "target", "actions", "equity", "pos_before", "pos_after"]) <= set(s)
