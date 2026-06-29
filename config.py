@@ -20,7 +20,8 @@ class Config:
     max_position_pct: float = 0.30    # 單一持倉最多佔總資金 30%
     stop_loss_pct: float = 0.02       # 停損 2%（atr 不可用時的 fallback）
     take_profit_pct: float = 0.04     # 停利 4%（atr 不可用時的 fallback）
-    max_daily_loss_pct: float = 0.05  # 單日虧損超過 5% 就停止當日交易
+    max_daily_loss_pct: float = 0.05    # 單日虧損超過 5% 就停止當日交易
+    max_peak_drawdown_pct: float = 0.20 # 從淨值高點回落超過 20% → 全停（0=停用）
     # ATR 動態停損停利（有傳入 atr 時優先於固定百分比）：
     atr_mult_sl: float = 2.0          # 停損 = entry ∓ atr_mult_sl × ATR（波動度自適應）
     tp_R_mult: float = 2.0            # 停利距離 = tp_R_mult × 停損距離（鎖定恆定風報比 R）

@@ -57,6 +57,7 @@ class RiskOfficer:
         self.cfg = cfg
         self._daily_start_equity = None
         self._daily_key = None
+        self._equity_peak = None   # 運行期間淨值高點（峰值回撤熔斷用）
 
     def mark_bar(self, ts, equity: float) -> None:
         """每根 K 線推進時呼叫：在日界用「當日第一根的總權益」當單日熔斷基準。
@@ -106,6 +107,18 @@ class RiskOfficer:
 
         atr 有值時用 ATR 停損距離反推倉位（波動度歸一化）；atr=None 退回固定百分比，與舊版相同。
         """
+        # 峰值回撤熔斷（從運行期最高淨值跌落超過閾值 → 全停）
+        if self._equity_peak is None or equity > self._equity_peak:
+            self._equity_peak = equity
+        max_dd = getattr(self.cfg, 'max_peak_drawdown_pct', 0.20)
+        if max_dd > 0 and self._equity_peak:
+            peak_dd = (equity - self._equity_peak) / self._equity_peak
+            if peak_dd <= -max_dd:
+                return RiskDecision(
+                    False, 0.0,
+                    f"觸發峰值回撤熔斷（從高點 {self._equity_peak:.0f} 下跌 {abs(peak_dd)*100:.1f}%）"
+                )
+
         # 單日虧損熔斷
         day = str(ts)[:10]
         if self._daily_key != day:

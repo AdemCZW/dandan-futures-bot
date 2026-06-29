@@ -90,16 +90,27 @@ function Detail({ s }) {
 }
 
 export default function Explain() {
+  // 只顯示目前機器人實際在跑的三個策略（其餘備用策略隱藏）
+  const ACTIVE = ['fib_ema', 'fib_channel', 'trend_pullback']
+  const BOT_LABEL = {
+    fib_ema:         'fib_ema — Bot1 · FIB+EMA200 順勢回調',
+    fib_channel:     'fib_channel — Bot2 · 費波那契通道均值回歸',
+    trend_pullback:  'trend_pullback — Bot3/4 · EMA200趨勢+回踩+KD',
+  }
   const [strats, setStrats] = useState([])
-  const [strategy, setStrategy] = useState('ema_cross')
-  const [source, setSource] = useState('synthetic')
+  const [strategy, setStrategy] = useState('fib_ema')
+  const [source, setSource] = useState('testnet')
   const [onlyDec, setOnlyDec] = useState(true)
   const [loading, setLoading] = useState(false)
   const [res, setRes] = useState(null)
   const [err, setErr] = useState('')
   const [open, setOpen] = useState(null)
 
-  useEffect(() => { api.strategies().then(setStrats).catch(() => {}) }, [])
+  useEffect(() => {
+    api.strategies()
+      .then(all => setStrats(all.filter(s => ACTIVE.includes(s.name))))
+      .catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function run() {
     setLoading(true); setErr(''); setOpen(null)
@@ -109,11 +120,12 @@ export default function Explain() {
   }
 
   const pipeline = res?.pipeline || [
-    { role: '市場分析師', does: '提供已收完 K 線（價、量）' },
-    { role: '信號工程師', does: '算 EMA / RSI / ATR / z-score' },
-    { role: '量化研究員', does: '依指標產生目標倉位 +1/0/-1' },
-    { role: '風控官', does: '准入、倉位、停損停利、熔斷' },
-    { role: '執行工程師', does: '對齊倉位、含手續費滑點成交' },
+    { role: '市場分析師', does: '提供已收完 K 線（OHLCV）；ADX>25 判定趨勢 vs 盤整（regime）' },
+    { role: '信號工程師', does: '算 EMA / RSI / ATR / KD / Fib 通道位置（fib_pos）' },
+    { role: '量化研究員', does: '依指標產生 +1 多 / -1 空 / 0 空手；含方向連虧防護' },
+    { role: '風控官', does: '單日熔斷 5% / 峰值回撤 20%；Kelly+ATR 算倉；SL/TP/追蹤停損' },
+    { role: '執行工程師', does: '對齊倉位下單；含手續費+滑點；0.5R 部分獲利了結' },
+    { role: '績效長', does: '記錄盈虧；更新 Kelly；連虧縮倉警示；Sharpe/回撤統計' },
   ]
 
   return (
@@ -148,7 +160,7 @@ export default function Explain() {
         <div className="controls">
           <div className="field"><label>策略</label>
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-              {strats.map((s) => <option key={s.name} value={s.name}>{s.name}{s.allow_short ? ' (多空)' : ''}</option>)}
+              {strats.map((s) => <option key={s.name} value={s.name}>{BOT_LABEL[s.name] || s.name}</option>)}
             </select>
           </div>
           <div className="field"><label>資料來源</label>

@@ -189,11 +189,36 @@ def run_backtest_api(strategy: str, symbol: str, interval: str,
 
 
 _PIPELINE = [
-    {"role": "市場分析師", "module": "market_analyst", "does": "提供已收完的 K 線（價、量）"},
-    {"role": "信號工程師", "module": "signal_engineer", "does": "算 EMA / RSI / ATR / z-score"},
-    {"role": "量化研究員", "module": "quant_researcher", "does": "依指標產生目標倉位 +1/0/-1"},
-    {"role": "風控官", "module": "risk_officer", "does": "准入與否、倉位大小、停損停利、單日熔斷"},
-    {"role": "執行工程師", "module": "backtester", "does": "依目標對齊倉位、含手續費+滑點成交"},
+    {
+        "role": "市場分析師",
+        "module": "market_analyst",
+        "does": "提供已收完 K 線（OHLCV）；盤勢分類：ADX>25 = 趨勢，否則 = 盤整（regime）",
+    },
+    {
+        "role": "信號工程師",
+        "module": "signal_engineer",
+        "does": "計算 EMA / RSI / ATR / KD / Fib 通道位置；fib_pos 是價格在通道 0~1 的相對位置",
+    },
+    {
+        "role": "量化研究員",
+        "module": "quant_researcher",
+        "does": "依指標邏輯產生目標倉位：+1 做多、-1 做空、0 空手；含方向過濾與方向連虧防護",
+    },
+    {
+        "role": "風控官",
+        "module": "risk_officer",
+        "does": "准入審查（單日熔斷 5% / 峰值回撤 20%）；Kelly + ATR 反推倉位；計算 SL/TP/Chandelier 追蹤停損",
+    },
+    {
+        "role": "執行工程師",
+        "module": "backtester",
+        "does": "對齊目標倉位下單；含手續費 0.1% + 滑點；多空雙向、部分獲利了結（scale-out at 0.5R）",
+    },
+    {
+        "role": "績效長",
+        "module": "performance_officer",
+        "does": "記錄每筆盈虧；累計勝率/期望值→更新 Kelly 比例；連虧 N 筆→縮倉警示；Sharpe / 最大回撤統計",
+    },
 ]
 
 
