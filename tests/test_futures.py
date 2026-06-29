@@ -33,6 +33,8 @@ class FakeFuturesClient:
         self.cancelled = []
         self.cancel_all = []
         self.open_orders_calls = []
+        self.get_order_calls = []
+        self._orders = {}          # orderId → 狀態 dict（對帳真相用）
 
     def futures_exchange_info(self): return INFO
     def futures_change_leverage(self, **kw): self.leverage_calls.append(kw)
@@ -48,6 +50,9 @@ class FakeFuturesClient:
         self.cancel_all.append(kw); return {"code": 200, "msg": "success"}
     def futures_get_open_orders(self, **kw):
         self.open_orders_calls.append(kw); return self._open_orders
+    def futures_get_order(self, **kw):
+        self.get_order_calls.append(kw)
+        return self._orders.get(kw.get("orderId"), {"orderId": kw.get("orderId"), "status": "NEW"})
 
 
 # ── FuturesExecutionEngineer ────────────────────────────────────────
@@ -150,6 +155,16 @@ def test_cancel_all_stops_and_open_orders():
     assert c.open_orders_calls[-1] == {"symbol": "BTCUSDT"}
 
 
+def test_get_order_calls_futures_get_order_and_returns_status():
+    """OPT-06：FuturesExecutionEngineer 必須有 get_order，否則 _reconcile_exit 永遠走現價猜方向 fallback。"""
+    c = FakeFuturesClient()
+    c._orders["S9"] = {"orderId": "S9", "status": "FILLED", "avgPrice": "95.5"}
+    e = FuturesExecutionEngineer(c, "BTCUSDT", set_leverage=False)
+    o = e.get_order("S9")
+    assert c.get_order_calls[-1] == {"symbol": "BTCUSDT", "orderId": "S9"}
+    assert o["status"] == "FILLED" and o["avgPrice"] == "95.5"
+
+
 def test_position_balance_markprice_parsing():
     c = FakeFuturesClient(positions=[{"symbol": "BTCUSDT", "positionAmt": "-0.5"}],
                           balances=[{"asset": "USDT", "balance": "9999.5"}], price="123.4")
@@ -198,8 +213,10 @@ class FakeExecu:
 
 
 class FakeJournal:
-    def __init__(self): self.logs = []
-    def log(self, side, price, qty=0, pnl=0, ts=None): self.logs.append(side)
+    def __init__(self): self.logs = []; self.records = []
+    def log(self, side, price, qty=0, pnl=0, ts=None):
+        self.logs.append(side)
+        self.records.append({"side": side, "price": price, "qty": qty, "pnl": pnl})
 
 
 class ScriptStrat:
@@ -387,6 +404,90 @@ def test_classify_exit_short_take_profit(patched):
     t = _trader([0], FakeExecu())
     t.dir, t.entry_price, t.sl, t.tp = -1, 100.0, 102.0, 96.0
     assert t._classify_exit(96.0) == "exit_tp"           # 空單觸及下方停利
+
+
+def test_go_flat_deducts_round_trip_taker_fee_from_pnl(patched):
+    """OPT-01：實盤平倉寫 journal 前要扣雙邊 taker 費（entry+exit 名目 × fee）。"""
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t.dir, t.entry_price, t.qty = 1, 100.0, 0.01
+    t._go_flat(price=110.0, bar_time="2026-06-29 00:00:00", reason="exit_signal")
+    fee = 0.01 * (100.0 + 110.0) * t.cfg.taker_fee_rate          # 雙邊名目 × 費率
+    gross = (110.0 - 100.0) * 0.01
+    assert t.journal.records[-1]["pnl"] == pytest.approx(gross - fee)
+
+
+def test_round_trip_fee_helper_charges_both_legs(patched):
+    """OPT-01：雙邊 taker 費 = qty × (進場名目 + 出場名目) × 費率。"""
+    t = _trader([0], FakeExecu())
+    fee = t._round_trip_fee(0.01, 100.0, 110.0)
+    assert fee == pytest.approx(0.01 * (100.0 + 110.0) * t.cfg.taker_fee_rate)
+
+
+def test_reconcile_exit_deducts_taker_fee(patched):
+    """OPT-01：交易所掛單對帳平倉的 pnl 也要扣雙邊 taker 費。"""
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t.dir, t.entry_price, t.qty = 1, 100.0, 0.01
+    t.sl, t.tp, t._tp_oid, t._entry_sl_dist = 98.0, 104.0, "T1", 2.0
+    ex._orders_status["T1"] = {"status": "FILLED", "avgPrice": "104.0"}
+    t._reconcile_exit(price=104.0, bar_time="2026-06-29 00:00:00")
+    gross = (104.0 - 100.0) * 0.01
+    fee = 0.01 * (100.0 + 104.0) * t.cfg.taker_fee_rate
+    assert t.journal.records[-1]["pnl"] == pytest.approx(gross - fee)
+
+
+def test_taker_fee_rate_separate_from_backtest_fee_rate(patched):
+    """OPT-01：實盤 taker_fee_rate(0.0004) 與回測 fee_rate(0.001) 分離，不互相污染。"""
+    cfg = Config()
+    assert cfg.taker_fee_rate == pytest.approx(0.0004)
+    assert cfg.fee_rate == pytest.approx(0.001)
+
+
+def test_fetch_bars_uses_strategy_warmup_for_ema200(patched):
+    """OPT-03：trend_pullback(200EMA) 應抓 ≥4×200 根而非寫死 200。"""
+    from core.quant_researcher import build_strategy
+    cfg = Config()
+    t = M.FuturesLiveTrader(cfg, None, build_strategy("trend_pullback"),
+                            RiskOfficer(cfg), FakeExecu(), FakeJournal())
+    assert t._fetch_bars() >= 800
+    assert t._fetch_bars() <= 1500          # 不超過幣安 klines 單次上限
+
+
+def test_fetch_bars_falls_back_to_200_without_warmup(patched):
+    """策略無 warmup_bars（舊式/替身）→ 退回 200，與舊行為相容。"""
+    t = _trader([0], FakeExecu())           # ScriptStrat 無 warmup_bars
+    assert t._fetch_bars() == 200
+
+
+def test_reconcile_exit_uses_exchange_fill_truth_not_current_price(patched):
+    """OPT-06：交易所條件單 FILLED → 用其 avgPrice 判 SL/TP/PnL，而非用現價猜。"""
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t.dir, t.entry_price, t.qty = 1, 100.0, 0.01
+    t.sl, t.tp, t._tp_oid, t._entry_sl_dist = 98.0, 104.0, "T1", 2.0
+    ex._orders_status["T1"] = {"status": "FILLED", "avgPrice": "104.0"}
+    # 現價 101（未達 tp 104）：若用現價 fallback 不會判停利；真相是 TP 已成交
+    reason = t._reconcile_exit(price=101.0, bar_time="2026-06-29 00:00:00")
+    assert reason == "exit_tp"
+    rec = t.journal.records[-1]
+    assert rec["price"] == 104.0                                  # 用成交真相價，非現價 101
+    gross = (104.0 - 100.0) * 0.01
+    fee = 0.01 * (100.0 + 104.0) * t.cfg.taker_fee_rate           # OPT-01：扣雙邊 taker 費
+    assert rec["pnl"] == pytest.approx(gross - fee)
+    assert t.dir == 0 and t._tp_oid is None
+
+
+def test_reconcile_exit_falls_back_to_current_price_when_no_filled_order(patched):
+    """OPT-06：查不到 FILLED 真相時保留現價 fallback（不可移除）。"""
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t.dir, t.entry_price, t.qty = 1, 100.0, 0.01
+    t.sl, t.tp, t._stop_oid, t._entry_sl_dist = 98.0, 104.0, "S1", 2.0
+    ex._orders_status["S1"] = {"status": "NEW"}      # 尚未成交 → 走現價 fallback
+    reason = t._reconcile_exit(price=104.5, bar_time="2026-06-29 00:00:00")
+    assert reason == "exit_tp"                       # 現價 104.5 ≥ tp 104 → fallback 判停利
+    assert t.journal.records[-1]["price"] == 104.0   # fallback hit_tp → fill=self.tp
 
 
 # ── 交易所掛單式硬停損生命週期（EXCHANGE_STOP_ENABLED；預設關，逐台開）─────────

@@ -23,6 +23,21 @@ MIN_TRADES = 10
 FEES = 0.0004
 INIT_CASH = 10_000
 
+
+def _vbt_freq(interval: str) -> str:
+    """幣安 K 線週期 → pandas/vbt 可用的 freq 字串（Sharpe 年化基準用）。
+
+    '15m'→'15min'、'1h'→'1h'、'4h'→'4h'、'1d'→'1d'。寫死 '1h' 會讓 15m 策略
+    年化基準少算 4 倍、跨時框不可比（OPT-09）。未知格式 → 退回 '1h'。
+    """
+    s = str(interval).strip().lower()
+    unit_map = {"m": "min", "h": "h", "d": "d", "w": "w"}
+    try:
+        num = int(s[:-1])
+        return f"{num}{unit_map[s[-1]]}"
+    except (ValueError, KeyError, IndexError):
+        return "1h"
+
 # ── search spaces ──────────────────────────────────────────────────────────
 # Each param: ("float"|"int"|"categorical", low, high)  or  ("categorical", v1, v2, ...)
 
@@ -195,8 +210,11 @@ def signals_from_prepared(
 
 # ── core backtest ──────────────────────────────────────────────────────────
 
-def vbt_sharpe(df: pd.DataFrame, strategy_name: str, **params) -> float:
-    """Run a VBT backtest for one param set; return annualized Sharpe or -inf."""
+def vbt_sharpe(df: pd.DataFrame, strategy_name: str, freq: str = "1h", **params) -> float:
+    """Run a VBT backtest for one param set; return annualized Sharpe or -inf.
+
+    freq: 年化基準（由 interval 推導，OPT-09）。寫死 '1h' 會讓 15m 策略少算 4 倍。
+    """
     strat = build_strategy(strategy_name, **params)
     try:
         prepared = strat.prepare(df).dropna()
@@ -221,7 +239,7 @@ def vbt_sharpe(df: pd.DataFrame, strategy_name: str, **params) -> float:
             short_exits=sx,
             fees=FEES,
             init_cash=INIT_CASH,
-            freq="1h",
+            freq=freq,
         )
         sharpe = float(pf.stats().get("Sharpe Ratio", -999))
         return sharpe if math.isfinite(sharpe) else float("-inf")
@@ -231,34 +249,52 @@ def vbt_sharpe(df: pd.DataFrame, strategy_name: str, **params) -> float:
 
 # ── walk-forward helper ────────────────────────────────────────────────────
 
-def _walk_forward_sharpe(
+def _split_in_sample_oos(n: int, n_folds: int) -> tuple[int, int]:
+    """把 n 根切成 n_folds+1 等塊：前 n_folds 塊為 in-sample，最後一塊保留為 OOS。
+
+    回傳 (fold_size, in_sample_end)。fold_size 為單塊長度，in_sample_end 為 OOS 起點。
+    """
+    fold_size = n // (n_folds + 1)
+    return fold_size, fold_size * n_folds
+
+
+def _in_sample_objective(
     df: pd.DataFrame,
     strategy_name: str,
     params: dict,
     n_folds: int = 4,
+    freq: str = "1h",
 ) -> float:
-    """Average OOS Sharpe across walk-forward folds.
+    """誠實的搜尋目標分數：只用 in-sample（保留 OOS 尾段以外）資料評 Sharpe。
 
-    Fold layout: data split into n_folds+1 equal blocks.
-    Train on block 0..i, evaluate on block i+1.
+    OPT-10：舊版 _walk_forward_sharpe 把同一組固定參數套到各 OOS 區塊再平均，Optuna
+    直接最大化此「OOS 平均」＝用測試集本身挑參，是過度擬合不是樣本外驗證。改為：把資料
+    切成 n_folds+1 塊、最後一塊永遠保留為 OOS（搜尋期間絕不評分），objective 只在前
+    n_folds 塊（in-sample）算 Sharpe。OOS 由 oos_sharpe() 在搜尋結束後單獨評估。
+
+    先切片再 prepare（在 vbt_sharpe 內），確保 OOS 尾段不會經由指標 warmup 洩漏進 in-sample。
     """
-    n = len(df)
-    fold_size = n // (n_folds + 1)
+    fold_size, in_end = _split_in_sample_oos(len(df), n_folds)
     if fold_size < 200:
-        return vbt_sharpe(df, strategy_name, **params)
+        return vbt_sharpe(df, strategy_name, freq=freq, **params)
+    return vbt_sharpe(df.iloc[:in_end], strategy_name, freq=freq, **params)
 
-    sharpes: list[float] = []
-    for i in range(n_folds):
-        test_start = fold_size * (i + 1)
-        test_end   = test_start + fold_size
-        if test_end > n:
-            break
-        oos_df = df.iloc[test_start:test_end]
-        s = vbt_sharpe(oos_df, strategy_name, **params)
-        if math.isfinite(s):
-            sharpes.append(s)
 
-    return float(np.mean(sharpes)) if sharpes else float("-inf")
+def oos_sharpe(
+    df: pd.DataFrame,
+    strategy_name: str,
+    params: dict,
+    n_folds: int = 4,
+    freq: str = "1h",
+) -> float:
+    """對保留的 OOS 尾段評 Sharpe（樣本外驗證；搜尋期間絕不使用，由此事後評估）。
+
+    與 _in_sample_objective 互補：IS 高、OOS 崩 = 過擬合訊號。資料太短無法切出 OOS → -inf。
+    """
+    fold_size, in_end = _split_in_sample_oos(len(df), n_folds)
+    if fold_size < 200:
+        return float("-inf")
+    return vbt_sharpe(df.iloc[in_end:], strategy_name, freq=freq, **params)
 
 
 # ── Optuna entry point ─────────────────────────────────────────────────────
@@ -283,6 +319,7 @@ def run_bayesian_optimize(
     search_space: dict | None = None,
     n_wf_folds: int = 0,
     seed: int = 42,
+    interval: str = "1h",
 ) -> tuple[dict, optuna.Study]:
     """Bayesian parameter search via Optuna TPE.
 
@@ -308,11 +345,21 @@ def run_bayesian_optimize(
     pruner  = optuna.pruners.HyperbandPruner()
     study   = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
 
+    freq = _vbt_freq(interval)
+
     def objective(trial: optuna.Trial) -> float:
         params = _suggest(trial, space)
         if n_wf_folds > 0:
-            return _walk_forward_sharpe(df, strategy_name, params, n_wf_folds)
-        return vbt_sharpe(df, strategy_name, **params)
+            # 只對 in-sample 評分；OOS 尾段保留，搜尋期間絕不偷看（OPT-10）
+            return _in_sample_objective(df, strategy_name, params, n_wf_folds, freq=freq)
+        return vbt_sharpe(df, strategy_name, freq=freq, **params)
 
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    # walk-forward 模式：搜尋結束後對保留的 OOS 尾段評 best_params，記入 study 供晉升把關。
+    if n_wf_folds > 0:
+        study.set_user_attr(
+            "oos_sharpe",
+            oos_sharpe(df, strategy_name, study.best_params, n_wf_folds, freq=freq),
+        )
     return study.best_params, study

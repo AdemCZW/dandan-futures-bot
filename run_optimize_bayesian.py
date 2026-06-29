@@ -95,7 +95,15 @@ def main():
 
     # ── 結果 ──
     best_val = study.best_value
-    print(f"最佳 Sharpe：{best_val:.4f}")
+    label = "in-sample Sharpe" if args.wf_folds > 0 else "Sharpe"
+    print(f"最佳 {label}：{best_val:.4f}")
+    # walk-forward 模式：印出保留 OOS 尾段的樣本外分數（搜尋期間從未使用，OPT-10）。
+    # IS 高、OOS 崩 → 過擬合警訊。
+    oos = study.user_attrs.get("oos_sharpe")
+    if oos is not None:
+        gap = best_val - oos
+        print(f"保留 OOS Sharpe：{oos:.4f}　(IS→OOS 衰減 {gap:+.4f}"
+              f"{'　⚠️ 衰減大，疑過擬合' if gap > 0.5 else ''})")
     print("\n最佳參數：")
     for k, v in best.items():
         print(f"  {k:20s} = {v}")

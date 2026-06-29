@@ -142,11 +142,35 @@ class FuturesLiveTrader:
         except Exception:
             pass
 
+    def _fetch_bars(self) -> int:
+        """這台 bot 每輪要抓幾根 K 棒：依策略最長回看週期動態決定（OPT-03）。
+
+        只抓 200 根會讓 200EMA（trend_pullback）暖機嚴重不足。warmup_bars() 估出
+        ≥4× 最長週期；夾在 [200, 1500]（1500 是幣安合約 klines 單次上限）。
+        策略無此方法（極舊或測試替身）→ 退回 200，與舊行為相容。
+        """
+        try:
+            n = int(self.strat.warmup_bars())
+        except Exception:                       # noqa: BLE001 — 無 warmup_bars → 退回舊預設
+            n = 200
+        return max(200, min(n, 1500))
+
+    def _round_trip_fee(self, qty, entry_px, exit_px) -> float:
+        """這筆平倉應扣的雙邊 taker 手續費＝|qty| × (進場名目 + 出場名目) × taker 費率。
+
+        OPT-01：實盤 PnL 原本完全不扣手續費 → 寫進 journal → 餵 Kelly 高估盈虧比放大倉位。
+        在每個出場記帳點扣掉這筆費用，讓 journal 與 Kelly 吃到較真實的淨值。
+        （此為已成交費用的事後扣除，純記帳、不碰下單、不引入前視。資金費率另案處理。）
+        """
+        rate = getattr(self.cfg, "taker_fee_rate", 0.0)
+        return abs(qty) * (abs(entry_px) + abs(exit_px)) * rate
+
     def _latest_atr(self):
         """抓最近已收盤那根的 ATR（供 restore 重建停損用）；失敗則回 None 退回固定百分比。"""
         try:
             df = self.strat.prepare(
-                fetch_klines(self.client, self.cfg.symbol, self.cfg.interval, 200, futures=True)).dropna()
+                fetch_klines(self.client, self.cfg.symbol, self.cfg.interval,
+                             self._fetch_bars(), futures=True)).dropna()
             if len(df) >= 2 and "atr" in df.columns:
                 v = df["atr"].iloc[-2]
                 return float(v) if not pd.isna(v) else None
@@ -351,7 +375,8 @@ class FuturesLiveTrader:
             hit_tp = (d == 1 and price >= self.tp) or (d == -1 and price <= self.tp)
             fill = self.tp if hit_tp else self.sl
             reason = "exit_tp" if hit_tp else self._classify_exit(fill)
-        pnl = (fill - self.entry_price) * abs(self.qty) * d
+        pnl = ((fill - self.entry_price) * abs(self.qty) * d
+               - self._round_trip_fee(self.qty, self.entry_price, fill))   # 扣雙邊 taker 費（OPT-01）
         self.journal.log(reason, fill, abs(self.qty), pnl, ts=bar_time)
         self.cb.record_trade(pnl)
         self._dcg.record_trade(d, pnl)
@@ -375,7 +400,8 @@ class FuturesLiveTrader:
             qty = abs(self.execu.position_amt())    # 兜底：self.qty 異常為 0 時才問交易所
         if qty > 0:
             self.execu.close(qty, self.dir)
-            pnl = (price - self.entry_price) * qty * self.dir   # dir 帶號 → 多空 pnl 方向正確
+            pnl = ((price - self.entry_price) * qty * self.dir          # dir 帶號 → 多空 pnl 方向正確
+                   - self._round_trip_fee(qty, self.entry_price, price))   # 扣雙邊 taker 費（OPT-01）
             self.journal.log(reason, price, qty, pnl, ts=bar_time)
             self.cb.record_trade(pnl)                 # Circuit Breaker 記錄本筆損益
             self._dcg.record_trade(self.dir, pnl)     # 方向感知通道護欄記錄（self.dir 此時仍是平倉方向）
@@ -474,7 +500,8 @@ class FuturesLiveTrader:
     def on_bar_close(self, bar_time) -> None:
         cfg = self.cfg
         df = self.strat.prepare(
-            fetch_klines(self.client, cfg.symbol, cfg.interval, 200, futures=True)).dropna()
+            fetch_klines(self.client, cfg.symbol, cfg.interval,
+                         self._fetch_bars(), futures=True)).dropna()
         if len(df) < 2:                     # 指標暖機不足（如單調行情 swing 未確認）→ 本輪不決策
             print(f"[{bar_time}] 指標暖機不足（dropna 後僅 {len(df)} 根），本輪跳過")
             return
@@ -587,7 +614,8 @@ class FuturesLiveTrader:
                 ok, _msg = self.execu.valid_order(half_qty, price)
                 if ok and half_qty > 0:
                     self.execu.close(half_qty, self.dir)
-                    pnl_half = (price - self.entry_price) * half_qty * self.dir
+                    pnl_half = ((price - self.entry_price) * half_qty * self.dir
+                                - self._round_trip_fee(half_qty, self.entry_price, price))  # 扣雙邊 taker 費（OPT-01）
                     self.journal.log("scale_out", price, half_qty, pnl_half, ts=bar_time)
                     self.qty -= half_qty
                     self.sl = self.entry_price      # 剩餘半倉停損移到成本（保本）

@@ -27,6 +27,7 @@ class Config:
     tp_R_mult: float = 2.0            # 停利距離 = tp_R_mult × 停損距離（鎖定恆定風報比 R）
     chand_mult: float = 3.0           # Chandelier 追蹤停損的 ATR 倍數（趨勢單保利）
     fee_rate: float = 0.001           # 手續費 0.1%（回測估算用）
+    taker_fee_rate: float = 0.0004    # 實盤合約 taker 單邊費率（OPT-01：實盤平倉記帳扣費，與回測 fee_rate 分離）
     slippage: float = 0.0             # 滑點：買成交×(1+slip)、賣成交×(1-slip)。預設 0＝不改既有結果
 
     # ── 策略選擇（量化研究員 quant-researcher）──────

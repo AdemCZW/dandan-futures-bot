@@ -116,6 +116,16 @@ class FuturesExecutionEngineer:
         """本 symbol 目前掛單清單（重啟對帳用）。"""
         return self.client.futures_get_open_orders(symbol=self.symbol)
 
+    def get_order(self, order_id) -> dict:
+        """查單一委託的最新狀態（對帳真相用）。
+
+        _reconcile_exit 靠這個判斷哪張條件單 FILLED + avgPrice，消除掃針/whipsaw 時
+        「用現價猜方向」把停損誤記成停利、PnL 正負翻轉的問題。少了這方法 → 每次拋
+        AttributeError 被吞 → 永遠走現價 fallback（這正是 OPT-06 修復的缺口）。
+        已被 closePosition 自動撤掉的單可能查不到 → 由呼叫端保留 fallback。
+        """
+        return self.client.futures_get_order(symbol=self.symbol, orderId=order_id)
+
     def position_amt(self) -> float:
         """帶號持倉量：+多 / -空 / 0。"""
         info = self.client.futures_position_information(symbol=self.symbol)

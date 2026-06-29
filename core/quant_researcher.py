@@ -42,9 +42,35 @@ class Strategy:
         "of_short_max": 0.55,     # 做空需主動買盤佔比 ≤ 此值（不逆買盤做空）
     }
 
+    # 策略「隱藏」的最長回看週期（不在 params 裡、寫死在指標中的，如 fib_ema 的 89 慢線）。
+    # 子類覆寫此值，warmup_bars() 才算得準。0＝沒有額外隱藏回看。
+    max_hidden_lookback = 0
+
+    # warmup_bars() 掃 params 時，哪些 key 視為「回看週期」。
+    _LOOKBACK_KEYS = ("ema", "period", "window", "slow", "trend", "lookback", "smooth")
+
     def __init__(self, **params):
         # 使用者傳入的值覆蓋預設值
         self.params = {**self.defaults, **params}
+
+    def warmup_bars(self, mult: int = 4, floor: int = 200, cap: int = 1500) -> int:
+        """估算策略指標穩定所需的最少 K 棒數＝最長回看週期 × mult，夾在 [floor, cap]。
+
+        只抓 200 根會讓 200EMA（trend_pullback）暖機嚴重不足——ewm 要 ~4-5× 週期才穩
+        （OPT-03）。掃 self.params 中像「週期」的數值 + 類別宣告的 max_hidden_lookback +
+        regime 閘門回看，取最大乘 mult。實盤 fetch 根數用 max(200, warmup_bars())。
+        """
+        periods = [float(self.max_hidden_lookback)]
+        for k, v in self.params.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    and any(t in k for t in self._LOOKBACK_KEYS):
+                periods.append(float(v))
+        if self.regime_pref != "any":
+            periods.append(float(self.REGIME_DEFAULTS.get("adx_period", 14)))
+        real = [p for p in periods if p and p > 0]
+        if not real:
+            return floor                       # 偵測不到回看週期 → 直接回 floor，不放大
+        return int(min(max(max(real) * mult, floor), cap))
 
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         return df
@@ -935,6 +961,7 @@ class FibEmaStrategy(Strategy):
     }
     allow_short = True
     regime_pref = "trend"
+    max_hidden_lookback = 89   # fib_ema_score 用 34/55/89 慢線，最慢 89（不在 params 內）
 
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()

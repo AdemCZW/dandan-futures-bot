@@ -16,10 +16,51 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtest.backtester import run_backtest
+from backtest.backtester import run_backtest, BacktestResult, interval_to_minutes, bars_per_year
 from config import Config
 from core.quant_researcher import Strategy
 from core.risk_officer import RiskOfficer
+
+
+# ── OPT-09：Sharpe 年化須隨 interval、與樣本長度無關 ───────────────────
+def test_interval_to_minutes_parses_binance_intervals():
+    assert interval_to_minutes("1m") == 1
+    assert interval_to_minutes("15m") == 15
+    assert interval_to_minutes("1h") == 60
+    assert interval_to_minutes("4h") == 240
+    assert interval_to_minutes("1d") == 1440
+    assert interval_to_minutes("garbage") == 60.0          # 未知 → 退回 1h，不拋例外
+
+
+def test_bars_per_year_scales_with_interval():
+    assert bars_per_year("1h") == pytest.approx(365 * 24)
+    assert bars_per_year("15m") == pytest.approx(365 * 24 * 4)
+    assert bars_per_year("1d") == pytest.approx(365)
+
+
+def test_sharpe_annualized_by_interval_not_sample_length():
+    """同一段報酬 pattern 重複 500 vs 2000 次：每根 mean/std 相同 → 年化 Sharpe 應相同。
+
+    舊版乘 sqrt(len)：500*4 vs 2000*4 根會差 sqrt(4)=2 倍（純樣本長度偽影）；
+    修正後乘 sqrt(bars_per_year)（與長度無關）→ 兩者近乎相等。
+    """
+    block = [0.01, -0.005, 0.008, -0.003]
+    eq_short = (1 + pd.Series(block * 500)).cumprod()    # 2000 根
+    eq_long = (1 + pd.Series(block * 2000)).cumprod()    # 8000 根
+    s_short = BacktestResult(equity_curve=eq_short, trades=[], interval="1h").sharpe
+    s_long = BacktestResult(equity_curve=eq_long, trades=[], interval="1h").sharpe
+    assert abs(s_short - s_long) / max(abs(s_long), 1e-9) < 0.01
+
+
+def test_sharpe_differs_across_intervals_for_same_returns():
+    """同一條報酬序列，15m 標成 1d：年化基準差 96 倍 → Sharpe 差 sqrt(96)。"""
+    rng = np.random.default_rng(1)
+    rets = rng.normal(0.0003, 0.008, 3000)
+    eq = (1 + pd.Series(rets)).cumprod()
+    s_15m = BacktestResult(equity_curve=eq, trades=[], interval="15m").sharpe
+    s_1d = BacktestResult(equity_curve=eq, trades=[], interval="1d").sharpe
+    ratio = bars_per_year("15m") / bars_per_year("1d")     # = 96
+    assert s_15m / s_1d == pytest.approx(np.sqrt(ratio), rel=1e-6)
 
 
 # ── 工具：用 close 序列造確定性 OHLCV ──────────────────────────────

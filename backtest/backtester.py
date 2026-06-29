@@ -15,10 +15,29 @@ from core.quant_researcher import Strategy
 from core.risk_officer import RiskOfficer
 
 
+def interval_to_minutes(interval: str) -> float:
+    """幣安 K 線週期字串 → 分鐘數。'15m'→15、'1h'→60、'4h'→240、'1d'→1440。
+
+    未知格式 → 退回 60（視為 1h），不拋例外（年化只是相對比較，壞掉不該中斷回測）。
+    """
+    s = str(interval).strip().lower()
+    units = {"m": 1.0, "h": 60.0, "d": 1440.0, "w": 10080.0}
+    try:
+        return float(s[:-1]) * units[s[-1]]
+    except (ValueError, KeyError, IndexError):
+        return 60.0
+
+
+def bars_per_year(interval: str) -> float:
+    """一年有幾根該週期的 K 棒（Sharpe 年化用）。365×24×60 / 週期分鐘數。"""
+    return 365.0 * 24.0 * 60.0 / interval_to_minutes(interval)
+
+
 @dataclass
 class BacktestResult:
     equity_curve: pd.Series
     trades: list = field(default_factory=list)
+    interval: str = "1h"   # K 線週期，供 Sharpe 年化（OPT-09：年化基準須隨週期，不可用樣本長度）
 
     @property
     def total_return(self) -> float:
@@ -61,8 +80,9 @@ class BacktestResult:
         ret = e.pct_change().dropna()
         if ret.std() == 0:
             return 0.0
-        # 以每根 K 線報酬估，年化僅供相對比較
-        return float(ret.mean() / ret.std() * np.sqrt(len(ret)))
+        # 年化用「每年 K 棒數」開根號，而非樣本長度——否則同策略樣本越長 Sharpe 假性越高、
+        # 且 15m 與 1h 不可比（OPT-09）。bars_per_year 由 interval 推導。
+        return float(ret.mean() / ret.std() * np.sqrt(bars_per_year(self.interval)))
 
     def summary(self) -> str:
         return (
@@ -230,4 +250,5 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
     eq = pd.Series([v for _, v in curve], index=[t for t, _ in curve])
     # 只保留真正平倉的交易來算勝率（entry / entry_short 不算）
     closed = [t for t in trades if t["side"].startswith("exit")]
-    return BacktestResult(equity_curve=eq, trades=closed)
+    return BacktestResult(equity_curve=eq, trades=closed,
+                          interval=getattr(cfg, "interval", "1h"))

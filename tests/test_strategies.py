@@ -1006,3 +1006,25 @@ def test_strategies_registry_has_sixteen_keys():
         "bb_squeeze_breakout", "rsi2_connors", "smc_structure", "fib_channel",
         "trend_pullback", "fib_ema",
     }
+
+
+# ── OPT-03：warmup_bars 依策略最長回看週期動態決定（200EMA 暖機不足修復）──
+def test_warmup_bars_scales_with_trend_pullback_ema200():
+    tp = build_strategy("trend_pullback")          # ema_trend=200
+    assert tp.warmup_bars() >= 800                 # ≥ 4×200
+    assert tp.warmup_bars() <= 1500                # 有上限，不無限抓
+
+
+def test_warmup_bars_accounts_for_fib_ema_hidden_89_slow():
+    fe = build_strategy("fib_ema")                 # 隱藏的 34/55/89 慢線
+    assert fe.warmup_bars() >= 4 * 89              # 最慢 89 → ≥356
+
+
+def test_warmup_bars_has_floor_for_short_lookback_strategies():
+    fc = build_strategy("fib_channel", mode="reversion")
+    assert fc.warmup_bars() >= 200                 # 短回看策略至少有 floor
+
+
+def test_warmup_bars_base_default_is_floor():
+    s = Strategy()
+    assert s.warmup_bars() == 200                  # 無已知週期 → floor 200

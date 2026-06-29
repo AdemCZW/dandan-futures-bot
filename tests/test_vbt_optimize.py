@@ -12,8 +12,37 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backtest.vbt_optimize import signals_from_prepared, vbt_sharpe, run_bayesian_optimize
+from backtest.vbt_optimize import (
+    signals_from_prepared, vbt_sharpe, run_bayesian_optimize, _vbt_freq,
+)
 from core.quant_researcher import build_strategy
+
+
+# ── OPT-09：vbt freq 須隨 interval 推導，不可寫死 1h ─────────────────────
+class TestVbtFreq:
+    def test_maps_binance_interval_to_pandas_freq(self):
+        assert _vbt_freq("15m") == "15min"
+        assert _vbt_freq("1h") == "1h"
+        assert _vbt_freq("4h") == "4h"
+        assert _vbt_freq("1d") == "1d"
+
+    def test_unknown_interval_falls_back_to_1h(self):
+        assert _vbt_freq("garbage") == "1h"
+
+    def test_vbt_sharpe_accepts_freq_kwarg(self):
+        import pandas as _pd
+        import numpy as _np
+        rng = _np.random.default_rng(3)
+        n = 1500
+        close = 100 * _np.exp(_np.cumsum(rng.normal(0.0002, 0.01, n)))
+        idx = _pd.date_range("2024-01-01", periods=n, freq="15min")
+        df = _pd.DataFrame({"open": close, "high": close * 1.002,
+                            "low": close * 0.998, "close": close,
+                            "volume": _np.ones(n)}, index=idx)
+        # 不同 freq 不應拋例外，且 15m 與 1h 年化基準不同 → Sharpe 量值不同
+        s_15 = vbt_sharpe(df, "fib_channel", freq="15min", entry_zone=0.30, exit_zone=0.80)
+        s_1h = vbt_sharpe(df, "fib_channel", freq="1h", entry_zone=0.30, exit_zone=0.80)
+        assert isinstance(s_15, float) and isinstance(s_1h, float)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -168,3 +197,33 @@ class TestBayesianOptimize:
         best, _ = run_bayesian_optimize(df, "fib_channel", n_trials=5, n_wf_folds=3)
         assert isinstance(best, dict)
         assert "entry_zone" in best
+
+# ── OPT-10：誠實的 walk-forward — 目標分數絕不偷看保留的 OOS 尾段 ──────────
+class TestHonestWalkForward:
+    def test_objective_ignores_reserved_oos_tail(self):
+        """竄改保留的 OOS 尾段不應改變 in-sample 目標分數（=Optuna 不用測試集挑參）。"""
+        from backtest.vbt_optimize import _in_sample_objective
+        df = make_df(3000, seed=2, trend="up")
+        fold = len(df) // 5
+        df_b = df.copy()
+        df_b.iloc[fold * 4:] = df_b.iloc[fold * 4:].values * 2.0   # 只改 OOS 尾段
+        p = dict(entry_zone=0.30, exit_zone=0.80)
+        s_a = _in_sample_objective(df, "fib_channel", p, 4)
+        s_b = _in_sample_objective(df_b, "fib_channel", p, 4)
+        assert s_a == s_b
+
+    def test_oos_sharpe_depends_only_on_tail(self):
+        """OOS 驗證只看保留尾段：改 in-sample 前段不影響 oos_sharpe。"""
+        from backtest.vbt_optimize import oos_sharpe
+        df = make_df(3000, seed=3, trend="up")
+        fold = len(df) // 5
+        df_b = df.copy()
+        df_b.iloc[:fold * 4] = df_b.iloc[:fold * 4].values * 2.0   # 只改 in-sample 前段
+        p = dict(entry_zone=0.30, exit_zone=0.80)
+        assert oos_sharpe(df, "fib_channel", p, 4) == oos_sharpe(df_b, "fib_channel", p, 4)
+
+    def test_run_bayesian_optimize_records_oos_in_study(self):
+        """walk-forward 模式下，best_params 的 OOS 分數應被記入 study.user_attrs。"""
+        df = make_df(3000, trend="up")
+        _, study = run_bayesian_optimize(df, "fib_channel", n_trials=5, n_wf_folds=4)
+        assert "oos_sharpe" in study.user_attrs
