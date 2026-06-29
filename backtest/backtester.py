@@ -119,6 +119,14 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
     allow_short = getattr(strategy, "allow_short", False)
     curve, trades = [], []
 
+    # OPT-08：成交延遲（訊號 i 根、成交 i+fill_lag 根 open，對齊實盤）+ 資金費率逐根攤提。
+    fill_lag = max(int(getattr(cfg, "fill_lag", 0)), 0)
+    opens = df["open"].to_numpy() if fill_lag > 0 else None
+    n_bars = len(df)
+    fr8 = float(getattr(cfg, "funding_rate_per_8h", 0.0))
+    bars_per_8h = (8 * 60) / interval_to_minutes(getattr(cfg, "interval", "1h"))
+    funding_per_bar = fr8 / bars_per_8h if bars_per_8h > 0 else 0.0
+
     def close_position(px, side, ts):
         """以 px（含滑點）平掉目前倉位，記一筆交易，回到空手。"""
         nonlocal cash, position, qty, entry_price
@@ -139,8 +147,13 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
 
     _IND = ("ema_fast", "ema_slow", "rsi", "atr", "zscore")
 
-    for ts, row in df.iterrows():
+    for i, (ts, row) in enumerate(df.iterrows()):
         price = row["close"]
+        # OPT-08：訊號驅動的進出場成交價。fill_lag>0 改用第 i+lag 根 open；無未來根→退回 close。
+        if fill_lag > 0 and i + fill_lag < n_bars:
+            signal_fill = float(opens[i + fill_lag])
+        else:
+            signal_fill = price
         # 每根推進：以當日首根的總權益為單日熔斷基準
         risk.mark_bar(ts, cash + position * qty * price)
 
@@ -176,9 +189,9 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
         # 3) 對齊目標倉位：先平反向倉，再開到目標方向
         if target != position:
             if position != 0:
-                close_position(price, "exit_signal", ts)
+                close_position(signal_fill, "exit_signal", ts)   # OPT-08：fill_lag 時於下一根成交
                 if step is not None:
-                    step["actions"].append({"act": "exit_signal", "price": round(float(price), 2)})
+                    step["actions"].append({"act": "exit_signal", "price": round(float(signal_fill), 2)})
             # 進場用「這根已收盤」的 ATR 設停損停利與部位大小（缺 atr 欄→None→退回固定百分比）
             atr_val = row["atr"] if "atr" in row else None
             if target == 1:
@@ -188,7 +201,7 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
                                     "qty": round(float(decision.quantity), 6), "reason": decision.reason}
                 if decision.allow:
                     buy_qty = decision.quantity
-                    fill = price * (1 + slip)                  # 買進滑點
+                    fill = signal_fill * (1 + slip)            # 買進滑點（OPT-08：fill_lag 用下一根 open）
                     cost = buy_qty * fill * (1 + fee)
                     if cost <= cash and buy_qty > 0:
                         cash -= cost
@@ -208,7 +221,7 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
                                     "qty": round(float(decision.quantity), 6), "reason": decision.reason}
                 if decision.allow and decision.quantity > 0:
                     sell_qty = decision.quantity
-                    fill = price * (1 - slip)                  # 放空滑點
+                    fill = signal_fill * (1 - slip)            # 放空滑點（OPT-08：fill_lag 用下一根 open）
                     cash += sell_qty * fill * (1 - fee)        # 放空收到（虛擬）價金
                     position, qty, entry_price = -1, sell_qty, fill
                     lowest = float(row["low"])        # Chandelier 進場後最低低價起點
@@ -230,6 +243,10 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
             else:
                 lowest = min(lowest, float(row["low"]))
                 sl = risk.update_trailing_stop(sl, lowest, atr_now, -1)
+
+        # OPT-08：資金費率逐根攤提（持多付、持空收；funding_per_bar=0 時 no-op）
+        if position != 0 and funding_per_bar != 0.0:
+            cash -= position * abs(qty * price) * funding_per_bar
 
         equity = cash + position * qty * price
         if step is not None:

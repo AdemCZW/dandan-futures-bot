@@ -89,13 +89,18 @@ def sweep(df, strategy_name, space, risk, cfg,
 
 def walk_forward(df, strategy_name, space, risk, cfg,
                  train_bars: int, test_bars: int,
-                 objective: str = "sharpe", min_trades: int = 5) -> pd.DataFrame:
-    """逐 fold 前推：訓練段選最佳參數 → 鎖定 → 在後續測試段評估。"""
+                 objective: str = "sharpe", min_trades: int = 5,
+                 purge: int = 0) -> pd.DataFrame:
+    """逐 fold 前推：訓練段選最佳參數 → 鎖定 → 在後續測試段評估。
+
+    purge>0（OPT-11）在訓練段與測試段間留 embargo gap，降低跨界序列相關偏誤。
+    """
     keys = list(space)
     folds, start, fid = [], 0, 0
-    while start + train_bars + test_bars <= len(df):
+    while start + train_bars + purge + test_bars <= len(df):
         train = df.iloc[start: start + train_bars]
-        test = df.iloc[start + train_bars: start + train_bars + test_bars]
+        test_start = start + train_bars + purge
+        test = df.iloc[test_start: test_start + test_bars]
 
         ranked = sweep(train, strategy_name, space, risk, cfg, objective, min_trades)
         best = ranked.iloc[0]

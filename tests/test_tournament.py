@@ -112,11 +112,21 @@ from backtest.tournament import (
 
 
 def test_fold_bounds_non_overlapping_test_windows():
-    # n=300, train=120, test=40 → 測試窗不重疊、前推一個測試窗、訓練永遠在測試之前
+    # n=300, train=120, test=40 → 4-tuple (train_start, train_end, test_start, test_end)
     bounds = _fold_bounds(300, 120, 40)
-    assert bounds == [(0, 120, 160), (40, 160, 200), (80, 200, 240), (120, 240, 280)]
-    for a, b, c in bounds:
-        assert a < b < c          # 訓練 [a,b) 在測試 [b,c) 之前（無 look-ahead）
+    assert bounds == [(0, 120, 120, 160), (40, 160, 160, 200),
+                      (80, 200, 200, 240), (120, 240, 240, 280)]
+    for a, b, ts, te in bounds:
+        assert a < b <= ts < te   # 訓練 [a,b) 在測試 [ts,te) 之前（無 look-ahead）
+
+
+def test_fold_bounds_purge_inserts_embargo_gap():
+    """OPT-11：purge>0 在 train_end 與 test_start 間留 embargo gap（降跨界序列相關）。"""
+    bounds = _fold_bounds(400, 120, 40, purge=10)
+    a, b, ts, te = bounds[0]
+    assert (a, b) == (0, 120)
+    assert ts == b + 10           # 測試窗起點延後 purge 根
+    assert te == ts + 40
 
 
 def test_fold_bounds_empty_when_too_short():
@@ -171,3 +181,58 @@ def test_run_walkforward_tournament_ranks_by_oos_expectancy():
     assert scores == sorted(scores, reverse=True)
     if res["champion"]:
         assert res["champion"]["strategy"] == res["ranked"][0]["strategy"]
+
+
+# ── OPT-12：bootstrap 信賴下界當晉升閘門 ──────────────────────────────
+from backtest.tournament import bootstrap_mean_lower_bound
+
+
+def test_bootstrap_lower_bound_positive_for_clear_edge():
+    """強正期望（多數 +10、少數 -5）→ bootstrap 期望值下界 > 0。"""
+    pnl = [10.0] * 70 + [-5.0] * 30
+    lb = bootstrap_mean_lower_bound(pnl, n_resamples=2000, confidence=0.95, seed=0)
+    assert lb > 0
+
+
+def test_bootstrap_lower_bound_not_positive_for_zero_mean_noise():
+    """零期望雜訊（無 edge）→ 下界不顯著為正（≤0），不該晉升。"""
+    rng = np.random.default_rng(7)
+    pnl = list(rng.normal(0.0, 10.0, 300))
+    lb = bootstrap_mean_lower_bound(pnl, n_resamples=2000, confidence=0.95, seed=0)
+    assert lb <= 0
+
+
+def test_bootstrap_lower_bound_empty_returns_neg_inf():
+    assert bootstrap_mean_lower_bound([], confidence=0.95) == float("-inf")
+
+
+def test_bootstrap_lower_bound_deterministic_with_seed():
+    pnl = [3.0, -1.0, 2.0, -2.0, 5.0] * 20
+    a = bootstrap_mean_lower_bound(pnl, n_resamples=1000, confidence=0.95, seed=42)
+    b = bootstrap_mean_lower_bound(pnl, n_resamples=1000, confidence=0.95, seed=42)
+    assert a == b
+
+
+def test_walk_forward_eval_reports_oos_expectancy_lower_bound():
+    """walk_forward_eval 輸出應含 oos_expectancy_lb（OOS 期望值 bootstrap 下界）。"""
+    df = _synth_df(n=400)
+    out = walk_forward_eval(df, "ema_cross", Config(interval="5m"),
+                            train_bars=120, test_bars=40)
+    assert "oos_expectancy_lb" in out
+
+
+def test_select_champion_significance_gate():
+    """OPT-12：require_significant=True 時跳過 oos_expectancy_lb≤0 的合格者。"""
+    from backtest.tournament import _select_champion
+    ranked = [
+        {"strategy": "a", "eligible": True, "oos_expectancy_lb": -0.5},  # 不顯著
+        {"strategy": "b", "eligible": True, "oos_expectancy_lb": 0.8},   # 顯著
+    ]
+    assert _select_champion(ranked, require_significant=False)["strategy"] == "a"
+    assert _select_champion(ranked, require_significant=True)["strategy"] == "b"
+
+
+def test_select_champion_none_when_none_significant():
+    from backtest.tournament import _select_champion
+    ranked = [{"strategy": "a", "eligible": True, "oos_expectancy_lb": -0.1}]
+    assert _select_champion(ranked, require_significant=True) is None

@@ -29,6 +29,9 @@ class Config:
     fee_rate: float = 0.001           # 手續費 0.1%（回測估算用）
     taker_fee_rate: float = 0.0004    # 實盤合約 taker 單邊費率（OPT-01：實盤平倉記帳扣費，與回測 fee_rate 分離）
     slippage: float = 0.0             # 滑點：買成交×(1+slip)、賣成交×(1-slip)。預設 0＝不改既有結果
+    # OPT-08 回測真實化（預設 0＝關，與舊回測結果完全相容；開啟讓回測-實盤偏差可診斷）：
+    funding_rate_per_8h: float = 0.0  # 永續資金費率（每 8h）：持多付、持空收，逐根按週期攤提
+    fill_lag: int = 0                 # 成交延遲根數：訊號在第 i 根、成交在第 i+fill_lag 根 open（對齊實盤）
 
     # ── 策略選擇（量化研究員 quant-researcher）──────
     # "ema_cross" / "zscore_revert"（僅做多）/ "zscore_ls"（多空雙向）

@@ -453,3 +453,54 @@ def test_circuit_breaker_disabled_allows_entry():
     res = run_backtest(df, SigStrategy(allow_short=False), risk, cfg)
     # 有成功進場並平倉 → 有一筆交易
     assert len(res.trades) == 1
+
+
+# ── OPT-08：回測注入 funding + 成交對齊實盤(fill_lag)，讓回測-實盤偏差可診斷 ──
+def test_funding_cost_reduces_long_equity():
+    """持多付資金費（funding_rate_per_8h>0）→ 終值低於無 funding。預設 0 不影響。"""
+    df = make_df([100.0] * 12)          # 平盤，排除價格 pnl 干擾
+    df["sig"] = [1] * 12                # 全程做多
+    cfg0 = make_cfg(funding_rate_per_8h=0.0, interval="5m", fee_rate=0.0)
+    cfgf = make_cfg(funding_rate_per_8h=0.02, interval="5m", fee_rate=0.0)
+    eq0 = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg0), cfg0).equity_curve.iloc[-1]
+    eqf = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfgf), cfg0 and cfgf).equity_curve.iloc[-1]
+    assert eqf < eq0
+
+
+def test_funding_default_zero_is_backward_compatible():
+    """funding_rate_per_8h 預設 0 → 與舊回測結果完全一致。"""
+    df = make_df([100.0] * 12)
+    df["sig"] = [1] * 12
+    assert Config().funding_rate_per_8h == 0.0
+
+
+def test_funding_credits_short_position():
+    """持空在正資金費率下「收」funding → 終值高於無 funding（方向相反）。"""
+    df = make_df([100.0] * 12)
+    df["sig"] = [-1] * 12
+    cfg0 = make_cfg(funding_rate_per_8h=0.0, interval="5m", fee_rate=0.0)
+    cfgf = make_cfg(funding_rate_per_8h=0.02, interval="5m", fee_rate=0.0)
+    eq0 = run_backtest(df.copy(), SigStrategy(allow_short=True), RiskOfficer(cfg0), cfg0).equity_curve.iloc[-1]
+    eqf = run_backtest(df.copy(), SigStrategy(allow_short=True), RiskOfficer(cfgf), cfgf).equity_curve.iloc[-1]
+    assert eqf > eq0
+
+
+def test_fill_lag_executes_signal_entry_at_next_bar_open():
+    """fill_lag=1：訊號在第 i 根、成交在第 i+1 根 open。用 TP 價反推進場價（res.trades 只留出場）。"""
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0]
+    df = make_df(closes)                # open=close、上升序列
+    df["sig"] = [1] * 8
+    cfg1 = make_cfg(fill_lag=1, interval="5m", fee_rate=0.0, slippage=0.0)
+    cfg0 = make_cfg(fill_lag=0, interval="5m", fee_rate=0.0, slippage=0.0)
+    tp1 = next(t for t in run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg1), cfg1).trades
+               if t["side"] == "exit_sltp")["price"]
+    tp0 = next(t for t in run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg0), cfg0).trades
+               if t["side"] == "exit_sltp")["price"]
+    # take_profit_pct=0.04：fill_lag=1 進場 101→TP 105.04；fill_lag=0 進場 100→TP 104
+    assert tp1 == pytest.approx(101.0 * 1.04)
+    assert tp0 == pytest.approx(100.0 * 1.04)
+    assert tp1 > tp0                    # 上升序列延後一根進場價更高 → TP 更高
+
+
+def test_fill_lag_zero_is_backward_compatible():
+    assert Config().fill_lag == 0

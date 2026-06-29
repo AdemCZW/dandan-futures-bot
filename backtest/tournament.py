@@ -15,9 +15,36 @@ from __future__ import annotations
 import itertools
 import json
 
+import numpy as np
+
 from backtest.backtester import run_backtest
 from core.quant_researcher import STRATEGIES, build_strategy
 from core.risk_officer import RiskOfficer
+
+
+def bootstrap_mean_lower_bound(
+    values: list[float],
+    n_resamples: int = 2000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> float:
+    """OOS 平倉 pnl 的「平均期望值」單邊 bootstrap 信賴下界（OPT-12）。
+
+    重抽樣（有放回）n_resamples 次、各算平均，取 (1−confidence) 百分位當下界。
+    下界 > 0 才代表「扣掉抽樣噪音後期望值仍顯著為正」，作為 champion / best_params
+    晉升的統計閘門——分辨真 edge 與單一樣本的運氣。
+
+    註：這只校正「單一 OOS 樣本的抽樣噪音」，不等於已校正多重檢定/選擇偏誤
+    （本系統結構上拿不到誠實的累計試驗次數 N，故不做 headline Deflated Sharpe）。
+    空序列 → -inf（視為不顯著、不晉升）。
+    """
+    n = len(values)
+    if n == 0:
+        return float("-inf")
+    rng = np.random.default_rng(seed)
+    arr = np.asarray(values, dtype=float)
+    means = arr[rng.integers(0, n, size=(n_resamples, n))].mean(axis=1)
+    return float(np.percentile(means, (1.0 - confidence) * 100.0))
 
 # objective 名稱 → 用來排序的指標欄位（profit_factor 用保留 inf 的 raw 欄）
 _SCORE_KEY = {
@@ -102,11 +129,18 @@ def run_tournament(df, cfg, names: list[str] | None = None, min_trades: int = 20
 #   訓練窗選參數 → 鎖定 → 只在後續未見過的測試窗評分 → 跨 fold 彙總 OOS 交易。
 #   default 參數的 walk-forward 測「時間穩健性」；給 grid 則測「參數過擬合」。
 # =========================================================================== #
-def _fold_bounds(n: int, train_bars: int, test_bars: int) -> list[tuple]:
-    """回傳 [(train_start, train_end=test_start, test_end), ...]，測試窗不重疊前推。"""
+def _fold_bounds(n: int, train_bars: int, test_bars: int,
+                 purge: int = 0) -> list[tuple]:
+    """回傳 [(train_start, train_end, test_start, test_end), ...]，測試窗不重疊前推。
+
+    purge>0（OPT-11）在 train_end 與 test_start 間留 embargo gap：訓練段選參數時不會
+    緊貼測試段，降低跨界序列相關（趨勢橫跨邊界）讓 OOS 看起來偏好的偏誤。purge=0 時
+    test_start==train_end，與舊行為等價。
+    """
     bounds, start = [], 0
-    while start + train_bars + test_bars <= n:
-        bounds.append((start, start + train_bars, start + train_bars + test_bars))
+    while start + train_bars + purge + test_bars <= n:
+        ts = start + train_bars + purge
+        bounds.append((start, start + train_bars, ts, ts + test_bars))
         start += test_bars
     return bounds
 
@@ -136,18 +170,18 @@ def _param_combos(space: dict) -> list[dict]:
 
 def walk_forward_eval(df, name: str, cfg, grid: dict | None = None,
                       train_bars: int = 1500, test_bars: int = 500,
-                      min_trades_train: int = 10) -> dict:
+                      min_trades_train: int = 10, purge: int = 0) -> dict:
     """單一策略的 walk-forward 樣本外評估。
 
     每個 fold：在訓練窗用 grid 選最佳參數（grid=None → 用預設參數），鎖定後只在
     「未見過的」測試窗回測，蒐集測試窗的平倉交易。跨所有 fold 彙總 OOS 指標——
     這才是「真 edge」的試金石：訓練窗挑的東西在樣本外還賺不賺。
     """
-    bounds = _fold_bounds(len(df), train_bars, test_bars)
+    bounds = _fold_bounds(len(df), train_bars, test_bars, purge=purge)
     oos_pnls: list[float] = []
     fold_records, fold_rets = [], []
-    for a, b, c in bounds:
-        train, test = df.iloc[a:b], df.iloc[b:c]
+    for a, b, ts, te in bounds:
+        train, test = df.iloc[a:b], df.iloc[ts:te]
         params: dict = {}
         if grid:
             cand = []
@@ -175,10 +209,14 @@ def walk_forward_eval(df, name: str, cfg, grid: dict | None = None,
     comp = 1.0
     for r in fold_rets:
         comp *= (1.0 + r)
+    # OPT-12：OOS 期望值的 bootstrap 信賴下界（>0 才算扣掉抽樣噪音後仍有正期望）
+    oos_exp_lb = bootstrap_mean_lower_bound(oos_pnls) if oos_pnls else float("-inf")
     return {
         "strategy": name, "folds": len(fold_records),
         "oos_trades": m["trades"], "oos_win_rate": round(m["win_rate"], 4),
         "oos_expectancy": round(m["expectancy"], 4),
+        "oos_expectancy_lb": (None if oos_exp_lb == float("-inf")
+                              else round(oos_exp_lb, 4)),
         "oos_profit_factor": (None if m["profit_factor_raw"] == float("inf")
                               else round(m["profit_factor_raw"], 4)),
         "oos_profit_factor_raw": m["profit_factor_raw"],
@@ -187,11 +225,27 @@ def walk_forward_eval(df, name: str, cfg, grid: dict | None = None,
     }
 
 
+def _select_champion(ranked: list[dict], require_significant: bool = False):
+    """從排序後清單挑 champion：第一個 eligible 者；require_significant=True 時
+    還要 oos_expectancy_lb > 0（OPT-12 統計顯著性閘門，分辨 edge 與運氣）。"""
+    for r in ranked:
+        if not r.get("eligible"):
+            continue
+        if require_significant:
+            lb = r.get("oos_expectancy_lb")
+            if lb is None or lb <= 0:
+                continue
+        return r
+    return None
+
+
 def run_walkforward_tournament(df, cfg, names: list[str] | None = None,
                                grids: dict | None = None,
                                train_bars: int = 1500, test_bars: int = 500,
                                min_trades_oos: int = 30,
-                               min_trades_train: int = 10) -> dict:
+                               min_trades_train: int = 10,
+                               require_significant_oos: bool = False,
+                               purge: int = 0) -> dict:
     """全策略 walk-forward 錦標賽：依【OOS 期望值】排序，挑出樣本外最穩健者。
 
     grids：{strategy_name: param_space}，有給的策略才做每-fold 參數搜尋，其餘用預設。
@@ -203,14 +257,15 @@ def run_walkforward_tournament(df, cfg, names: list[str] | None = None,
     for name in names:
         try:
             results.append(walk_forward_eval(df, name, cfg, grids.get(name),
-                                             train_bars, test_bars, min_trades_train))
+                                             train_bars, test_bars, min_trades_train,
+                                             purge=purge))
         except Exception as e:                                 # noqa: BLE001
             results.append({"strategy": name, "oos_trades": 0,
                             "error": f"{type(e).__name__}: {e}",
                             "oos_expectancy": float("-inf")})
     ranked = rank(results, objective="oos_expectancy",
                   min_trades=min_trades_oos, trades_key="oos_trades")
-    champion = next((r for r in ranked if r["eligible"]), None)
+    champion = _select_champion(ranked, require_significant=require_significant_oos)
     return {"objective": "oos_expectancy", "min_trades_oos": min_trades_oos,
             "train_bars": train_bars, "test_bars": test_bars,
             "n_strategies": len(names), "ranked": ranked, "champion": champion}
