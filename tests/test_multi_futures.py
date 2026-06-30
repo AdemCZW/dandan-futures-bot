@@ -1,0 +1,385 @@
+"""多 bot 監督器 + 命名空間 HTTP + 崩潰隔離（離線、假 client）。
+
+驗證把多台 FuturesLiveTrader 跑在同一進程時的隔離正確性：
+state 檔、close 旗標、trades 過濾、崩潰不互相拖累。實際雲端往返需金鑰，這裡只測可離線的部分。
+"""
+import json
+import os
+from decimal import Decimal
+
+import pytest
+
+from config import Config
+from core.risk_officer import RiskOfficer
+from core.bot_state import BotState
+import run_live_futures as M
+
+
+# ── 離線假物件 ──────────────────────────────────────────────────────────
+class FakeExecu:
+    def __init__(self):
+        self.amt = 0.0
+        self._filters = {"min_qty": Decimal("0.001")}
+        self._mark = 100.0
+    def position_amt(self): return self.amt
+    def balance(self, a="USDT"): return 10000.0
+    def mark_price(self): return self._mark
+
+
+class FakeJournal:
+    def __init__(self): self.records = []
+    def log(self, side, price, qty=0, pnl=0, ts=None):
+        self.records.append({"side": side, "price": price, "qty": qty, "pnl": pnl})
+
+
+class ScriptStrat:
+    allow_short = True
+    def __init__(self, sigs=(0,)): self.sigs = list(sigs); self.i = -1
+    def prepare(self, df): return df
+    def signal(self, row, pos): self.i += 1; return self.sigs[min(self.i, len(self.sigs) - 1)]
+    def warmup_bars(self): return 200
+
+
+def _make_trader(state_path, symbol="ETHUSDT", strategy="trend_pullback"):
+    cfg = Config()
+    cfg.symbol = symbol
+    cfg.strategy = strategy
+    return M.FuturesLiveTrader(cfg, None, ScriptStrat(), RiskOfficer(cfg),
+                               FakeExecu(), FakeJournal(), state_path=state_path)
+
+
+# ── 任務 #72：state_path 實例隔離 ───────────────────────────────────────
+def test_state_path_isolation_two_traders_distinct_files(tmp_path, monkeypatch):
+    """兩個 trader 用不同 state_path → 各寫各的檔，互不覆蓋。"""
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: [])
+    p_eth = str(tmp_path / "bot_state_eth.json")
+    p_sol = str(tmp_path / "bot_state_sol.json")
+    eth = _make_trader(p_eth, symbol="ETHUSDT")
+    sol = _make_trader(p_sol, symbol="SOLUSDT")
+    eth.dir = 1; eth.entry_price = 2000.0; eth._save()
+    sol.dir = -1; sol.entry_price = 70.0; sol._save()
+    assert os.path.exists(p_eth) and os.path.exists(p_sol)
+    assert BotState.load(p_eth).symbol == "ETHUSDT"
+    assert BotState.load(p_eth).direction == 1
+    assert BotState.load(p_sol).symbol == "SOLUSDT"
+    assert BotState.load(p_sol).direction == -1
+
+
+def test_state_path_defaults_to_module_global(tmp_path, monkeypatch):
+    """不傳 state_path → 解析當前模組全域 STATE_PATH（保 monkeypatch 既有測試相容）。"""
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: [])
+    patched = str(tmp_path / "global_state.json")
+    monkeypatch.setattr(M, "STATE_PATH", patched)
+    cfg = Config(); cfg.symbol = "BTCUSDT"; cfg.strategy = "x"
+    t = M.FuturesLiveTrader(cfg, None, ScriptStrat(), RiskOfficer(cfg), FakeExecu(), FakeJournal())
+    assert t.state_path == patched
+
+
+# ── 任務 #73：BOTS_CONFIG 解析器 ────────────────────────────────────────
+import run_multi_futures as MM
+
+
+def test_parse_bots_config_valid_two_bots():
+    """有效設定（兩台）→ 正規化 list，套用預設值。"""
+    raw = ('[{"id":"eth","symbol":"ETHUSDT","strategy":"trend_pullback","interval":"1h"},'
+           '{"id":"sol","symbol":"SOLUSDT","strategy":"trend_pullback","interval":"1h"}]')
+    bots = MM.parse_bots_config(raw)
+    assert [b["id"] for b in bots] == ["eth", "sol"]
+    assert bots[0]["symbol"] == "ETHUSDT"
+    assert bots[1]["symbol"] == "SOLUSDT"
+    # 預設值套用
+    assert bots[0]["params"] == {}
+    assert bots[0]["leverage"] == 1
+    assert bots[0]["poll"] == 30
+
+
+def test_parse_bots_config_defaults_merge_and_override():
+    """defaults 提供共用值；每台可覆蓋。"""
+    raw = ('[{"id":"eth","symbol":"ETHUSDT"},'
+           '{"id":"sol","symbol":"SOLUSDT","leverage":3}]')
+    defaults = {"strategy": "trend_pullback", "interval": "1h", "leverage": 1}
+    bots = MM.parse_bots_config(raw, defaults=defaults)
+    assert bots[0]["strategy"] == "trend_pullback"   # 來自 defaults
+    assert bots[0]["leverage"] == 1                   # defaults
+    assert bots[1]["leverage"] == 3                   # 每台覆蓋
+
+
+def test_parse_bots_config_params_preserved():
+    """策略 params（dict）原樣保留。"""
+    raw = ('[{"id":"sol","symbol":"SOLUSDT","strategy":"fib_channel","interval":"15m",'
+           '"params":{"mode":"trend","volume_spike_ratio":1.8}}]')
+    bots = MM.parse_bots_config(raw)
+    assert bots[0]["params"]["mode"] == "trend"
+    assert bots[0]["params"]["volume_spike_ratio"] == 1.8
+
+
+def test_parse_bots_config_empty_raises():
+    for raw in ("", None, "[]"):
+        with pytest.raises(ValueError):
+            MM.parse_bots_config(raw)
+
+
+def test_parse_bots_config_invalid_json_raises():
+    with pytest.raises(ValueError):
+        MM.parse_bots_config("{not json")
+
+
+def test_parse_bots_config_not_a_list_raises():
+    with pytest.raises(ValueError):
+        MM.parse_bots_config('{"id":"eth","symbol":"ETHUSDT"}')   # dict 非 list
+
+
+def test_parse_bots_config_missing_required_field_raises():
+    raw = '[{"id":"eth","strategy":"trend_pullback","interval":"1h"}]'   # 缺 symbol
+    with pytest.raises(ValueError) as e:
+        MM.parse_bots_config(raw)
+    assert "symbol" in str(e.value)
+
+
+def test_parse_bots_config_duplicate_id_raises():
+    raw = ('[{"id":"x","symbol":"ETHUSDT","strategy":"trend_pullback","interval":"1h"},'
+           '{"id":"x","symbol":"SOLUSDT","strategy":"trend_pullback","interval":"1h"}]')
+    with pytest.raises(ValueError) as e:
+        MM.parse_bots_config(raw)
+    assert "id" in str(e.value).lower()
+
+
+@pytest.mark.parametrize("bad_id", ["../etc", "a/b", "a.b", "has space", "x!", ""])
+def test_parse_bots_config_unsafe_id_raises(bad_id):
+    """id 會變成檔名與路由前綴 → 只允許 [A-Za-z0-9_-]，擋路徑穿越。"""
+    raw = json.dumps([{"id": bad_id, "symbol": "ETHUSDT",
+                       "strategy": "trend_pullback", "interval": "1h"}])
+    with pytest.raises(ValueError):
+        MM.parse_bots_config(raw)
+
+
+# ── 任務 #75：命名空間 HTTP 路由 + close 隔離 ──────────────────────────
+def _two_workers(state_dir):
+    eth = MM.BotWorker({"id": "eth", "symbol": "ETHUSDT", "strategy": "trend_pullback",
+                        "interval": "1h", "params": {}, "leverage": 1, "poll": 30},
+                       state_dir=str(state_dir))
+    sol = MM.BotWorker({"id": "sol", "symbol": "SOLUSDT", "strategy": "trend_pullback",
+                        "interval": "1h", "params": {}, "leverage": 1, "poll": 30},
+                       state_dir=str(state_dir))
+    return {"eth": eth, "sol": sol}
+
+
+def test_worker_paths_derived_from_id(tmp_path):
+    """每台 bot 的 state 檔與 close 旗標路徑都帶 id → 互不覆蓋。"""
+    w = _two_workers(tmp_path)
+    assert w["eth"].state_path != w["sol"].state_path
+    assert w["eth"].state_path.endswith("bot_state_eth.json")
+    assert w["sol"].close_flag_path.endswith("close_request_sol.flag")
+    assert w["eth"].close_event is not w["sol"].close_event
+
+
+def test_route_get_health_always_ok(tmp_path):
+    status, body = MM.route_get(_two_workers(tmp_path), "/health")
+    assert status == 200
+    assert json.loads(body) == {"ok": True}
+
+
+def test_route_get_state_reads_own_file(tmp_path):
+    workers = _two_workers(tmp_path)
+    with open(workers["eth"].state_path, "w") as f:
+        json.dump({"symbol": "ETHUSDT", "direction": 1}, f)
+    with open(workers["sol"].state_path, "w") as f:
+        json.dump({"symbol": "SOLUSDT", "direction": -1}, f)
+    s_eth, b_eth = MM.route_get(workers, "/eth/state")
+    s_sol, b_sol = MM.route_get(workers, "/sol/state")
+    assert s_eth == 200 and json.loads(b_eth)["symbol"] == "ETHUSDT"
+    assert s_sol == 200 and json.loads(b_sol)["symbol"] == "SOLUSDT"
+
+
+def test_route_get_state_missing_file_returns_empty_obj(tmp_path):
+    workers = _two_workers(tmp_path)
+    status, body = MM.route_get(workers, "/eth/state")   # 檔還沒寫
+    assert status == 200 and json.loads(body) == {}
+
+
+def test_route_get_unknown_id_404(tmp_path):
+    status, _ = MM.route_get(_two_workers(tmp_path), "/btc/state")
+    assert status == 404
+
+
+def test_route_get_trades_filters_by_strategy_and_symbol(tmp_path, monkeypatch):
+    """/{id}/trades 必須用「該台」strategy+symbol 過濾（兩台同策略，只靠 symbol 區分）。"""
+    captured = {}
+    def fake_read(limit=50, mode=None, strategy=None, symbol=None, **kw):
+        captured["strategy"] = strategy
+        captured["symbol"] = symbol
+        captured["limit"] = limit
+        return [{"side": "entry", "symbol": symbol}]
+    monkeypatch.setattr("core.trade_journal.read_trades_db", fake_read)
+    workers = _two_workers(tmp_path)
+    status, body = MM.route_get(workers, "/sol/trades?limit=7")
+    assert status == 200
+    assert captured["strategy"] == "trend_pullback"
+    assert captured["symbol"] == "SOLUSDT"      # 關鍵：sol 路由 → SOLUSDT，不是 ETH
+    assert captured["limit"] == 7
+    assert json.loads(body)[0]["symbol"] == "SOLUSDT"
+
+
+def test_route_post_close_writes_only_target_flag(tmp_path):
+    """POST /eth/close 只寫 eth 旗標 + set eth event，絕不誤觸 sol。"""
+    workers = _two_workers(tmp_path)
+    status, payload = MM.route_post(workers, "/eth/close",
+                                    token_header="secret", env_token="secret")
+    assert status == 200 and payload["ok"] is True
+    assert os.path.exists(workers["eth"].close_flag_path)
+    assert not os.path.exists(workers["sol"].close_flag_path)
+    assert workers["eth"].close_event.is_set()
+    assert not workers["sol"].close_event.is_set()
+
+
+def test_route_post_close_rejects_bad_token(tmp_path):
+    workers = _two_workers(tmp_path)
+    status, payload = MM.route_post(workers, "/eth/close",
+                                    token_header="wrong", env_token="secret")
+    assert status == 403 and payload["ok"] is False
+    assert not os.path.exists(workers["eth"].close_flag_path)
+    assert not workers["eth"].close_event.is_set()
+
+
+def test_route_post_close_disabled_when_no_env_token(tmp_path):
+    workers = _two_workers(tmp_path)
+    status, payload = MM.route_post(workers, "/eth/close",
+                                    token_header="anything", env_token="")
+    assert status == 403 and payload["ok"] is False
+
+
+def test_route_post_close_unknown_id_404(tmp_path):
+    status, _ = MM.route_post(_two_workers(tmp_path), "/btc/close",
+                              token_header="secret", env_token="secret")
+    assert status == 404
+
+
+# ── 任務 #74：監督執行緒 + 崩潰隔離 ────────────────────────────────────
+import threading
+
+
+class _StubCfg:
+    def __init__(self, symbol="ETHUSDT", interval="1h", poll=30):
+        self.symbol = symbol
+        self.interval = interval
+        self.poll_seconds = poll
+
+
+def test_poll_loop_swallows_transient_errors(tmp_path, monkeypatch):
+    """單輪拋錯（網路抖動）→ 吞掉、續跑，不中斷迴圈（與單台主迴圈韌性一致）。"""
+    import pandas as pd
+    workers = _two_workers(tmp_path)
+    w = workers["eth"]
+    calls = {"fetch": 0, "bars": 0}
+
+    def fake_fetch(client, symbol, interval, n, futures=True):
+        calls["fetch"] += 1
+        if calls["fetch"] == 1:
+            raise RuntimeError("transient network blip")
+        idx = pd.date_range("2026-06-30", periods=3, freq="1h")
+        return pd.DataFrame({"close": [1.0, 2.0, 3.0]}, index=idx)
+    monkeypatch.setattr(MM, "fetch_klines", fake_fetch)
+
+    class FakeTrader:
+        def on_bar_close(self, bt): calls["bars"] += 1
+        def _heartbeat(self, p=None): pass
+        def manual_close(self): return {"ok": True}
+
+    stop = threading.Event()
+    def sleep_fn(secs, st, ev=None):
+        if calls["fetch"] >= 2:
+            st.set()
+    MM.poll_loop(w, FakeTrader(), None, _StubCfg(), stop, sleep_fn, lambda *a: None)
+    assert calls["fetch"] >= 2     # 第一次拋錯後仍續跑
+    assert calls["bars"] == 1      # 第二次成功觸發決策
+
+
+def test_poll_loop_processes_close_flag(tmp_path, monkeypatch):
+    """偵測到 close 旗標 → 呼叫 manual_close 並刪旗標。"""
+    import pandas as pd
+    workers = _two_workers(tmp_path)
+    w = workers["eth"]
+    with open(w.close_flag_path, "w") as f:
+        f.write("now")
+    closed = {"n": 0}
+
+    def fake_fetch(client, symbol, interval, n, futures=True):
+        idx = pd.date_range("2026-06-30", periods=3, freq="1h")
+        return pd.DataFrame({"close": [1.0, 2.0, 3.0]}, index=idx)
+    monkeypatch.setattr(MM, "fetch_klines", fake_fetch)
+
+    class FakeTrader:
+        def on_bar_close(self, bt): pass
+        def _heartbeat(self, p=None): pass
+        def manual_close(self): closed["n"] += 1; return {"ok": True}
+
+    stop = threading.Event()
+    MM.poll_loop(w, FakeTrader(), None, _StubCfg(), stop,
+                 lambda secs, st, ev=None: st.set(), lambda *a: None)
+    assert closed["n"] == 1
+    assert not os.path.exists(w.close_flag_path)   # 旗標已消費
+
+
+def test_supervise_restarts_on_crash(tmp_path):
+    """run 階段拋致命錯 → 監督層 backoff 後重建，restarts/last_error 記錄。"""
+    w = _two_workers(tmp_path)["eth"]
+    stop = threading.Event()
+    runs = {"n": 0}
+
+    def build_fn(worker): return ("trader", "client", "cfg")
+    def run_fn(worker, trader, client, cfg, st, sleep, log):
+        runs["n"] += 1
+        raise RuntimeError("crash")
+    def sleep_fn(secs, st, ev=None):
+        if runs["n"] >= 3:
+            st.set()
+    MM.supervise(w, build_fn, run_fn, stop, sleep_fn, lambda *a: None, max_backoff=0.001)
+    assert runs["n"] >= 3
+    assert w.restarts >= 3
+    assert w.last_error is not None
+
+
+def test_supervise_retries_failed_init(tmp_path):
+    """build（init）連續拋錯 → 不放棄，持續重試（API 暫時不可用情境）。"""
+    w = _two_workers(tmp_path)["eth"]
+    stop = threading.Event()
+    builds = {"n": 0}
+
+    def build_fn(worker):
+        builds["n"] += 1
+        if builds["n"] >= 3:
+            stop.set()
+        raise RuntimeError("API down")
+    def run_fn(*a): pass
+    MM.supervise(w, build_fn, run_fn, stop, lambda *a, **k: None,
+                 lambda *a: None, max_backoff=0.001)
+    assert builds["n"] >= 3        # 連續重試，未放棄
+
+
+def test_supervisor_crash_isolation_concurrent(tmp_path):
+    """一台不斷崩潰，另一台在獨立執行緒持續推進、完全不受影響。"""
+    workers = _two_workers(tmp_path)
+    stop = threading.Event()
+    cB = {"n": 0}
+
+    def build_fn(w): return ("t", "c", "cfg")
+    def run_crash(w, *a): raise RuntimeError("A down")
+    def run_count(w, t, c, cfg, st, sleep, log):
+        while not st.is_set():
+            cB["n"] += 1
+            if cB["n"] >= 20:
+                st.set()
+            sleep(0.001, st)
+    def sleep_fn(secs, st, ev=None): st.wait(min(secs, 0.005))
+
+    tA = threading.Thread(target=MM.supervise,
+                          args=(workers["eth"], build_fn, run_crash, stop, sleep_fn, lambda *a: None),
+                          kwargs={"max_backoff": 0.001}, daemon=True)
+    tB = threading.Thread(target=MM.supervise,
+                          args=(workers["sol"], build_fn, run_count, stop, sleep_fn, lambda *a: None),
+                          daemon=True)
+    tA.start(); tB.start()
+    tB.join(timeout=5); stop.set(); tA.join(timeout=5)
+    assert cB["n"] >= 20                       # B 在 A 崩潰期間照常推進
+    assert workers["eth"].restarts >= 1        # A 確實被重啟過
+    assert not tB.is_alive()

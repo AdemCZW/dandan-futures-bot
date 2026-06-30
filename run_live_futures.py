@@ -71,7 +71,12 @@ class FuturesLiveTrader:
     def __init__(self, cfg, client, strat, risk, execu, journal,
                  cb_max_losses: int = 3, cb_pause_hours: float = 24,
                  ml_model_path: str | None = None,
-                 ml_threshold: float = 0.55):
+                 ml_threshold: float = 0.55,
+                 state_path: str | None = None):
+        # state_path 預設 None → 解析「當前」模組全域 STATE_PATH（而非定義時綁定），
+        # 既保留單台部署相容（含既有測試的 monkeypatch.setattr(M, "STATE_PATH", …)），
+        # 又讓多 bot 監督器能為每台傳入獨立檔路徑，避免共用一檔互相覆蓋。
+        self.state_path = state_path if state_path is not None else STATE_PATH
         self.cfg, self.client, self.strat = cfg, client, strat
         self.risk, self.execu, self.journal = risk, execu, journal
         self.dir = 0
@@ -135,8 +140,8 @@ class FuturesLiveTrader:
         # and live_status() defaults to "paper", fetching from local DB → trades vanish.
         existing: dict = {}
         try:
-            if os.path.exists(STATE_PATH):
-                with open(STATE_PATH) as fh:
+            if os.path.exists(self.state_path):
+                with open(self.state_path) as fh:
                     raw = json.load(fh)
                     if isinstance(raw, dict):
                         existing = raw
@@ -144,11 +149,11 @@ class FuturesLiveTrader:
             pass
         existing.update(asdict(bs))
         existing["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        tmp = STATE_PATH + ".tmp"
+        tmp = self.state_path + ".tmp"
         try:
             with open(tmp, "w") as fh:
                 json.dump(existing, fh, default=str)
-            os.replace(tmp, STATE_PATH)
+            os.replace(tmp, self.state_path)
         except Exception:
             pass
 
@@ -192,7 +197,7 @@ class FuturesLiveTrader:
         """重啟還原：以合約實際帶號持倉為準，狀態檔補 entry/SL/TP。"""
         amt = self.execu.position_amt()
         dust = float(self.execu._filters["min_qty"])
-        st = BotState.load(STATE_PATH)
+        st = BotState.load(self.state_path)
         if abs(amt) > dust:
             self.dir = 1 if amt > 0 else -1
             self.qty = abs(amt)
@@ -221,7 +226,7 @@ class FuturesLiveTrader:
             self._stop_oid = self._tp_oid = self._stop_sl = None
             msg = "空手啟動（合約無未平倉部位）"
         # 從狀態檔還原 Circuit Breaker
-        st = BotState.load(STATE_PATH)
+        st = BotState.load(self.state_path)
         self.cb = CircuitBreaker.from_dict(
             {"consecutive_losses": st.cb_consecutive_losses,
              "paused_until": st.cb_paused_until or None},
@@ -677,7 +682,7 @@ class FuturesLiveTrader:
             self._guard.upsert_equity(self.cfg.strategy, self.cfg.symbol, equity)
 
         # 讀回上次持久化（取 last_balance 比較；prev 也保住未在此函式更新的欄位語意）
-        prev = BotState.load(STATE_PATH)
+        prev = BotState.load(self.state_path)
 
         # 測試網重置偵測：餘額大幅下滑 → 清空持倉狀態（含共用 DB 殘列，避免幽靈暴露）
         if equity is not None and detect_testnet_reset(current=equity, last=prev.last_balance):
@@ -731,30 +736,30 @@ class FuturesLiveTrader:
             "last_decision": last_decision,
             "mode": "futures",
         }
-        tmp = STATE_PATH + ".tmp"
+        tmp = self.state_path + ".tmp"
         try:
             with open(tmp, "w") as f:
                 json.dump(state, f, default=str)
-            os.replace(tmp, STATE_PATH)
+            os.replace(tmp, self.state_path)
         except Exception:
             pass
 
     def _heartbeat(self, price: float | None = None) -> None:
         """同一根 K 線的輪詢週期：只更新 updated_at + 現價，維持前端綠燈。"""
-        if not os.path.exists(STATE_PATH):
+        if not os.path.exists(self.state_path):
             return
         try:
-            with open(STATE_PATH) as f:
+            with open(self.state_path) as f:
                 st = json.load(f)
             if not isinstance(st, dict):
                 return
             st["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             if price is not None:
                 st["last_price"] = price
-            tmp = STATE_PATH + ".tmp"
+            tmp = self.state_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(st, f, default=str)
-            os.replace(tmp, STATE_PATH)
+            os.replace(tmp, self.state_path)
         except Exception:
             pass
 
