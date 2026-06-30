@@ -941,6 +941,9 @@ def main():
     cfg.strategy, cfg.symbol, cfg.interval = args.strategy, args.symbol, args.interval
     cfg.futures_leverage, cfg.poll_seconds = args.leverage, args.poll
     cfg.strategy_params = {**cfg.strategy_params, **parse_bot_params(args.params)}
+    _risk = os.getenv("RISK_PER_TRADE")
+    if _risk:
+        cfg.risk_per_trade = float(_risk)
 
     # 健康/狀態 HTTP 伺服器「最先」啟動：不等任何幣安 API（exchange_info/leverage/balance），
     # 確保雲端 healthcheck 在啟動初期就能通過；金鑰缺失或交易初始化失敗都不能讓 process 結束。
