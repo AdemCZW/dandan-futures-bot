@@ -299,7 +299,13 @@ def build_trader(worker):
         cb_pause_hours=float(conf.get("cb_pause_hours", 24)),
         ml_model_path=ml_path,
         ml_threshold=float(os.getenv("ML_THRESHOLD", "0.55")),
-        state_path=worker.state_path)
+        state_path=worker.state_path,
+        # per-bot 旗標：合併進程不能用共用 env 綁死各台（例：僅 Bot2 要 DCG）。
+        # conf 沒給 → None → FuturesLiveTrader 退回 os.getenv（與單台相容）。
+        exchange_stop_enabled=conf.get("exchange_stop"),
+        dcg_enabled=conf.get("dcg_enabled"),
+        dcg_max_losses=conf.get("dcg_max_losses"),
+        dcg_cooldown_bars=conf.get("dcg_cooldown_bars"))
     trader.restore()
     _log(worker.id, f"啟動 {cfg.symbol} {cfg.interval} {cfg.strategy} "
                     f"槓桿{cfg.futures_leverage}x | 餘額 {balance:.2f}")

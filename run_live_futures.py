@@ -72,11 +72,18 @@ class FuturesLiveTrader:
                  cb_max_losses: int = 3, cb_pause_hours: float = 24,
                  ml_model_path: str | None = None,
                  ml_threshold: float = 0.55,
-                 state_path: str | None = None):
+                 state_path: str | None = None,
+                 exchange_stop_enabled: bool | None = None,
+                 dcg_enabled: bool | None = None,
+                 dcg_max_losses: int | None = None,
+                 dcg_cooldown_bars: int | None = None):
         # state_path 預設 None → 解析「當前」模組全域 STATE_PATH（而非定義時綁定），
         # 既保留單台部署相容（含既有測試的 monkeypatch.setattr(M, "STATE_PATH", …)），
         # 又讓多 bot 監督器能為每台傳入獨立檔路徑，避免共用一檔互相覆蓋。
         self.state_path = state_path if state_path is not None else STATE_PATH
+        # exchange_stop / dcg 旗標預設 None → 退回 os.getenv（單台行為不變）；
+        # 多 bot 監督器為每台顯式傳入，避免合併進程共用同一份 env 把各台旗標綁死
+        # （例：只有 Bot2 要 DCG_ENABLED=1，不能讓他台也被開啟）。
         self.cfg, self.client, self.strat = cfg, client, strat
         self.risk, self.execu, self.journal = risk, execu, journal
         self.dir = 0
@@ -88,16 +95,21 @@ class FuturesLiveTrader:
         self._entry_sl_dist = 0.0          # 進場時的原始停損距離（scale-out 閾值用）
         # 交易所掛單式硬停損（EXCHANGE_STOP_ENABLED；預設關，逐台 env 開）：
         # bot 當機/熔斷/網路斷期間仍由交易所端 STOP_MARKET/TAKE_PROFIT_MARKET 守護倉位。
-        self._exchange_stop = os.getenv("EXCHANGE_STOP_ENABLED", "0").lower() in ("1", "true", "yes")
+        self._exchange_stop = (
+            bool(exchange_stop_enabled) if exchange_stop_enabled is not None
+            else os.getenv("EXCHANGE_STOP_ENABLED", "0").lower() in ("1", "true", "yes"))
         self._stop_oid = None               # 交易所停損單 orderId
         self._tp_oid = None                 # 交易所停利單 orderId
         self._stop_sl = None                # 已掛停損單對應的 sl 價（變動時才 cancel/replace）
         self.cb = CircuitBreaker(max_losses=cb_max_losses, pause_hours=cb_pause_hours)
-        # 方向感知通道護欄（fib_channel reversion 連虧防呆）；預設停用，需 env 開啟
+        # 方向感知通道護欄（fib_channel reversion 連虧防呆）；預設停用，需 env 或參數開啟
         self._dcg = DirectionalChannelGuard(
-            max_losses=int(os.getenv("DCG_MAX_LOSSES", "3")),
-            cooldown_bars=int(os.getenv("DCG_COOLDOWN_BARS", "8")),
-            enabled=os.getenv("DCG_ENABLED", "0").lower() in ("1", "true", "yes"))
+            max_losses=int(dcg_max_losses if dcg_max_losses is not None
+                           else os.getenv("DCG_MAX_LOSSES", "3")),
+            cooldown_bars=int(dcg_cooldown_bars if dcg_cooldown_bars is not None
+                              else os.getenv("DCG_COOLDOWN_BARS", "8")),
+            enabled=(bool(dcg_enabled) if dcg_enabled is not None
+                     else os.getenv("DCG_ENABLED", "0").lower() in ("1", "true", "yes")))
         # PortfolioGuard：跨 bot 同向暴露控制；max_notional 由 env 設定（預設 15000 USDT）
         from core.portfolio_guard import PortfolioGuard
         self._guard = PortfolioGuard()

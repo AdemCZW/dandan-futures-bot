@@ -397,6 +397,40 @@ def test_single_main_delegates_to_multi_when_bots_config_set(monkeypatch):
     assert called["n"] == 1
 
 
+def _make_trader_flags(state_path, **flags):
+    cfg = Config(); cfg.symbol = "SOLUSDT"; cfg.strategy = "fib_channel"
+    return M.FuturesLiveTrader(cfg, None, ScriptStrat(), RiskOfficer(cfg),
+                               FakeExecu(), FakeJournal(), state_path=str(state_path), **flags)
+
+
+def test_dcg_enabled_param_overrides_env(tmp_path, monkeypatch):
+    """合併進程：DCG 須 per-bot 可設，不被共用 env 綁死。
+
+    無 env 但參數 True → 啟用；env=1 但參數 False → 停用（Bot2 的 DCG 不波及他台）。
+    """
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: [])
+    monkeypatch.delenv("DCG_ENABLED", raising=False)
+    assert _make_trader_flags(tmp_path / "a.json", dcg_enabled=True)._dcg.enabled is True
+    monkeypatch.setenv("DCG_ENABLED", "1")
+    assert _make_trader_flags(tmp_path / "b.json", dcg_enabled=False)._dcg.enabled is False
+
+
+def test_dcg_enabled_none_falls_back_to_env(tmp_path, monkeypatch):
+    """未指定（None）→ 退回 os.getenv（單台行為完全不變）。"""
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: [])
+    monkeypatch.setenv("DCG_ENABLED", "1")
+    assert _make_trader_flags(tmp_path / "c.json", dcg_enabled=None)._dcg.enabled is True
+
+
+def test_exchange_stop_param_overrides_env(tmp_path, monkeypatch):
+    """exchange_stop 同樣 per-bot 可設（未來各台可不同），預設退回 env。"""
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: [])
+    monkeypatch.delenv("EXCHANGE_STOP_ENABLED", raising=False)
+    assert _make_trader_flags(tmp_path / "d.json", exchange_stop_enabled=True)._exchange_stop is True
+    monkeypatch.setenv("EXCHANGE_STOP_ENABLED", "1")
+    assert _make_trader_flags(tmp_path / "e.json", exchange_stop_enabled=False)._exchange_stop is False
+
+
 def test_single_main_no_delegation_without_bots_config(monkeypatch):
     """未設 BOTS_CONFIG → 不委派（單台行為不變）。短路單台路徑驗證未進多 bot。"""
     monkeypatch.delenv("BOTS_CONFIG", raising=False)
