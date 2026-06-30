@@ -150,6 +150,21 @@ function MiniStat({ label, children, title }) {
 const winPctOf = (trades, wins) => (trades > 0 ? Math.round((wins / trades) * 100) : null)
 
 
+/** 根據策略 + 週期 → 一句白話說明目前的交易規劃。 */
+function strategyPlan(strategy, interval) {
+  const tf = interval || ''
+  switch (strategy) {
+    case 'fib_ema':
+      return `等 ${tf} EMA 多空完整排列後順勢進場，Chandelier 追蹤停損保住趨勢浮盈，不追 ${tf} 以下短線噪音`
+    case 'fib_channel':
+      return `Fib 斜向通道均值回歸：在通道上下緣接 ${tf} 短線反彈，震盪盤賺差價；趨勢行情暫停進場`
+    case 'trend_pullback':
+      return `200EMA 判斷 ${tf} 主方向，等回踩到支撐區後 KD 觸發才順勢進場，不逆趨勢`
+    default:
+      return `${(strategy || '').replace(/_/g, ' ')} ${tf} 自動交易`
+  }
+}
+
 // ── BotCard ─────────────────────────────────────────────────────────────────
 
 function BotCard({ data, num, color, livePrice: propLivePrice }) {
@@ -256,7 +271,11 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
             title={fresh ? '在線' : '離線'}
           />
         </div>
-        {/* 第二列：即時現價（隨行情跳動，漲綠跌紅）*/}
+        {/* 第二列：白話交易規劃說明 */}
+        <div className="muted" style={{ fontSize: 10, lineHeight: 1.4 }}>
+          {strategyPlan(data.strategy, data.interval)}
+        </div>
+        {/* 第三列：即時現價（隨行情跳動，漲綠跌紅）*/}
         {price != null && (
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
             <span
