@@ -121,12 +121,22 @@ def _worker_trades_bytes(worker: BotWorker, query: str) -> bytes:
         return b"[]"
 
 
+def _read_state_bytes(worker: BotWorker) -> bytes:
+    """讀該台 state 檔位元組；缺檔/讀取失敗 → 空物件（前端容忍）。"""
+    try:
+        with open(worker.state_path, "rb") as f:
+            return f.read()
+    except OSError:
+        return b"{}"
+
+
 def route_get(workers: dict, path: str):
     """純函式路由（GET）→ (status, body_bytes)。不碰 socket，便於離線測試。
 
     /health            → 永遠 200（即使所有 bot 還在 init / 已崩潰重啟中）
     /{id}/state        → 該台 state 檔位元組（缺檔回 {}）
     /{id}/trades?...   → 該台近期成交（依 strategy+symbol 過濾）
+    /state、/trades    → 向後相容：無 id 前綴 → 第一台 bot（既有指向 root 的 dashboard URL 不壞）
     其餘 / 未知 id      → 404
     """
     parsed = urllib.parse.urlparse(path)
@@ -134,6 +144,14 @@ def route_get(workers: dict, path: str):
     if p == "/health":
         return 200, b'{"ok":true}'
     segs = [s for s in p.split("/") if s]
+    # 向後相容根路由：/state、/trades（無 id）→ 第一台 bot
+    if len(segs) == 1 and segs[0] in ("state", "trades"):
+        first = next(iter(workers.values()), None)
+        if first is None:
+            return 200, (b"{}" if segs[0] == "state" else b"[]")
+        if segs[0] == "state":
+            return 200, _read_state_bytes(first)
+        return 200, _worker_trades_bytes(first, parsed.query)
     if len(segs) != 2:
         return 404, b'{"error":"not found"}'
     wid, action = segs
@@ -141,11 +159,7 @@ def route_get(workers: dict, path: str):
     if worker is None:
         return 404, b'{"error":"unknown bot id"}'
     if action == "state":
-        try:
-            with open(worker.state_path, "rb") as f:
-                return 200, f.read()
-        except OSError:                     # 缺檔/讀取失敗 → 空物件（前端容忍）
-            return 200, b"{}"
+        return 200, _read_state_bytes(worker)
     if action == "trades":
         return 200, _worker_trades_bytes(worker, parsed.query)
     return 404, b'{"error":"not found"}'
@@ -161,9 +175,13 @@ def route_post(workers: dict, path: str, token_header, env_token):
     from datetime import datetime, timezone
     parsed = urllib.parse.urlparse(path)
     segs = [s for s in parsed.path.split("/") if s]
-    if len(segs) != 2 or segs[1] != "close":
+    # /close（無 id）→ 第一台；/{id}/close → 指定台；其餘 → 404
+    if len(segs) == 1 and segs[0] == "close":
+        worker = next(iter(workers.values()), None)
+    elif len(segs) == 2 and segs[1] == "close":
+        worker = workers.get(segs[0])
+    else:
         return 404, {"ok": False, "msg": "not found"}
-    worker = workers.get(segs[0])
     if worker is None:
         return 404, {"ok": False, "msg": "unknown bot id"}
     if not env_token or token_header != env_token:

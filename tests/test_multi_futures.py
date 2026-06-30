@@ -254,6 +254,39 @@ def test_route_post_close_unknown_id_404(tmp_path):
     assert status == 404
 
 
+# ── 向後相容根路由：無 id 前綴 → 第一台 bot（既有指向 root 的 dashboard URL 不壞）──
+def test_route_get_root_state_serves_first_bot(tmp_path):
+    workers = _two_workers(tmp_path)            # 插入序：eth 在前
+    with open(workers["eth"].state_path, "w") as f:
+        json.dump({"symbol": "ETHUSDT"}, f)
+    status, body = MM.route_get(workers, "/state")
+    assert status == 200 and json.loads(body)["symbol"] == "ETHUSDT"
+
+
+def test_route_get_root_trades_serves_first_bot(tmp_path, monkeypatch):
+    captured = {}
+    def fake_read(limit=50, mode=None, strategy=None, symbol=None, **kw):
+        captured["symbol"] = symbol
+        return []
+    monkeypatch.setattr("core.trade_journal.read_trades_db", fake_read)
+    MM.route_get(_two_workers(tmp_path), "/trades?limit=5")
+    assert captured["symbol"] == "ETHUSDT"      # 第一台
+
+
+def test_route_post_root_close_targets_first_bot(tmp_path):
+    workers = _two_workers(tmp_path)
+    status, payload = MM.route_post(workers, "/close",
+                                    token_header="secret", env_token="secret")
+    assert status == 200 and payload["ok"] is True
+    assert os.path.exists(workers["eth"].close_flag_path)        # 第一台
+    assert not os.path.exists(workers["sol"].close_flag_path)
+
+
+def test_route_get_root_state_empty_when_no_workers():
+    status, body = MM.route_get({}, "/state")
+    assert status == 200 and json.loads(body) == {}
+
+
 # ── 任務 #74：監督執行緒 + 崩潰隔離 ────────────────────────────────────
 import threading
 
