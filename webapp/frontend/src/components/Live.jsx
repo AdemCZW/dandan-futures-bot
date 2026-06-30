@@ -171,6 +171,8 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
   // 手動平倉狀態（hooks 必須無條件在最上方，故置於 !data 早退之前）
   const [closing, setClosing] = useState(false)
   const [closeMsg, setCloseMsg] = useState(null)
+  const [collapsed, setCollapsed] = useState(false)
+  const [chartOpen, setChartOpen] = useState(true)
 
   // 即時價格方向追蹤：漲 → 綠閃、跌 → 紅閃
   const prevPriceRef            = useRef(null)
@@ -208,6 +210,10 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
       <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>載入中…</div>
     </div>
   )
+
+  // collapsed 摘要列用到的數值（必須在 hooks 之後、早退之後計算）
+  const _dir  = data.direction ?? 0
+  const _pos  = data.in_position
 
   const fresh    = data.age_seconds != null && data.age_seconds < (data.poll ? data.poll * 3 : 180)
   const realized = data.realized_pnl ?? 0
@@ -251,12 +257,15 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
   return (
     <div className="panel" style={{
       borderTop: `2px solid ${color}`,
-      display: 'flex', flexDirection: 'column', gap: 12,
+      display: 'flex', flexDirection: 'column', gap: collapsed ? 0 : 12,
     }}>
 
-      {/* ── 標頭 ── */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {/* 第一列：名稱 / 策略 / 幣對 + 在線點 */}
+      {/* ── 標頭（點擊展開/收合）── */}
+      <div
+        onClick={() => setCollapsed(c => !c)}
+        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}
+      >
+        {/* 第一列：名稱 / 策略 / 幣對 + 在線點 + 摺疊箭頭 */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, color }}>
             Bot #{num}
@@ -265,18 +274,43 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
             {String(data.strategy || '').toUpperCase()}
           </span>
           <span className="muted" style={{ fontSize: 11 }}>{data.symbol} · {data.interval}</span>
+          {/* collapsed 時在標頭行內嵌顯示現價 + 淨值 + 持倉狀態 */}
+          {collapsed && price != null && (
+            <span
+              key={flashKey}
+              className={priceDir > 0 ? 'price-flash-up' : priceDir < 0 ? 'price-flash-down' : ''}
+              style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 700 }}
+            >
+              ${fmt(price)}
+            </span>
+          )}
+          {collapsed && (
+            <span className={`num ${netPct >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 12, fontWeight: 600 }}>
+              ${fmt(netVal)} ({fmtPct(netPct)})
+            </span>
+          )}
+          {collapsed && _pos && (
+            <span className={`badge ${_dir === 1 ? 'badge-long' : 'badge-short'}`} style={{ fontSize: 10 }}>
+              {_dir === 1 ? '持多' : '持空'}
+            </span>
+          )}
           <span
             style={{ marginLeft: 'auto', width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
               background: fresh ? 'var(--pos)' : 'var(--faint)', display: 'inline-block' }}
             title={fresh ? '在線' : '離線'}
           />
+          <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>
+            {collapsed ? '▸' : '▾'}
+          </span>
         </div>
-        {/* 第二列：白話交易規劃說明 */}
-        <div className="muted" style={{ fontSize: 10, lineHeight: 1.4 }}>
-          {strategyPlan(data.strategy, data.interval)}
-        </div>
-        {/* 第三列：即時現價（隨行情跳動，漲綠跌紅）*/}
-        {price != null && (
+        {/* 第二列：白話交易規劃說明（收合時隱藏）*/}
+        {!collapsed && (
+          <div className="muted" style={{ fontSize: 10, lineHeight: 1.4 }}>
+            {strategyPlan(data.strategy, data.interval)}
+          </div>
+        )}
+        {/* 第三列：即時現價（收合時已在第一列顯示，展開才獨立大字顯示）*/}
+        {!collapsed && price != null && (
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
             <span
               key={flashKey}
@@ -294,6 +328,9 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
           </div>
         )}
       </div>
+
+      {/* ── 摺疊時隱藏以下所有內容 ── */}
+      {!collapsed && (<>
 
       {/* ── 連續同方向虧損警示（通道方向可能已反轉）── */}
       {streak && streak.count >= 2 && (
@@ -377,22 +414,32 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
       {/* ── 權益曲線 ── */}
       <EquitySpark bals={bals} color={color} />
 
-      {/* ── K 線 + 技術位（多時間框架切換）── */}
+      {/* ── K 線 + 技術位（可收合）── */}
       <div>
-        <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
-          K 線 · {String(data.strategy || '').replace('_', ' ')}
-          <span style={{ marginLeft: 6, fontSize: 10 }}>{data.symbol}</span>
+        <div
+          onClick={() => setChartOpen(o => !o)}
+          style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, marginBottom: chartOpen ? 4 : 0 }}
+        >
+          <span className="muted" style={{ fontSize: 11 }}>
+            K 線 · {String(data.strategy || '').replace('_', ' ')}
+          </span>
+          <span className="muted" style={{ fontSize: 10 }}>{data.symbol}</span>
+          <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)' }}>
+            {chartOpen ? '▾ 收起' : '▸ 展開'}
+          </span>
         </div>
-        <MiniChart
-          symbol={data.symbol}
-          interval={data.interval}
-          strategy={data.strategy}
-          entry={data.entry_price}
-          sl={data.sl}
-          tp={data.tp}
-          inPosition={!!data.in_position}
-          trades={data.recent_trades}
-        />
+        {chartOpen && (
+          <MiniChart
+            symbol={data.symbol}
+            interval={data.interval}
+            strategy={data.strategy}
+            entry={data.entry_price}
+            sl={data.sl}
+            tp={data.tp}
+            inPosition={!!data.in_position}
+            trades={data.recent_trades}
+          />
+        )}
       </div>
 
       {/* ── 持倉即時情況 ── */}
@@ -550,6 +597,8 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
           </div>
         )}
       </div>
+
+      </>)}
     </div>
   )
 }

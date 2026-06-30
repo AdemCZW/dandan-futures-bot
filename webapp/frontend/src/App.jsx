@@ -25,47 +25,6 @@ export default function App() {
   const theme = useTheme()
   return (
     <div className="wrap">
-      <header>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
-            flexWrap: 'wrap',
-          }}
-        >
-          <h1>丹丹交易團隊 — 儀表板</h1>
-          <span
-            className="display"
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              letterSpacing: '0.16em',
-              color: 'var(--muted)',
-              textTransform: 'uppercase',
-            }}
-          >
-            Dandan Trading Terminal
-          </span>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span
-              className="badge badge-system"
-              title="幣安合約測試網 · 模擬盤"
-            >
-              合約測試網
-            </span>
-            <button
-              className="theme-toggle"
-              onClick={toggleTheme}
-              aria-label={theme === 'light' ? '切換深色主題' : '切換亮色主題'}
-              title={theme === 'light' ? '切換深色主題' : '切換亮色主題'}
-            >
-              {theme === 'light' ? '◑ 深色' : '◐ 亮色'}
-            </button>
-          </div>
-        </div>
-        <div className="sub">幣安測試網模擬盤 · 虛擬資金 · 非投資建議</div>
-      </header>
       <nav className="tabs" role="tablist" aria-label="儀表板分頁">
         {TABS.map((t, i) => {
           const active = tab === t.key
@@ -93,6 +52,15 @@ export default function App() {
             </button>
           )
         })}
+        <button
+          className="theme-toggle"
+          onClick={toggleTheme}
+          aria-label={theme === 'light' ? '切換深色主題' : '切換亮色主題'}
+          title={theme === 'light' ? '切換深色主題' : '切換亮色主題'}
+          style={{ marginLeft: 'auto' }}
+        >
+          {theme === 'light' ? '◑ 深色' : '◐ 亮色'}
+        </button>
       </nav>
       {TABS.map((t) => (
         <div
