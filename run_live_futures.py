@@ -919,6 +919,13 @@ def _ws_main(trader, cfg) -> None:
 
 
 def main():
+    # 合併部署：設了 BOTS_CONFIG（JSON 陣列）→ 委派多 bot 監督器，同一 start command
+    # 即可跑合併 service（純 env var 切換、無需改 Railway start command）。
+    # 未設 → 照舊走單台路徑，Bot1/Bot2 行為完全不變。
+    if os.getenv("BOTS_CONFIG", "").strip():
+        import run_multi_futures
+        return run_multi_futures.main()
+
     cfg = Config()
     ap = argparse.ArgumentParser(description="合約測試網模擬盤（多/空，可做空）。")
     # 預設值從環境變數讀取（雲端多服務用 BOT_* 變數區分；不依賴 shell 對 startCommand 的插值，

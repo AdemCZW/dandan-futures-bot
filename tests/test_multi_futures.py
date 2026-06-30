@@ -383,3 +383,29 @@ def test_supervisor_crash_isolation_concurrent(tmp_path):
     assert cB["n"] >= 20                       # B 在 A 崩潰期間照常推進
     assert workers["eth"].restarts >= 1        # A 確實被重啟過
     assert not tB.is_alive()
+
+
+# ── 委派：run_live_futures 偵測 BOTS_CONFIG → 走多 bot 監督器 ───────────
+def test_single_main_delegates_to_multi_when_bots_config_set(monkeypatch):
+    """設了 BOTS_CONFIG → run_live_futures.main() 委派 run_multi_futures.main()，
+    不走單台路徑（同一 start command 即可跑合併 service，純 env var 切換）。"""
+    monkeypatch.setenv("BOTS_CONFIG",
+                       '[{"id":"x","symbol":"ETHUSDT","strategy":"trend_pullback","interval":"1h"}]')
+    called = {"n": 0}
+    monkeypatch.setattr(MM, "main", lambda: called.__setitem__("n", called["n"] + 1))
+    M.main()
+    assert called["n"] == 1
+
+
+def test_single_main_no_delegation_without_bots_config(monkeypatch):
+    """未設 BOTS_CONFIG → 不委派（單台行為不變）。短路單台路徑驗證未進多 bot。"""
+    monkeypatch.delenv("BOTS_CONFIG", raising=False)
+    monkeypatch.setattr("sys.argv", ["run_live_futures.py"])   # 避免 argparse 吃到 pytest argv
+    called = {"n": 0}
+    monkeypatch.setattr(MM, "main", lambda: called.__setitem__("n", called["n"] + 1))
+    # 讓單台路徑在 _start_state_server 處以 SystemExit 跳出，避免 while True 卡住測試
+    def _boom(): raise SystemExit
+    monkeypatch.setattr(M, "_start_state_server", _boom)
+    with pytest.raises(SystemExit):
+        M.main()
+    assert called["n"] == 0          # 未委派多 bot
