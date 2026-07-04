@@ -30,10 +30,15 @@ def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
     chrono = list(reversed(all_hist))   # newest-first → 時間正序
 
     def _ts(t):
+        """ts 字串 → naive UTC datetime。DB 混雜帶時區（新碼）與不帶（舊碼）的格式，
+        aware−naive 相減會拋 TypeError（b7 現場事故 2026-07-05）→ 一律正規化為 naive UTC。"""
         try:
-            return datetime.fromisoformat(str(t.get("ts", "")).strip())
+            dt = datetime.fromisoformat(str(t.get("ts", "")).strip())
         except (ValueError, TypeError):
             return None
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
 
     cur_dir = 0
     entry_ts = None

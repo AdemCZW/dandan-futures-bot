@@ -114,3 +114,16 @@ def test_bot_live_status_exposes_new_stats(monkeypatch):
     for key in ("expectancy", "profit_factor", "avg_win", "avg_loss",
                 "max_consec_losses", "avg_hold_hours"):
         assert key in out, f"bot_live_status 缺 {key}"
+
+
+def test_trade_stats_survives_mixed_tz_aware_and_naive_timestamps():
+    """實際 DB 混雜帶時區（新碼寫入）與不帶時區（舊碼）的 ts —— aware−naive 相減會拋
+    TypeError，曾把整台 /live 打壞（b7 現場事故 2026-07-05）。必須正規化後安全計算。"""
+    rows = [  # newest-first；exit 帶時區、entry 不帶
+        {"side": "exit_tp", "price": 110, "qty": 1, "pnl": 10,
+         "ts": "2026-07-01T06:00:00+00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0,
+         "ts": "2026-07-01 00:00:00"},
+    ]
+    s = trade_stats(rows)                      # 不得拋例外
+    assert s["avg_hold_hours"] == 6.0          # 兩者都當 UTC → 差 6 小時
