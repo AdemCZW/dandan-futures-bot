@@ -1228,7 +1228,10 @@ class MaConvergencePullbackStrategy(Strategy):
     """
     name = "ma_convergence_pullback"
     defaults = {"ma_fast": 20, "ma_mid": 60, "ma_slow": 120,
-                "divergence_thresh": 0.03, "pullback_tolerance": 0.0}
+                "divergence_thresh": 0.03, "pullback_tolerance": 0.0,
+                # 密集/二次回踩（圖表顯示用；signal() 仍只吃首次回踩，b9 行為不變）：
+                "density_thresh": 0.015,     # 六線 spread ≤ 此值視為密集（收斂盤整）
+                "rearm_gap": 0.01}           # 首踩後 price 須離開 MA20 此比例才偵測二次回踩
     allow_short = True
     regime_pref = "any"          # 趨勢判斷已內建在 trend_dir，不疊加外層 regime 閘門
 
@@ -1254,14 +1257,24 @@ class MaConvergencePullbackStrategy(Strategy):
         divergent_bull = bull_order & (out["spread"] > thresh)
         divergent_bear = bear_order & (out["spread"] > thresh)
 
+        # 六線密集（收斂盤整）：spread ≤ density_thresh。純圖表顯示用，向量化即可。
+        out["is_density"] = out["spread"] <= float(self.params["density_thresh"])
+
         # 狀態機（單次正向掃描）：trend_dir 在同向排列持續期間維持 ±1，排列打破歸零；
         # is_first_pullback 在每個新趨勢區間內最多標記一次 True（首次觸及 20 均線不破）。
+        # is_breakout（方法一）：密集→發散的突破當根；is_second_pullback：首踩後的下一次
+        # 距離足夠的回踩。三者都是「純加法」——first_pullback / trend_dir 的計算邏輯
+        # 逐字不變（下方 used 分支原封不動），故 signal() 吃的欄位不變、b9 行為零改變。
         n = len(out)
         trend_dir = np.zeros(n)
         first_pullback = np.zeros(n, dtype=bool)
+        breakout = np.zeros(n, dtype=bool)
+        second_pullback = np.zeros(n, dtype=bool)
         cur_dir = 0
         used = False
+        armed2 = False              # 首踩後、price 已離開 MA20 夠遠 → 可偵測二次回踩
         tol = float(self.params["pullback_tolerance"])
+        rearm = float(self.params["rearm_gap"])
         close_v = out["close"].to_numpy()
         low_v = out["low"].to_numpy()
         high_v = out["high"].to_numpy()
@@ -1276,25 +1289,41 @@ class MaConvergencePullbackStrategy(Strategy):
                 continue
             if cur_dir == 1:
                 if not bo[i]:               # 多頭排列被打破 → 趨勢結束
-                    cur_dir, used = 0, False
+                    cur_dir, used, armed2 = 0, False, False
                 elif not used and low_v[i] <= ma20_v[i] * (1 + tol) and close_v[i] > ma20_v[i] * (1 - tol):
                     first_pullback[i] = True
                     used = True
+                elif used:                  # 首踩已發生 → 偵測二次回踩（純加法，不影響首踩）
+                    if close_v[i] > ma20_v[i] * (1 + rearm):
+                        armed2 = True
+                    if armed2 and low_v[i] <= ma20_v[i] * (1 + tol) and close_v[i] > ma20_v[i] * (1 - tol):
+                        second_pullback[i] = True
+                        armed2 = False
             elif cur_dir == -1:
                 if not be[i]:
-                    cur_dir, used = 0, False
+                    cur_dir, used, armed2 = 0, False, False
                 elif not used and high_v[i] >= ma20_v[i] * (1 - tol) and close_v[i] < ma20_v[i] * (1 + tol):
                     first_pullback[i] = True
                     used = True
+                elif used:
+                    if close_v[i] < ma20_v[i] * (1 - rearm):
+                        armed2 = True
+                    if armed2 and high_v[i] >= ma20_v[i] * (1 - tol) and close_v[i] < ma20_v[i] * (1 + tol):
+                        second_pullback[i] = True
+                        armed2 = False
             else:
                 if db[i]:
-                    cur_dir, used = 1, False
+                    cur_dir, used, armed2 = 1, False, False
+                    breakout[i] = True          # 方法一：密集突破當根
                 elif de[i]:
-                    cur_dir, used = -1, False
+                    cur_dir, used, armed2 = -1, False, False
+                    breakout[i] = True
             trend_dir[i] = cur_dir
 
         out["trend_dir"] = trend_dir
         out["is_first_pullback"] = first_pullback
+        out["is_breakout"] = breakout
+        out["is_second_pullback"] = second_pullback
         return out
 
     def signal(self, row, position: int) -> int:

@@ -220,7 +220,9 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
     一份平行的狀態機（否則圖表跟真實訊號兩邊各自維護、容易悄悄不同步）。
 
     回傳 lightweight-charts 格式：candles + ma20/ma60/ma120/ema20/ema60/ema120
-    六條線 + ma6_signals（is_first_pullback 觸發點，dir=+1/-1，供前端標記進場訊號）。
+    六條線 + ma6_signals（三型進場訊號：breakout 密集突破/pullback1 首次回踩/
+    pullback2 二次回踩，各帶 dir=+1/-1）+ density（六線密集區逐根布林，供前端標示）。
+    b9 實際只下單首次回踩（pullback1）；breakout/pullback2 為圖上顯示供評估。
     """
     from core.quant_researcher import build_strategy
 
@@ -238,7 +240,11 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
             return None
 
     lines = {k: [] for k in ("ma20", "ma60", "ma120", "ema20", "ema60", "ema120")}
-    candles, signals = [], []
+    candles, signals, density = [], [], []
+    # 欄位 → 訊號型別（依序判斷；一根最多歸一型，突破優先）
+    sig_cols = (("is_breakout", "breakout"),
+                ("is_first_pullback", "pullback1"),
+                ("is_second_pullback", "pullback2"))
 
     for idx, row in out.iterrows():
         t = _ts(idx)
@@ -249,9 +255,12 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
         for k in lines:
             if (v := _f(row[k])) is not None:
                 lines[k].append({"time": t, "value": v})
-        if bool(row.get("is_first_pullback", False)):
-            trend_dir = _f(row.get("trend_dir"))
-            if trend_dir is not None:
-                signals.append({"time": t, "dir": 1 if trend_dir > 0 else -1})
+        trend_dir = _f(row.get("trend_dir"))
+        for col, typ in sig_cols:
+            if bool(row.get(col, False)) and trend_dir is not None:
+                signals.append({"time": t, "dir": 1 if trend_dir > 0 else -1, "type": typ})
+                break
+        if bool(row.get("is_density", False)):
+            density.append({"time": t, "value": c})
 
-    return {"candles": candles, **lines, "ma6_signals": signals}
+    return {"candles": candles, **lines, "ma6_signals": signals, "density": density}

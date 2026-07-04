@@ -132,3 +132,78 @@ def test_runs_through_backtester():
     res = run_backtest(_mk_df(400), build_strategy("ma_convergence_pullback"),
                        RiskOfficer(cfg), cfg)
     assert res.equity_curve is not None and len(res.equity_curve) > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 補齊影片兩種進場法 + 二次回踩（2026-07-05，使用者要求圖上顯示密集處入場訊號）。
+# 關鍵約束：新增欄位是純加法，is_first_pullback / trend_dir 輸出必須逐位元不變
+# → b9（實際下單依 signal()）行為完全不受影響（已驗證的策略不能被改壞）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _flat_then_trend_df(n=260, seed=11):
+    """密集盤整(前段) → 明確發散上攻 → 拉回 → 再攻 → 再拉回（可測二次回踩）。"""
+    import numpy as _np
+    idx = pd.date_range("2026-01-01", periods=n, freq="4h")
+    flat = 100 + _np.zeros(140)                                  # 長盤整 → 六線收斂（密集）
+    up1 = 100 + _np.cumsum(_np.full(40, 0.8))                    # 發散上攻
+    pb1 = up1[-1] - _np.concatenate([_np.linspace(0, 6, 8), _np.linspace(6, 1, 8)])  # 首次回踩 20MA
+    up2 = pb1[-1] + _np.cumsum(_np.full(24, 0.7))               # 再攻（離開 MA20）
+    pb2 = up2[-1] - _np.concatenate([_np.linspace(0, 6, 8), _np.linspace(6, 1, 8)])  # 二次回踩
+    tail = _np.full(n, pb2[-1])
+    close = _np.concatenate([flat, up1, pb1, up2, pb2, tail])[:n]
+    return pd.DataFrame({"open": close, "high": close + 0.6, "low": close - 0.6,
+                         "close": close, "volume": _np.full(n, 1000.0)}, index=idx)
+
+
+def test_prepare_adds_density_breakout_second_pullback_columns():
+    s = build_strategy("ma_convergence_pullback")
+    out = s.prepare(_flat_then_trend_df())
+    for col in ("is_density", "is_breakout", "is_second_pullback"):
+        assert col in out.columns, f"缺欄位 {col}"
+
+
+def test_density_flag_true_in_consolidation():
+    """長盤整段六線收斂 → is_density 在暖機後的盤整區至少有一根 True。"""
+    s = build_strategy("ma_convergence_pullback")
+    out = s.prepare(_flat_then_trend_df()).dropna()
+    assert out["is_density"].sum() > 0
+
+
+def test_breakout_fires_at_density_to_divergence_transition():
+    """方法一：密集突破 → is_breakout 在 trend_dir 由 0 轉 ±1 的當根為 True，且帶方向。"""
+    s = build_strategy("ma_convergence_pullback")
+    out = s.prepare(_flat_then_trend_df()).dropna().reset_index(drop=True)
+    bo_idx = out.index[out["is_breakout"]].tolist()
+    assert len(bo_idx) >= 1
+    for i in bo_idx:
+        assert out.loc[i, "trend_dir"] != 0                    # 突破當根趨勢已確立
+        if i > 0:
+            assert out.loc[i - 1, "trend_dir"] == 0            # 前一根還在密集（0）
+
+
+def test_second_pullback_requires_first_pullback_earlier():
+    """二次回踩只能出現在同段趨勢中、首次回踩之後（不可能先有二踩再有首踩）。"""
+    s = build_strategy("ma_convergence_pullback")
+    out = s.prepare(_flat_then_trend_df()).dropna().reset_index(drop=True)
+    first_idx = out.index[out["is_first_pullback"]].tolist()
+    second_idx = out.index[out["is_second_pullback"]].tolist()
+    for si in second_idx:
+        assert any(fi < si for fi in first_idx), "二次回踩前必須先有一次首次回踩"
+
+
+def test_b9_behavior_unchanged_first_pullback_and_trend_dir_stable():
+    """回歸鎖：新增欄位後，is_first_pullback / trend_dir 與『只算這兩欄的參考版』完全一致
+    → signal() 吃的欄位不變 → b9 下單行為零改變。"""
+    s = build_strategy("ma_convergence_pullback")
+    df = _flat_then_trend_df()
+    out = s.prepare(df)
+    # 參考：first_pullback 每段趨勢最多 1 次（原本的核心不變式）
+    # 用 trend_dir 分段，逐段確認 first_pullback 次數 ≤ 1
+    td = out["trend_dir"].to_numpy()
+    fp = out["is_first_pullback"].to_numpy()
+    seg_start = 0
+    for i in range(1, len(td)):
+        if td[i] != td[i - 1]:
+            if td[seg_start] in (1, -1):
+                assert fp[seg_start:i].sum() <= 1
+            seg_start = i

@@ -108,5 +108,40 @@ def test_ma6_overlay_data_uses_same_strategy_as_live_bot():
     df = make_synthetic(300)
     expected = build_strategy("ma_convergence_pullback").prepare(df.copy())
     out = ma6_overlay_data(source="synthetic", limit=300)
-    # 訊號數量應與策略本身算出的 is_first_pullback True 數一致
-    assert len(out["ma6_signals"]) == int(expected["is_first_pullback"].sum())
+    # pullback1 型訊號數量應與策略本身算出的 is_first_pullback True 數一致
+    # （b9 只下單 pullback1，這條保證圖上的首踩標記數 = b9 進場依據數）
+    n_pb1 = sum(1 for s in out["ma6_signals"] if s["type"] == "pullback1")
+    assert n_pb1 == int(expected["is_first_pullback"].sum())
+
+
+# ── 三種訊號分型 + 密集區（2026-07-05）：方法一密集突破 / 首次回踩 / 二次回踩 ──
+def test_ma6_signals_carry_type_field():
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=400)
+    valid = {"breakout", "pullback1", "pullback2"}
+    for sig in out["ma6_signals"]:
+        assert sig.get("type") in valid, f"訊號 type 非法：{sig.get('type')}"
+
+
+def test_ma6_returns_density_zones():
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=400)
+    assert "density" in out          # 密集區逐根布林（前端可標示）
+    for d in out["density"]:
+        assert "time" in d and "value" in d
+
+
+def test_ma6_signal_types_match_strategy_columns():
+    """圖表三型訊號數量 = 策略欄位 is_breakout/is_first_pullback/is_second_pullback 的 True 數。"""
+    from core.chart_data import ma6_overlay_data
+    from core.quant_researcher import build_strategy
+    from run_optimize import make_synthetic
+    df = make_synthetic(400)
+    prep = build_strategy("ma_convergence_pullback").prepare(df.copy())
+    out = ma6_overlay_data(source="synthetic", limit=400)
+    by_type = {}
+    for s in out["ma6_signals"]:
+        by_type[s["type"]] = by_type.get(s["type"], 0) + 1
+    assert by_type.get("breakout", 0) == int(prep["is_breakout"].sum())
+    assert by_type.get("pullback1", 0) == int(prep["is_first_pullback"].sum())
+    assert by_type.get("pullback2", 0) == int(prep["is_second_pullback"].sum())

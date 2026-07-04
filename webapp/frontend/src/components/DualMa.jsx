@@ -35,7 +35,7 @@ export default function DualMa() {
   const [tf, setTf] = useState('4h')
   const [loading, setLoading] = useState(false)
   const [errMsg, setErrMsg] = useState(null)
-  const [signalCount, setSignalCount] = useState(0)
+  const [counts, setCounts] = useState({ breakout: 0, pullback1: 0, pullback2: 0 })
 
   useEffect(() => {
     const el = containerRef.current
@@ -68,7 +68,7 @@ export default function DualMa() {
     if (d?.candles?.length) {
       seriesRef.current.candles.setData(d.candles)
       LINES.forEach(({ key }) => seriesRef.current[key]?.setData(d[key] ?? []))
-      markersRef.current.setMarkers(buildMarkers(d.ma6_signals ?? [], c))
+      markersRef.current.setMarkers(buildAllMarkers(d, c))
       const n = d.candles.length
       requestAnimationFrame(() => {
         chartRef.current?.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - 90), to: n + 12 })
@@ -91,8 +91,13 @@ export default function DualMa() {
         seriesRef.current.candles?.setData(d.candles ?? [])
         LINES.forEach(({ key }) => seriesRef.current[key]?.setData(d[key] ?? []))
         const c = getChartColors()
-        markersRef.current?.setMarkers(buildMarkers(d.ma6_signals ?? [], c))
-        setSignalCount((d.ma6_signals ?? []).length)
+        markersRef.current?.setMarkers(buildAllMarkers(d, c))
+        const sigs = d.ma6_signals ?? []
+        setCounts({
+          breakout: sigs.filter(s => s.type === 'breakout').length,
+          pullback1: sigs.filter(s => s.type === 'pullback1').length,
+          pullback2: sigs.filter(s => s.type === 'pullback2').length,
+        })
         const n = d.candles?.length ?? 0
         requestAnimationFrame(() => {
           if (!chartRef.current) return
@@ -118,9 +123,11 @@ export default function DualMa() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Plain>
         雙均線系統版面(還原 YouTube 分析的六線密集/發散系統)：MA20/60/120(實線)+
-        EMA20/60/120(虛線)。六線糾結在一起＝<b>密集</b>(盤整、方向未明)；
-        六線依序展開＝<b>發散</b>(趨勢確立)。黃色<b>▲/▼標記</b>是發散確立後「第一次回踩20均線不破」
-        的進場訊號——跟 b9(LINKUSDT 觀察倉)實際下單依據完全同一套邏輯。
+        EMA20/60/120(虛線)。六線糾結＝<b>密集</b>(盤整)、灰點標示；六線依序展開＝<b>發散</b>(趨勢確立)。
+        圖上三種進場訊號：<b style={{ color: 'var(--accent)' }}>藍◆密集突破</b>(方法一，密集區一表態就進)、
+        <b style={{ color: 'var(--warn)' }}>黃▲首踩</b>(方法二，發散後第一次回踩20均線不破)、
+        <b style={{ color: 'var(--bot3, #b58ce0)' }}>紫▲二踩</b>(第二次回踩)。
+        b9 觀察倉<b>實際只下單「首踩」</b>；突破與二踩為圖上顯示供你評估，尚未接進實盤。
       </Plain>
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -146,9 +153,12 @@ export default function DualMa() {
             {label}
           </span>
         ))}
-        <span style={{ fontSize: 11, color: 'var(--warn)', fontFamily: 'var(--font-display)', marginLeft: 8 }}>
-          ▲▼ 回踩進場訊號 · 本頁共 {signalCount} 個
-        </span>
+      </div>
+
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', fontSize: 11, fontFamily: 'var(--font-display)' }}>
+        <span style={{ color: 'var(--accent)' }}>◆ 密集突破 {counts.breakout}</span>
+        <span style={{ color: 'var(--warn)' }}>▲ 首踩(b9實單) {counts.pullback1}</span>
+        <span style={{ color: cDom.bot3 }}>▲ 二踩 {counts.pullback2}</span>
       </div>
 
       <div ref={containerRef} style={{
@@ -161,12 +171,41 @@ export default function DualMa() {
   )
 }
 
-function buildMarkers(signals, c) {
-  return signals.map(s => ({
-    time: s.time,
-    position: s.dir > 0 ? 'belowBar' : 'aboveBar',
-    color: c.warn ?? '#d4a24e',
-    shape: s.dir > 0 ? 'arrowUp' : 'arrowDown',
-    text: s.dir > 0 ? '回踩多' : '回踩空',
-  }))
+// 三型進場訊號的顏色/文字（方法一密集突破、方法二首踩=b9實單、二踩）。
+const SIG_STYLE = {
+  breakout:  { ckey: 'accent', label: '突破' },
+  pullback1: { ckey: 'warn',   label: '首踩' },
+  pullback2: { ckey: 'bot3',   label: '二踩' },
+}
+
+// 組合密集區起點標記 + 三型進場訊號，依時間排序（lightweight-charts 要求遞增）。
+function buildAllMarkers(d, c) {
+  const markers = []
+
+  // 密集區：只在每段連續密集的「起點」標一個灰點（避免逐根堆疊成柱）。
+  const density = d.density ?? []
+  const candles = d.candles ?? []
+  const barSec = candles.length > 1 ? candles[1].time - candles[0].time : 0
+  const densTimes = new Set(density.map(x => x.time))
+  density.forEach(x => {
+    const isRunStart = barSec > 0 && !densTimes.has(x.time - barSec)
+    if (isRunStart) {
+      markers.push({ time: x.time, position: 'belowBar', color: c.faint ?? '#6a6862',
+                     shape: 'circle', text: '密集' })
+    }
+  })
+
+  ;(d.ma6_signals ?? []).forEach(s => {
+    const st = SIG_STYLE[s.type] ?? SIG_STYLE.pullback1
+    const long = s.dir > 0
+    markers.push({
+      time: s.time,
+      position: long ? 'belowBar' : 'aboveBar',
+      color: c[st.ckey] ?? '#d4a24e',
+      shape: long ? 'arrowUp' : 'arrowDown',
+      text: st.label + (long ? '多' : '空'),
+    })
+  })
+
+  return markers.sort((a, b) => a.time - b.time)
 }
