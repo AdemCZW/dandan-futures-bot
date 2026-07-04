@@ -57,6 +57,7 @@ const ALL_KEYS = OVERLAYS.map(o => o.key)
 const initVis = Object.fromEntries(OVERLAYS.map(o => [o.key, o.defOn]))
 
 export default function Chart() {
+  const klinePollMs = Number(import.meta.env.VITE_CHART_KLINE_POLL_MS || 3000)
   const theme = useTheme()                   // 'dark'|'light'；切換時重繪本元件（canvas 重新取色）
   const containerRef = useRef(null)
   const chartRef     = useRef(null)
@@ -167,6 +168,7 @@ export default function Chart() {
     let alive = true
 
     async function poll() {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       try {
         const res = await fetch(BINANCE_KLINES(symbol, tf, 2))
         const arr = await res.json()
@@ -197,9 +199,9 @@ export default function Chart() {
     }
 
     poll()
-    const t = setInterval(poll, 1500)
+    const t = setInterval(poll, klinePollMs)
     return () => { alive = false; clearInterval(t) }
-  }, [symbol, tf]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [symbol, tf, klinePollMs]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 交易標記：依 bot 配色 + 進出場形狀 + 聚合筆數，套到 K 線 ──────────────
   const applyMarkers = useCallback((raw, botNames, show, hidden) => {

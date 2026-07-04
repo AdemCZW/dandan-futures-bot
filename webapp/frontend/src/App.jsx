@@ -1,28 +1,40 @@
+// 2026-06-30 UI 精簡：移除頂部標題區（<header>）含以下元素
+//   · <h1>丹丹交易團隊 — 儀表板</h1>
+//   · <span class="display">Dandan Trading Terminal</span>
+//   · <span class="badge badge-system">合約測試網</span>
+//   · <div class="sub">幣安測試網模擬盤 · 虛擬資金 · 非投資建議</div>
+//   主題切換鈕保留，移入 tab 列右端。
 import { useState } from 'react'
 import Live from './components/Live.jsx'
 import Backtest from './components/Backtest.jsx'
 import Explain from './components/Explain.jsx'
 import Optimize from './components/Optimize.jsx'
 import Journal from './components/Journal.jsx'
-import Whales from './components/Whales.jsx'
 import Chart from './components/Chart.jsx'
-import CopyTrading from './components/CopyTrading.jsx'
+import LiveDecisions from './components/LiveDecisions.jsx'
 import { useTheme, toggleTheme } from './lib/theme.js'
 
-const TABS = [
-  { key: 'live',        label: '即時監控',   el: <Live /> },
-  { key: 'chart',       label: 'K 線圖表',   el: <Chart /> },
-  { key: 'whales',      label: '大戶籌碼',   el: <Whales /> },
-  { key: 'copytrading', label: '帶單追蹤',   el: <CopyTrading /> },
-  { key: 'backtest',    label: '回測',        el: <Backtest /> },
-  { key: 'explain',  label: '決策流程',   el: <Explain /> },
-  { key: 'optimize', label: '參數最佳化', el: <Optimize /> },
-  { key: 'journal',  label: '交易日誌',   el: <Journal /> },
+// GitHub Pages 建置（VITE_PUBLIC_BUILD=true）只留輕量分頁：bot 容器直連就能供應，
+// 不需要 dashboard 常駐。回測/參數最佳化要靠 dashboard 的 vectorbt/optuna 肥依賴，
+// 線上沒有這個後端可打，故隱藏（元件仍打包但不掛載，不影響 bundle 正確性，只是沒被渲染）。
+const PUBLIC_BUILD = import.meta.env.VITE_PUBLIC_BUILD === 'true'
+
+const ALL_TABS = [
+  { key: 'live', label: '即時監控', Comp: Live, public: true },
+  { key: 'chart', label: 'K 線圖表', Comp: Chart, public: true },
+  { key: 'backtest', label: '回測', Comp: Backtest, public: false },
+  { key: 'explain', label: '決策流程', Comp: PUBLIC_BUILD ? LiveDecisions : Explain, public: true },
+  { key: 'optimize', label: '參數最佳化', Comp: Optimize, public: false },
+  { key: 'journal', label: '交易日誌', Comp: Journal, public: true },
 ]
+
+const TABS = PUBLIC_BUILD ? ALL_TABS.filter((t) => t.public) : ALL_TABS
 
 export default function App() {
   const [tab, setTab] = useState('live')
   const theme = useTheme()
+  const active = TABS.find((t) => t.key === tab) || TABS[0]
+  const ActiveComp = active.Comp
   return (
     <div className="wrap">
       <nav className="tabs" role="tablist" aria-label="儀表板分頁">
@@ -62,16 +74,9 @@ export default function App() {
           {theme === 'light' ? '◑ 深色' : '◐ 亮色'}
         </button>
       </nav>
-      {TABS.map((t) => (
-        <div
-          key={t.key}
-          role="tabpanel"
-          aria-hidden={tab !== t.key}
-          style={{ display: tab === t.key ? 'block' : 'none' }}
-        >
-          {t.el}
-        </div>
-      ))}
+      <div key={active.key} role="tabpanel" aria-hidden="false">
+        <ActiveComp />
+      </div>
     </div>
   )
 }

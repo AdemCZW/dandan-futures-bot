@@ -49,9 +49,17 @@ function typeLabel(row) {
 }
 
 /** 迷你權益曲線 SVG sparkline。bals = 每筆成交後餘額（最新在前）。*/
-function EquitySpark({ bals, color, height = 48 }) {
+function EquitySpark({ bals, color, height = 48, showLabel = true }) {
   const pts = [...bals].reverse().filter(b => b != null)
-  if (pts.length < 2) return null
+  if (pts.length < 2) {
+    // 佔位：新 bot 還沒有平倉紀錄 → 顯示虛線基線，磁磚高度一致不跳動
+    return (
+      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    borderBottom: '1px dashed var(--line)', marginTop: 4 }}>
+        <span className="muted" style={{ fontSize: 10 }}>尚無平倉紀錄 · 曲線累積中</span>
+      </div>
+    )
+  }
 
   const W = 300, H = height
   const minV = Math.min(...pts)
@@ -73,9 +81,11 @@ function EquitySpark({ bals, color, height = 48 }) {
 
   return (
     <div style={{ marginTop: 4 }}>
-      <div className="muted" style={{ fontSize: 10, marginBottom: 4, fontFamily: 'var(--font-display)' }}>
-        權益曲線
-      </div>
+      {showLabel && (
+        <div className="muted" style={{ fontSize: 10, marginBottom: 4, fontFamily: 'var(--font-display)' }}>
+          獲利曲線
+        </div>
+      )}
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}
            style={{ display: 'block', overflow: 'visible' }}>
         <defs>
@@ -167,12 +177,14 @@ function strategyPlan(strategy, interval) {
 
 // ── BotCard ─────────────────────────────────────────────────────────────────
 
-function BotCard({ data, num, color, livePrice: propLivePrice }) {
+function BotCard({ data, num, color, livePrice: propLivePrice, botId, defaultCollapsed = false }) {
   // 手動平倉狀態（hooks 必須無條件在最上方，故置於 !data 早退之前）
   const [closing, setClosing] = useState(false)
   const [closeMsg, setCloseMsg] = useState(null)
-  const [collapsed, setCollapsed] = useState(false)
-  const [chartOpen, setChartOpen] = useState(true)
+  const [confirmClose, setConfirmClose] = useState(false)
+  const [collapsed, setCollapsed] = useState(defaultCollapsed)   // 多台籃子預設收合成一行摘要
+  const [chartOpen, setChartOpen] = useState(false)   // 預設收合：卡片主體留給損益/持倉，要看再展開
+  const [statsOpen, setStatsOpen] = useState(false)   // 進階統計+權益曲線 預設收合（減雜訊）
 
   // 即時價格方向追蹤：漲 → 綠閃、跌 → 紅閃
   const prevPriceRef            = useRef(null)
@@ -188,13 +200,10 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
   }, [propLivePrice])
 
   async function handleClose() {
-    const sym = String(data?.symbol || '').replace('USDT', '')
-    if (!window.confirm(
-      `確定要手動平倉 Bot #${num}（${sym}）目前的${data.direction === 1 ? '多單' : '空單'}嗎？\n` +
-      `這會以市價立即平倉（測試網虛擬倉）。bot 之後仍會繼續自動交易。`)) return
-    setClosing(true); setCloseMsg(null)
+    setClosing(true); setCloseMsg(null); setConfirmClose(false)
     try {
-      const r = await api.closePosition(num)
+      // N 台籃子走通用代理 /api/close/{botId}；無 botId（舊資料）退回舊四端點
+      const r = botId ? await api.closeBot(botId) : await api.closePosition(num)
       setCloseMsg(r?.ok ? { ok: true, text: r.msg || '已送出平倉' }
                         : { ok: false, text: r?.msg || '平倉失敗' })
     } catch (e) {
@@ -257,79 +266,67 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
   return (
     <div className="panel" style={{
       borderTop: `2px solid ${color}`,
-      display: 'flex', flexDirection: 'column', gap: collapsed ? 0 : 12,
+      display: 'flex', flexDirection: 'column', gap: 8,
     }}>
 
-      {/* ── 標頭（點擊展開/收合）── */}
+      {/* ── 磁磚標頭（點擊展開詳情）：幣種為主角 + 即時價 ── */}
       <div
         onClick={() => setCollapsed(c => !c)}
-        style={{ cursor: 'pointer', userSelect: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}
+        style={{ cursor: 'pointer', userSelect: 'none',
+                 display: 'flex', alignItems: 'baseline', gap: 8 }}
       >
-        {/* 第一列：名稱 / 策略 / 幣對 + 在線點 + 摺疊箭頭 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontFamily: 'var(--font-display)', fontSize: 11, fontWeight: 700, color }}>
-            Bot #{num}
-          </span>
-          <span style={{ fontFamily: 'var(--font-display)', fontSize: 12, fontWeight: 600 }}>
-            {String(data.strategy || '').toUpperCase()}
-          </span>
-          <span className="muted" style={{ fontSize: 11 }}>{data.symbol} · {data.interval}</span>
-          {/* collapsed 時在標頭行內嵌顯示現價 + 淨值 + 持倉狀態 */}
-          {collapsed && price != null && (
-            <span
-              key={flashKey}
-              className={priceDir > 0 ? 'price-flash-up' : priceDir < 0 ? 'price-flash-down' : ''}
-              style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 700 }}
-            >
-              ${fmt(price)}
-            </span>
-          )}
-          {collapsed && (
-            <span className={`num ${netPct >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 12, fontWeight: 600 }}>
-              ${fmt(netVal)} ({fmtPct(netPct)})
-            </span>
-          )}
-          {collapsed && _pos && (
-            <span className={`badge ${_dir === 1 ? 'badge-long' : 'badge-short'}`} style={{ fontSize: 10 }}>
-              {_dir === 1 ? '持多' : '持空'}
-            </span>
-          )}
+        <span style={{ fontFamily: 'var(--font-display)', fontSize: 15, fontWeight: 700 }}>
+          {String(data.symbol || '').replace('USDT', '')}
+          <span className="muted" style={{ fontSize: 10, fontWeight: 400 }}>/USDT</span>
+        </span>
+        <span className="muted" style={{ fontSize: 10 }}>
+          {String(data.strategy || '').replace(/_/g, ' ')} · {data.interval}
+        </span>
+        {price != null && (
           <span
-            style={{ marginLeft: 'auto', width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-              background: fresh ? 'var(--pos)' : 'var(--faint)', display: 'inline-block' }}
-            title={fresh ? '在線' : '離線'}
-          />
-          <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>
-            {collapsed ? '▸' : '▾'}
+            key={flashKey}
+            className={priceDir > 0 ? 'price-flash-up' : priceDir < 0 ? 'price-flash-down' : ''}
+            style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 700, marginLeft: 'auto' }}
+          >
+            ${fmt(price)}
           </span>
-        </div>
-        {/* 第二列：白話交易規劃說明（收合時隱藏）*/}
-        {!collapsed && (
-          <div className="muted" style={{ fontSize: 10, lineHeight: 1.4 }}>
-            {strategyPlan(data.strategy, data.interval)}
-          </div>
         )}
-        {/* 第三列：即時現價（收合時已在第一列顯示，展開才獨立大字顯示）*/}
-        {!collapsed && price != null && (
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
-            <span
-              key={flashKey}
-              className={priceDir > 0 ? 'price-flash-up' : priceDir < 0 ? 'price-flash-down' : ''}
-              style={{ fontFamily: 'var(--font-display)', fontSize: 20, fontWeight: 700, letterSpacing: '-0.5px' }}
-            >
-              {priceDir !== 0 && (
-                <span style={{ fontSize: 11, marginRight: 3, opacity: 0.8 }}>
-                  {priceDir > 0 ? '▲' : '▼'}
-                </span>
-              )}
-              ${fmt(price)}
-            </span>
-            <span className="muted" style={{ fontSize: 10 }}>{data.symbol?.replace('USDT', '')}/USDT</span>
-          </div>
+        <span
+          style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, alignSelf: 'center',
+            background: fresh ? 'var(--pos)' : 'var(--faint)', display: 'inline-block' }}
+          title={fresh ? '在線' : '離線'}
+        />
+        <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>
+          {collapsed ? '▸' : '▾'}
+        </span>
+      </div>
+
+      {/* ── 獲利曲線（磁磚主視覺，永遠可見）── */}
+      <EquitySpark bals={bals} color={color} height={56} showLabel={false} />
+
+      {/* ── 一行統計：本台累計損益 · 勝率 · 筆數 · 持倉 ── */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+        <span className={`num ${realized + unreal >= 0 ? 'pos' : 'neg'}`}
+              style={{ fontSize: 17, fontWeight: 700 }}
+              title="本台自己帳本：實現＋浮動損益">
+          {fmtSign(realized + unreal)}
+        </span>
+        {data.total_trades > 0 && (
+          <span className="muted" style={{ fontSize: 11 }}>
+            勝率 <span className="num">{winPct}%</span> · {data.total_trades} 筆
+          </span>
+        )}
+        {_pos ? (
+          <span className={`badge ${_dir === 1 ? 'badge-long' : 'badge-short'}`}
+                style={{ fontSize: 10, marginLeft: 'auto' }}>
+            {_dir === 1 ? '持多' : '持空'} {unreal !== 0 && fmtSign(unreal)}
+          </span>
+        ) : (
+          <span className="badge badge-flat" style={{ fontSize: 10, marginLeft: 'auto' }}>空手</span>
         )}
       </div>
 
-      {/* ── 摺疊時隱藏以下所有內容 ── */}
+      {/* ── 點開才顯示的詳情 ── */}
       {!collapsed && (<>
 
       {/* ── 連續同方向虧損警示（通道方向可能已反轉）── */}
@@ -344,75 +341,57 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
         </div>
       )}
 
-      {/* ── 預算 / 已實現 / 未實現 ── */}
-      <div style={{
-        display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
-        background: 'var(--surface-2)', borderRadius: 'var(--radius-sm)', padding: '10px 8px', gap: 4,
-      }}>
-        {[
-          { label: '預算',   value: `$${INIT_CAPITAL.toLocaleString()}`, c: '' },
-          { label: '已實現', value: fmtSign(realized), c: realized >= 0 ? 'pos' : 'neg' },
-          { label: '未實現', value: fmtSign(unreal),   c: unreal   >= 0 ? 'pos' : 'neg' },
-        ].map(({ label, value, c }) => (
-          <div key={label} style={{ textAlign: 'center' }}>
-            <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>{label}</div>
-            <div className={`num ${c}`} style={{ fontSize: 13, fontWeight: 600 }}>{value}</div>
-          </div>
-        ))}
+      {/* ── 實現/浮動拆分（磁磚統計列已有累計，這裡給拆分明細）── */}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <span className="muted" style={{ fontSize: 11 }}>
+          實現 <span className={realized >= 0 ? 'pos' : 'neg'}>{fmtSign(realized)}</span>
+        </span>
+        <span className="muted" style={{ fontSize: 11 }}>
+          浮盈 <span className={unreal >= 0 ? 'pos' : 'neg'}>{fmtSign(unreal)}</span>
+        </span>
       </div>
 
-      {/* ── 淨值 ── */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-        <span className="muted" style={{ fontSize: 11 }}>淨值</span>
-        <span className="num" style={{ fontSize: 20, fontWeight: 700, color }}>
-          ${fmt(netVal)}
-        </span>
-        <span className={`num ${netPct >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 13 }}>
-          {fmtPct(netPct)}
-        </span>
-        {data.total_trades > 0 && (
-          <span className="muted" style={{ fontSize: 11, marginLeft: 'auto' }}>
-            {data.total_trades} 筆 · 勝率 {winPct}%
-          </span>
-        )}
-      </div>
-
-      {/* ── 進階統計（最大回撤 / 每筆夏普 / 多空拆分）── */}
+      {/* ── 詳細統計（回撤/夏普/多空，預設收合減雜訊）── */}
       {data.total_trades > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
-          <MiniStat label="最大回撤"
-                    title="以 $5,000 為基底的已實現權益曲線，歷史最大峰谷跌幅%">
-            <span className="neg">
-              {data.max_drawdown_pct != null ? `-${fmt(data.max_drawdown_pct)}%` : '—'}
+        <div>
+          <div
+            onClick={() => setStatsOpen(o => !o)}
+            style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6,
+                     marginBottom: statsOpen ? 6 : 0 }}
+          >
+            <span className="muted" style={{ fontSize: 11 }}>詳細統計</span>
+            <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)' }}>
+              {statsOpen ? '▾ 收起' : '▸ 展開'}
             </span>
-          </MiniStat>
-          <MiniStat label="每筆夏普"
-                    title="每筆交易報酬率（pnl/名目）的 平均 ÷ 標準差，衡量穩定度（非年化）">
-            <span className={data.sharpe == null ? 'muted' : data.sharpe >= 0 ? 'pos' : 'neg'}>
-              {data.sharpe != null ? fmt(data.sharpe, 2) : '—'}
-            </span>
-          </MiniStat>
-          <MiniStat label={`多單 ${data.long_trades || 0} 筆`}
-                    title="做多方向：勝率（勝筆/總筆）與累計損益">
-            <span>{winPctOf(data.long_trades, data.long_wins) ?? '—'}
-              {winPctOf(data.long_trades, data.long_wins) != null && '%'}</span>
-            <span className={(data.long_pnl ?? 0) >= 0 ? 'pos' : 'neg'} style={{ marginLeft: 6, fontSize: 11 }}>
-              {fmtSign(data.long_pnl)}
-            </span>
-          </MiniStat>
-          <MiniStat label={`空單 ${data.short_trades || 0} 筆`}
-                    title="做空方向：勝率（勝筆/總筆）與累計損益">
-            <span>{winPctOf(data.short_trades, data.short_wins) ?? '—'}
-              {winPctOf(data.short_trades, data.short_wins) != null && '%'}</span>
-            <span className={(data.short_pnl ?? 0) >= 0 ? 'pos' : 'neg'} style={{ marginLeft: 6, fontSize: 11 }}>
-              {fmtSign(data.short_pnl)}
-            </span>
-          </MiniStat>
+          </div>
+          {statsOpen && (<>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+              <MiniStat label="回撤" title="已實現權益曲線歷史最大峰谷跌幅%">
+                <span className="neg">
+                  {data.max_drawdown_pct != null ? `-${fmt(data.max_drawdown_pct)}%` : '—'}
+                </span>
+              </MiniStat>
+              <MiniStat label="夏普" title="每筆 pnl/名目 的 均值÷標準差（非年化）">
+                <span className={data.sharpe == null ? 'muted' : data.sharpe >= 0 ? 'pos' : 'neg'}>
+                  {data.sharpe != null ? fmt(data.sharpe, 2) : '—'}
+                </span>
+              </MiniStat>
+              <MiniStat label={`多 ${data.long_trades || 0}`} title="做多：勝率 + 累計損益">
+                <span>{winPctOf(data.long_trades, data.long_wins) ?? '—'}{winPctOf(data.long_trades, data.long_wins) != null && '%'}</span>
+                <span className={(data.long_pnl ?? 0) >= 0 ? 'pos' : 'neg'} style={{ marginLeft: 5, fontSize: 10 }}>
+                  {fmtSign(data.long_pnl)}
+                </span>
+              </MiniStat>
+              <MiniStat label={`空 ${data.short_trades || 0}`} title="做空：勝率 + 累計損益">
+                <span>{winPctOf(data.short_trades, data.short_wins) ?? '—'}{winPctOf(data.short_trades, data.short_wins) != null && '%'}</span>
+                <span className={(data.short_pnl ?? 0) >= 0 ? 'pos' : 'neg'} style={{ marginLeft: 5, fontSize: 10 }}>
+                  {fmtSign(data.short_pnl)}
+                </span>
+              </MiniStat>
+            </div>
+          </>)}
         </div>
       )}
-
-      {/* ── 權益曲線 ── */}
-      <EquitySpark bals={bals} color={color} />
 
       {/* ── K 線 + 技術位（可收合）── */}
       <div>
@@ -486,24 +465,48 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
             <span className="pos">距 TP {distTP != null ? distTP.toFixed(2) + '%' : '—'}</span>
           </div>
 
-          {/* 手動平倉（結算）：市價立即平倉，bot 之後繼續自動交易 */}
-          <button
-            onClick={handleClose}
-            disabled={closing}
-            style={{
-              marginTop: 2, padding: '6px 10px', fontSize: 12, fontWeight: 600,
-              borderRadius: 'var(--radius-sm)', cursor: closing ? 'wait' : 'pointer',
-              border: '1px solid var(--neg)', color: 'var(--neg)',
-              background: 'var(--neg-soft)',
-            }}
-            title="以市價立即平掉目前持倉（測試網虛擬倉）。bot 之後仍會繼續自動交易。"
-          >
-            {closing ? '平倉中…' : '⏹ 手動平倉（結算）'}
-          </button>
-          {closeMsg && (
-            <div className={closeMsg.ok ? 'pos' : 'neg'} style={{ fontSize: 11 }}>
-              {closeMsg.ok ? '✓ ' : '⚠ '}{closeMsg.text}
+          {/* 手動平倉（結算）：兩步確認，避免誤觸 */}
+          {confirmClose ? (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 2 }}>
+              <span className="neg" style={{ fontSize: 11 }}>確定平倉？</span>
+              <button
+                onClick={handleClose}
+                disabled={closing}
+                style={{
+                  padding: '4px 10px', fontSize: 12, fontWeight: 700,
+                  borderRadius: 'var(--radius-sm)', cursor: closing ? 'wait' : 'pointer',
+                  border: '1px solid var(--neg)', color: 'var(--neg)',
+                  background: 'var(--neg-soft)',
+                }}
+              >
+                {closing ? '平倉中…' : '確認'}
+              </button>
+              <button
+                onClick={() => setConfirmClose(false)}
+                style={{
+                  padding: '4px 10px', fontSize: 12,
+                  borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                  border: '1px solid var(--muted)', color: 'var(--muted)',
+                  background: 'transparent',
+                }}
+              >
+                取消
+              </button>
             </div>
+          ) : (
+            <button
+              onClick={() => setConfirmClose(true)}
+              disabled={closing}
+              style={{
+                marginTop: 2, padding: '6px 10px', fontSize: 12, fontWeight: 600,
+                borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                border: '1px solid var(--neg)', color: 'var(--neg)',
+                background: 'var(--neg-soft)',
+              }}
+              title="以市價立即平掉目前持倉（測試網虛擬倉）。bot 之後仍會繼續自動交易。"
+            >
+              ⏹ 手動平倉（結算）
+            </button>
           )}
         </div>
       ) : (
@@ -512,6 +515,12 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
           {price != null && (
             <span className="muted">現價 ${fmt(price)}</span>
           )}
+        </div>
+      )}
+      {/* 平倉結果訊息：放在 in_position 外，平倉後仍可見 */}
+      {closeMsg && (
+        <div className={closeMsg.ok ? 'pos' : 'neg'} style={{ fontSize: 11, marginTop: 4 }}>
+          {closeMsg.ok ? '✓ ' : '⚠ '}{closeMsg.text}
         </div>
       )}
 
@@ -527,19 +536,16 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
         {pairs.length === 0 ? (
           <div className="muted" style={{ fontSize: 12 }}>// 尚無成交</div>
         ) : (
-          <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', minWidth: 340 }}>
+          <div style={{ overflowX: 'auto', maxHeight: 240, overflowY: 'auto' }}>
+          <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', minWidth: 260 }}>
             <thead>
               <tr>
                 {[
-                  ['時間',   'left'],
-                  ['類型',   'left'],
-                  ['方向',   'left'],
-                  ['進場',   'right'],
-                  ['平倉',   'right'],
-                  ['損益',   'right'],
-                  ['報酬%',  'right'],
-                  ['餘額',   'right'],
+                  ['時間',  'left'],
+                  ['方向',  'left'],
+                  ['進場',  'right'],
+                  ['平倉',  'right'],
+                  ['損益',  'right'],
                 ].map(([h, align]) => (
                   <th key={h} style={{
                     textAlign: align, paddingBottom: 4,
@@ -560,14 +566,12 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
                       <div style={{ fontSize: 9, opacity: 0.7 }}>{hold !== '—' ? hold : ''}</div>
                     </td>
                     <td style={{ padding: '5px 4px 5px 0' }}>
-                      <span className={`badge ${tl.cls}`} style={{ fontSize: 9, cursor: 'help' }}
-                            title={tl.desc}>{tl.txt}</span>
-                    </td>
-                    <td style={{ padding: '5px 4px 5px 0' }}>
                       <span className={`badge ${p.dir === 'long' ? 'badge-long' : 'badge-short'}`}
                             style={{ fontSize: 9 }}>
                         {p.dir === 'long' ? '多' : '空'}
                       </span>
+                      <span className={`badge ${tl.cls}`} style={{ fontSize: 9, marginLeft: 3, cursor: 'help' }}
+                            title={tl.desc}>{tl.txt}</span>
                     </td>
                     <td className="num" style={{ textAlign: 'right', padding: '5px 2px' }}>
                       {p.entry_price != null ? `$${fmt(p.entry_price)}` : '—'}
@@ -575,19 +579,19 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
                     <td className="num" style={{ textAlign: 'right', padding: '5px 2px' }}>
                       {p.exit_price != null
                         ? `$${fmt(p.exit_price)}`
-                        : <span className="muted" style={{ fontSize: 10 }}>持有中</span>
+                        : <span className="muted" style={{ fontSize: 10 }}>{p.open ? '持有中' : '—'}</span>
                       }
                     </td>
-                    <td className={`num ${p.pnl == null ? '' : p.pnl >= 0 ? 'pos' : 'neg'}`}
-                        style={{ textAlign: 'right', padding: '5px 2px', fontWeight: 600 }}>
-                      {p.pnl != null ? fmtSign(p.pnl) : '—'}
-                    </td>
-                    <td className={`num ${roi == null ? '' : roi >= 0 ? 'pos' : 'neg'}`}
-                        style={{ textAlign: 'right', padding: '5px 2px' }}>
-                      {roi != null ? fmtPct(roi) : '—'}
-                    </td>
-                    <td className="num" style={{ textAlign: 'right', padding: '5px 0', color: 'var(--muted)' }}>
-                      {bals[i] != null ? `$${fmt(bals[i])}` : '—'}
+                    <td style={{ textAlign: 'right', padding: '5px 0' }}>
+                      <span className={`num ${p.pnl == null ? '' : p.pnl >= 0 ? 'pos' : 'neg'}`}
+                            style={{ fontWeight: 600 }}>
+                        {p.pnl != null ? fmtSign(p.pnl) : '—'}
+                      </span>
+                      {roi != null && (
+                        <div className={`num ${roi >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 9, opacity: 0.8 }}>
+                          {fmtPct(roi)}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )
@@ -607,38 +611,57 @@ function BotCard({ data, num, color, livePrice: propLivePrice }) {
 // ── Live ─────────────────────────────────────────────────────────────────────
 
 export default function Live() {
-  const [d,          setD]         = useState(null)
-  const [e2,         setE2]        = useState(null)
-  const [e3,         setE3]        = useState(null)
-  const [e4,         setE4]        = useState(null)
+  const refreshMs = Number(import.meta.env.VITE_LIVE_REFRESH_MS || 20000)   // 唯一持續的狀態輪詢（背景頁籤自動暫停）
+  const pricePollMs = Number(import.meta.env.VITE_LIVE_PRICE_POLL_MS || 2000)
+  const [bots,       setBots]      = useState([])   // [{id, meta, data}] 動態 N 台
   const [tick,       setTick]      = useState(0)
   const [livePrices, setLivePrices]= useState({})   // { SOLUSDT: 168.42, ETHUSDT: 3245.1 }
   const timer = useRef(null)
 
   async function load() {
-    try { setD(await api.live()) }   catch { /* ignore */ }
-    try { setE2(await api.live2()) } catch { /* ignore */ }
-    try { setE3(await api.live3()) } catch { /* ignore */ }
-    try { setE4(await api.live4()) } catch { /* ignore */ }
+    // 首選：bot 容器直連（/bots 清單 + 逐台 /live），支援 N 台、不吃 dashboard 資源
+    try {
+      const list = await api.bots()
+      if (Array.isArray(list) && list.length) {
+        const datas = await Promise.all(list.map(async (b) => {
+          try { return { id: b.id, meta: b, data: await api.botLive(b.id) } }
+          catch { return { id: b.id, meta: b, data: null } }
+        }))
+        setBots(datas)
+        return
+      }
+    } catch { /* fallback ↓ */ }
+    // 舊版 fallback：dashboard 四端點（bot 容器未更新時仍可看）
+    const legacy = []
+    const fns = [api.live, api.live2, api.live3, api.live4]
+    for (let i = 0; i < fns.length; i++) {
+      try {
+        const d = await fns[i]()
+        if (d && d.active !== false) legacy.push({ id: `b${i + 1}`, meta: null, data: d })
+      } catch { /* ignore */ }
+    }
+    setBots(legacy)
   }
 
   useEffect(() => {
     load()
-    timer.current = setInterval(() => { load(); setTick(t => t + 1) }, 5000)
+    timer.current = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      load(); setTick(t => t + 1)
+    }, refreshMs)
     return () => clearInterval(timer.current)
-  }, [])
+  }, [refreshMs])
 
-  // ── 每個不同 symbol 開一條 aggTrade WS，隨每筆成交即時更新現價 ──────────────
-  const symbolKey = [d, e2, e3, e4]
-    .filter(Boolean).map(b => b.symbol).filter(Boolean)
+  // ── 即時現價：每個不同 symbol 輪詢 Binance 公開 API（不經 Railway）──────────
+  const symbolKey = [...new Set(bots.map(b => b.data?.symbol || b.meta?.symbol).filter(Boolean))]
     .sort().join(',')
 
-  // 每 1 秒輪詢 Binance Futures REST 取現價（每個 symbol 獨立 request，可靠無編碼問題）
   useEffect(() => {
     if (!symbolKey) return
     const symbols = symbolKey.split(',')
 
     async function fetchPrices() {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       const update = {}
       await Promise.all(symbols.map(async sym => {
         try {
@@ -652,44 +675,73 @@ export default function Live() {
     }
 
     fetchPrices()
-    const t = setInterval(fetchPrices, 1000)
+    const t = setInterval(fetchPrices, pricePollMs)
     return () => clearInterval(t)
-  }, [symbolKey])
+  }, [symbolKey, pricePollMs])
 
-  const anyFresh = [d, e2, e3, e4].some(x => x?.age_seconds != null && x.age_seconds < 180)
+  const datas = bots.map(b => b.data).filter(Boolean)
+  const anyFresh = datas.some(x => x?.age_seconds != null && x.age_seconds < 300)
+  // ── 組合層 KPI（總數據置頂）：Σ損益 / 勝率 / 筆數 / 帳戶 / 持倉 ──
+  const acctCash      = datas.find(x => x?.cash != null)?.cash
+  const totalRealized = datas.reduce((s, x) => s + (x?.realized_pnl || 0), 0)
+  const totalUnreal   = datas.reduce((s, x) => s + (x?.unrealized_pnl || 0), 0)
+  const totalPnl      = totalRealized + totalUnreal
+  const totalTrades   = datas.reduce((s, x) => s + (x?.total_trades || 0), 0)
+  const totalWins     = datas.reduce((s, x) => s + (x?.win_trades || 0), 0)
+  const poolWinPct    = totalTrades > 0 ? Math.round((totalWins / totalTrades) * 100) : null
+  const inPosCount    = datas.filter(x => x?.in_position).length
+
+  const kpi = (label, node, hint) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 108 }} title={hint || ''}>
+      <span className="muted" style={{ fontSize: 10, fontFamily: 'var(--font-display)' }}>{label}</span>
+      {node}
+    </div>
+  )
 
   return (
     <>
-      {/* ── 頂部狀態列 ── */}
-      <div className={`panel${anyFresh ? ' is-active hud-neon-top' : ''}`}
-           style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <span className={`status-pulse${anyFresh ? '' : ' is-offline'}`} />
-        <h3 style={{ margin: 0, paddingLeft: 10 }}>
-          即時監控 {anyFresh ? '· 運行中' : '· 待命'}
-        </h3>
-        <span className="badge badge-system">合約測試網</span>
-        <span className="muted" style={{ fontSize: 11, marginLeft: 4 }}>
-          初始預算 ${INIT_CAPITAL.toLocaleString()} / 台
-        </span>
-        <span className="badge badge-system" style={{ marginLeft: 'auto' }}>
-          每 5 秒自動刷新（#<span className="num">{tick}</span>）
+      {/* ── 總數據（組合層 KPI 置頂）── */}
+      <div className={`panel${anyFresh ? ' is-active' : ''}`}
+           style={{ display: 'flex', alignItems: 'flex-start', gap: 22, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className={`status-pulse${anyFresh ? '' : ' is-offline'}`} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingLeft: 8 }}>
+            <span style={{ fontFamily: 'var(--font-display)', fontSize: 13, fontWeight: 700 }}>
+              總覽 {anyFresh ? '· 運行中' : '· 待命'}
+            </span>
+            <span className="badge badge-system" style={{ fontSize: 9 }}>合約測試網</span>
+          </div>
+        </div>
+        {kpi('總損益（實現＋浮動）',
+          <span className={`num ${totalPnl >= 0 ? 'pos' : 'neg'}`} style={{ fontSize: 22, fontWeight: 700 }}>
+            {fmtSign(totalPnl)}
+          </span>, '八台自己帳本的合計')}
+        {kpi('勝率',
+          <span className="num" style={{ fontSize: 22, fontWeight: 700 }}>
+            {poolWinPct != null ? `${poolWinPct}%` : '—'}
+            <span className="muted" style={{ fontSize: 11, fontWeight: 400 }}> / {totalTrades} 筆</span>
+          </span>, '全部平倉交易匯總')}
+        {kpi('帳戶餘額',
+          <span className="num" style={{ fontSize: 22, fontWeight: 700 }}>
+            {acctCash != null ? `$${fmt(acctCash)}` : '—'}
+          </span>, '共用測試網帳戶 USDT')}
+        {kpi('持倉',
+          <span className="num" style={{ fontSize: 22, fontWeight: 700 }}>
+            {inPosCount}<span className="muted" style={{ fontSize: 11, fontWeight: 400 }}> / {bots.length} 台</span>
+          </span>)}
+        <span className="badge badge-system" style={{ marginLeft: 'auto', alignSelf: 'flex-start' }}>
+          每 {Math.max(1, Math.round(refreshMs / 1000))}s 刷新（#<span className="num">{tick}</span>）
         </span>
       </div>
 
-      <Plain>
-        四台 bot 同時在<b>幣安合約測試網（虛擬資金、不是真錢）</b>自動交易。每張卡：<b>淨值</b>＝交易所實際帳戶餘額（含持倉浮盈）；
-        <b>已實現</b>＝平倉落袋的賺賠、<b>未實現</b>＝目前持倉的浮動賺賠；下方<b>進階統計</b>看回撤/夏普/多空拆分。
-        持倉中會出現<b>「手動平倉」</b>鈕可立即結算該倉。
-      </Plain>
-
-      {/* ── 機器人卡片並排（桌面 2 欄、手機 1 欄）── */}
+      {/* ── 幣種磁磚（獲利曲線為主視覺，點開看詳情）── */}
       <div className="bots-grid">
-        <BotCard data={d}  num={1} color={BOT_COLORS[0]} livePrice={livePrices[d?.symbol]} />
-        <BotCard data={e2} num={2} color={BOT_COLORS[1]} livePrice={livePrices[e2?.symbol]} />
-        <BotCard data={e3} num={3} color={BOT_COLORS[2]} livePrice={livePrices[e3?.symbol]} />
-        {e4?.configured && (
-          <BotCard data={e4} num={4} color={BOT_COLORS[3]} livePrice={livePrices[e4?.symbol]} />
-        )}
+        {bots.map((b, i) => (
+          <BotCard key={b.id} botId={b.id} data={b.data} num={i + 1}
+                   color={BOT_COLORS[i % BOT_COLORS.length]}
+                   livePrice={livePrices[b.data?.symbol || b.meta?.symbol]}
+                   defaultCollapsed={true} />
+        ))}
       </div>
     </>
   )

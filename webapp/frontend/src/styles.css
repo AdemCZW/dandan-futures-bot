@@ -561,8 +561,8 @@ h3::before { display: none; }
 /* 機器人卡片網格：桌面 2 欄、手機降 1 欄 */
 .bots-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
   align-items: start;
 }
 

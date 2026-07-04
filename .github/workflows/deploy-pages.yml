@@ -1,0 +1,82 @@
+name: Deploy GitHub Pages
+
+# 前端公開看板：只在 main 分支、且異動到前端相關檔案時觸發，測試通過才建置+發佈。
+# 純靜態站（Vite build 產物），不需要 dashboard 常駐、不碰 Railway。
+#
+# 一次性設定（使用者手動）：
+#   1. repo → Settings → Pages → Build and deployment → Source 選 "GitHub Actions"。
+#   2. repo → Settings → Secrets and variables → Actions → New repository secret：
+#      - VITE_BOT_URL：bot 容器網址（如 https://dandan-futures-bot-production.up.railway.app）
+#      - VITE_CLOSE_TOKEN：與 Railway bot 服務 CLOSE_TOKEN 完全一致的值
+#        （可隨時在 Railway 換掉這個 token 讓公開頁面的舊 token 失效，虛擬倉風險可控）
+#   設好後，往 main push 前端變更即自動建置＋發佈到 Pages。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "webapp/frontend/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch: {}   # 允許手動觸發（設定剛完成、想立即發一次時用）
+
+concurrency:
+  group: deploy-pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webapp/frontend/package-lock.json
+      - name: Install deps
+        working-directory: webapp/frontend
+        run: npm ci
+      - name: Unit tests
+        working-directory: webapp/frontend
+        run: npx vitest run
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webapp/frontend/package-lock.json
+      - name: Install deps
+        working-directory: webapp/frontend
+        run: npm ci
+      - name: Build（公開精簡版：只留即時監控/K線/決策流程/交易日誌）
+        working-directory: webapp/frontend
+        env:
+          VITE_PUBLIC_BUILD: "true"
+          VITE_BASE_PATH: "/${{ github.event.repository.name }}/"
+          VITE_BOT_URL: ${{ secrets.VITE_BOT_URL }}
+          VITE_CLOSE_TOKEN: ${{ secrets.VITE_CLOSE_TOKEN }}
+        run: npx vite build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: webapp/frontend/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

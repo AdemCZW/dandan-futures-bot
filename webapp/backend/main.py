@@ -137,6 +137,28 @@ def live4():
     return out
 
 
+@app.get("/api/live-all")
+def live_all():
+    """一次回傳 1~4 台 bot 狀態，降低前端四次輪詢造成的流量與 CPU 負擔。"""
+    b1 = service.live_status()
+    b2 = service.live_status(railway_url=service._RAILWAY_BOT_URL_2) if service._RAILWAY_BOT_URL_2 else {
+        "active": False, "configured": False
+    }
+    b3 = service.live_status(railway_url=service._RAILWAY_BOT_URL_3) if service._RAILWAY_BOT_URL_3 else {
+        "active": False, "configured": False
+    }
+    b4 = service.live_status(railway_url=service._RAILWAY_BOT_URL_4) if service._RAILWAY_BOT_URL_4 else {
+        "active": False, "configured": False
+    }
+    if service._RAILWAY_BOT_URL_2:
+        b2["configured"] = True
+    if service._RAILWAY_BOT_URL_3:
+        b3["configured"] = True
+    if service._RAILWAY_BOT_URL_4:
+        b4["configured"] = True
+    return {"bot1": b1, "bot2": b2, "bot3": b3, "bot4": b4}
+
+
 _BOT_URLS = {
     1: lambda: service._RAILWAY_BOT_URL,
     2: lambda: service._RAILWAY_BOT_URL_2,
@@ -171,20 +193,20 @@ def live4_close():
     return _close_bot(4)
 
 
-@app.get("/api/hl-leaderboard")
-def hl_leaderboard(top_n: int = 30):
-    try:
-        return service.hyperliquid_leaderboard(top_n=top_n)
-    except Exception as e:                                   # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+@app.post("/api/close/{bot_id}")
+def generic_close(bot_id: str):
+    """通用平倉代理（N 台籃子）：/api/close/b5 → <bot根URL>/b5/close。
 
-
-@app.get("/api/whales")
-def whales(symbol: str = "BTCUSDT", period: str = "5m", limit: int = 30):
-    try:
-        return service.whale_data(symbol=symbol, period=period, limit=limit)
-    except Exception as e:                                   # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+    bot_id 白名單 ^b[1-9][0-9]?$（id 即路由段，擋穿越/怪字元）。
+    根 URL 沿用 RAILWAY_BOT_URL（合併容器的根，向後相容端點也掛同一處）。
+    """
+    import re
+    if not re.fullmatch(r"b[1-9][0-9]?", bot_id):
+        raise HTTPException(status_code=404, detail="unknown bot id")
+    base = service._RAILWAY_BOT_URL
+    if not base:
+        return {"ok": False, "msg": "未設 RAILWAY_BOT_URL"}
+    return service.close_position(f"{base}/{bot_id}", service._CLOSE_TOKEN)
 
 
 @app.get("/api/klines")
@@ -208,30 +230,6 @@ def trade_markers(symbol: str = "BTCUSDT", bucket_hours: int = 6, limit: int = 5
 @app.get("/api/price")
 def price(symbol: str = "BTCUSDT"):
     return service.mark_price(symbol)
-
-
-@app.get("/api/copytraders")
-def copytraders(limit: int = 20):
-    try:
-        return service.binance_copytrading(limit=limit)
-    except Exception as e:                                   # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
-
-@app.get("/api/copytrader-positions")
-def copytrader_positions(uid: str = ""):
-    try:
-        return service.binance_copytrader_positions(uid=uid)
-    except Exception as e:                                   # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
-
-
-@app.get("/api/large-trades")
-def large_trades(symbol: str = "BTCUSDT", min_usdt: float = 100_000, limit: int = 500):
-    try:
-        return service.okx_large_trades(symbol=symbol, min_usdt=min_usdt, limit=limit)
-    except Exception as e:                                   # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
 # ── 靜態前端 ──────────────────────────────────────────────────────────────────

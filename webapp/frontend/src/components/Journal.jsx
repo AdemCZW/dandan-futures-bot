@@ -60,6 +60,21 @@ export default function Journal() {
 
   async function load() {
     setErr('')
+    // 首選：bot 容器直連（逐台 /trades 再合併，不需要 dashboard 常駐）
+    try {
+      const list = await api.bots()
+      if (Array.isArray(list) && list.length) {
+        const perBot = await Promise.all(
+          list.map((b) => api.botTrades(b.id, 100).catch(() => []))
+        )
+        const merged = perBot.flat()
+          .filter((t) => !mode || t.mode === mode)
+          .sort((a, b) => String(b.ts).localeCompare(String(a.ts)))
+        setRows(merged)
+        return
+      }
+    } catch { /* fallback ↓ */ }
+    // 舊版 fallback：dashboard /api/trades（共用 Postgres 直查）
     try { setRows(await api.trades(100, mode || undefined)) }
     catch (e) { setErr(String(e.message || e)) }
   }

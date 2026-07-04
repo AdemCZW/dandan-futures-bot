@@ -1,6 +1,31 @@
 // 後端 API client。開發時透過 vite proxy 把 /api 導到 uvicorn :8000。
 const BASE = import.meta.env.VITE_API ?? ''
 
+// 合併 bot 容器（多台命名空間端點）：前端直連省 dashboard 代理流量/CPU，
+// GitHub Pages 部署時甚至不需要 dashboard 常駐。bot 端 GET 全開 CORS *。
+export const BOT_BASE = import.meta.env.VITE_BOT_URL
+  ?? 'https://dandan-futures-bot-production.up.railway.app'
+
+// 平倉直連 token（僅 GitHub Pages 建置時由 GH Actions secret 注入）。
+// 空字串 → closeBot 退回走 dashboard 代理（本機開發模式，dashboard 持 token 轉發）。
+// 使用者已確認接受風險：testnet 虛擬倉，token 可隨時在 Railway 換掉作廢。
+const CLOSE_TOKEN = import.meta.env.VITE_CLOSE_TOKEN ?? ''
+
+async function getAbs(url) {
+  const r = await fetch(url)
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  return r.json()
+}
+
+async function postAbs(url, headers = {}) {
+  const r = await fetch(url, { method: 'POST', headers })
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}))
+    throw new Error(e.detail || e.msg || `HTTP ${r.status}`)
+  }
+  return r.json()
+}
+
 async function get(path) {
   const r = await fetch(`${BASE}${path}`)
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
@@ -31,20 +56,25 @@ export const api = {
   live2: () => get('/api/live2'),
   live3: () => get('/api/live3'),
   live4: () => get('/api/live4'),
-  // 手動平倉（結算）：n=1~4 對應四台 bot；後端持 CLOSE_TOKEN 轉發
+  liveAll: () => get('/api/live-all'),
+  // N 台籃子：bot 容器直連（/bots 清單 + /{id}/live 各台 enrich 狀態）
+  bots: () => getAbs(`${BOT_BASE}/bots`),
+  botLive: (id) => getAbs(`${BOT_BASE}/${id}/live`),
+  // 該台近期成交（bot 直連，strategy+symbol 已在後端過濾好）
+  botTrades: (id, limit = 100) => getAbs(`${BOT_BASE}/${id}/trades?limit=${limit}`),
+  // 手動平倉（結算）：有 CLOSE_TOKEN（GH Pages 建置注入）→ 直連 bot；
+  // 否則退回 dashboard 代理 /api/close/{botId}（本機開發，dashboard 持 token 轉發）。
+  closeBot: (id) => CLOSE_TOKEN
+    ? postAbs(`${BOT_BASE}/${id}/close`, { 'X-Close-Token': CLOSE_TOKEN })
+    : post(`/api/close/${id}`, {}),
+  // 舊版四台端點（fallback 相容）
   closePosition: (n = 1) => post(`/api/live${n === 1 ? '' : n}/close`, {}),
-  whales: (symbol = 'BTCUSDT', period = '5m', limit = 30) =>
-    get(`/api/whales?symbol=${symbol}&period=${period}&limit=${limit}`),
-  hlLeaderboard: (topN = 30) => get(`/api/hl-leaderboard?top_n=${topN}`),
+  // K 線 + 費波那契通道 + 交易標記：bot 容器直連（省 dashboard 資源，資料同源更準）
   klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
-    get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+    getAbs(`${BOT_BASE}/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
   tradeMarkers: (symbol = 'BTCUSDT', bucketHours = 6) =>
-    get(`/api/trade-markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
+    getAbs(`${BOT_BASE}/markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
   price: (symbol = 'BTCUSDT') => get(`/api/price?symbol=${symbol}`),
-  copytraders: (limit = 20) => get(`/api/copytraders?limit=${limit}`),
-  copytraderPositions: (uid) => get(`/api/copytrader-positions?uid=${encodeURIComponent(uid)}`),
-  largeTrades: (symbol = 'BTCUSDT', minUsdt = 500000, limit = 100) =>
-    get(`/api/large-trades?symbol=${symbol}&min_usdt=${minUsdt}&limit=${limit}`),
 }
 
 export const pct = (x) => `${(x * 100).toFixed(2)}%`

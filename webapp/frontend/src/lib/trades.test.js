@@ -75,6 +75,31 @@ describe('pairTrades — 把成交列配對成回合（最新在前）', () => {
     ])    )
     expect(rows[0].ts).toBe('2026-06-25 06:15:00')
   })
+
+  it('連續兩筆 entry 無 exit → 舊那筆顯示為「紀錄缺漏」列，不靜默消失', () => {
+    const rows = pairTrades(feed([
+      T('2026-06-30 07:00:00', 'entry', 74.12, 20.2),
+      T('2026-06-30 07:00:00', 'entry', 73.96, 20.28),
+    ])    )
+    // 舊 entry(74.12) 應成為 gap 列；新 entry(73.96) 為 open 列
+    expect(rows).toHaveLength(2)
+    const gap = rows.find(r => r.exit_type === 'gap')
+    expect(gap).toBeTruthy()
+    expect(gap.entry_price).toBe(74.12)
+    expect(gap.exit_price).toBeNull()
+    expect(gap.pnl).toBeNull()
+    expect(gap.gap).toBe(true)
+    const open = rows.find(r => r.kind === 'open')
+    expect(open.entry_price).toBe(73.96)
+  })
+
+  it('gap 列不汙染連續虧損統計（lossStreak 只看真平倉）', () => {
+    const rows = pairTrades(feed([
+      T('2026-06-30 07:00:00', 'entry', 74.12, 20.2),
+      T('2026-06-30 07:00:00', 'entry', 73.96, 20.28),
+    ])    )
+    expect(lossStreak(rows)).toBeNull()   // 無真平倉 → 不觸發警示
+  })
 })
 
 describe('calcBalances — 視窗內逐筆累積餘額', () => {

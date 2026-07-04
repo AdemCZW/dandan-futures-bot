@@ -132,36 +132,25 @@ def test_klines_supertrend_splits_by_direction():
         assert "time" in pt and "value" in pt
 
 
-def test_copytraders_endpoint_returns_structure():
-    """帶單排行榜端點：回傳 200 + traders 清單；外網不通時退化為空清單不崩潰。"""
-    r = client.get("/api/copytraders?limit=5")
-    assert r.status_code == 200
-    d = r.json()
-    assert "traders" in d and isinstance(d["traders"], list)
-    # 若有資料，每筆必須有基本欄位
-    for t in d["traders"]:
-        assert {"uid", "nickname", "roi_7d", "pnl_7d", "followers", "win_rate"} <= set(t.keys())
+# ── 通用平倉代理（N 台 bot：/api/close/{bot_id}）───────────────────────────
+
+def test_generic_close_forwards_to_namespaced_bot(monkeypatch):
+    import webapp.backend.service as service
+    """POST /api/close/b5 → 轉發到 <bot根URL>/b5/close（8 台籃子不用逐台加端點）。"""
+    captured = {}
+    def fake_close(base, token):
+        captured["base"] = base; captured["token"] = token
+        return {"ok": True, "queued": True}
+    monkeypatch.setattr(service, "close_position", fake_close)
+    monkeypatch.setattr(service, "_RAILWAY_BOT_URL", "https://bot.example")
+    monkeypatch.setattr(service, "_CLOSE_TOKEN", "tok")
+    r = client.post("/api/close/b5")
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert captured["base"] == "https://bot.example/b5"
 
 
-def test_copytrader_positions_returns_structure():
-    """帶單者持倉端點：uid 為空字串時回傳空清單，不崩潰。"""
-    r = client.get("/api/copytrader-positions?uid=")
-    assert r.status_code == 200
-    d = r.json()
-    assert "positions" in d and isinstance(d["positions"], list)
-    # 若有資料，每筆必須有基本欄位
-    for p in d["positions"]:
-        assert {"symbol", "direction", "size", "entry_price", "upnl"} <= set(p.keys())
-
-
-def test_large_trades_endpoint_returns_structure():
-    """OKX 大單端點：回傳 200 + trades 清單 + 來源標示 OKX；外網不通時退化為空清單。"""
-    r = client.get("/api/large-trades?symbol=BTCUSDT&min_usdt=10000&limit=20")
-    assert r.status_code == 200
-    d = r.json()
-    assert "trades" in d and isinstance(d["trades"], list)
-    assert "symbol" in d and "min_usdt" in d
-    assert "OKX" in d.get("source", "")           # 已從幣安切換到 OKX
-    for t in d["trades"]:
-        assert {"time", "side", "price", "qty", "usdt"} <= set(t.keys())
-        assert t["side"] in ("buy", "sell")
+def test_generic_close_rejects_bad_bot_id():
+    """bot_id 白名單 ^b[1-9][0-9]?$：路徑穿越/怪字元 → 404。"""
+    for bad in ("x1", "b0", "..", "b1x"):
+        r = client.post(f"/api/close/{bad}")
+        assert r.status_code in (404, 405, 422), bad   # ".." 會被正規化成 /api/ → 405

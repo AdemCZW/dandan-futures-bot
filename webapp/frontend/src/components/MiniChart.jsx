@@ -39,6 +39,7 @@ const TIMEFRAMES = ['5m', '15m', '1h', '4h']
  *  可切換時間框架（5m/15m/1h/4h），預設 = 機器人本身的週期。
  *  靜態（不可拖曳縮放），每 60s 自動刷新一次 K 線。 */
 export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, inPosition, trades }) {
+  const klinePollMs = Number(import.meta.env.VITE_MINICHART_KLINE_POLL_MS || 3000)
   const elRef         = useRef(null)
   const candleRef     = useRef(null)
   const priceLinesRef = useRef([])
@@ -175,6 +176,7 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
     const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol.toUpperCase()}&interval=${tf}&limit=2`
 
     async function poll() {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       try {
         const res = await fetch(url)
         const arr = await res.json()
@@ -196,9 +198,9 @@ export default function MiniChart({ symbol, interval, strategy, entry, sl, tp, i
     }
 
     poll()
-    const t = setInterval(poll, 2000)
+    const t = setInterval(poll, klinePollMs)
     return () => { alive = false; clearInterval(t) }
-  }, [symbol, tf])
+  }, [symbol, tf, klinePollMs])
 
   // ── 進場/SL/TP 價格線（持倉或數值變動時即時重畫）──────────────────────────
   useEffect(() => {

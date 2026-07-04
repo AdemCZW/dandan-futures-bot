@@ -20,6 +20,24 @@ export function pairTrades(trades = []) {
 
   for (const t of ordered) {
     if (t.side === 'entry' || t.side === 'entry_short') {
+      // 連續兩筆 entry 中間沒有 exit（資料缺漏，多因重啟時交易所已平倉但漏記）：
+      // 把前一筆未平倉 entry 顯示成「紀錄缺漏」列，不讓它被覆蓋後靜默消失。
+      if (entry) {
+        rows.push({
+          kind: 'exit',
+          dir: entry.side === 'entry' ? 'long' : 'short',
+          entry_price: entry.price,
+          exit_price: null,
+          qty: entry.qty,
+          pnl: null,
+          ts: entry.ts,
+          entry_ts: entry.ts,
+          pos_value: Math.round(entry.qty * entry.price),
+          exit_type: 'gap',
+          orphan: true,
+          gap: true,
+        })
+      }
       entry = t
       remaining = t.qty
     } else if (t.side === 'scale_out') {
@@ -128,6 +146,9 @@ export function exitReason(exitType, pnl) {
     case 'sl':
       return { label: '停損', tone: 'neg',
                desc: '價格跌破成本、觸及停損價（SL）→ 認賠出場' }
+    case 'gap':
+      return { label: '紀錄缺漏', tone: 'flat',
+               desc: '此筆進場後直接出現新的進場、中間沒有平倉紀錄（多因重啟時交易所端已平倉但來不及補記）。該回合損益無法得知，已從勝率統計排除。' }
     case 'manual':
       return p > 0 ? { label: '手動平倉', tone: 'pos', desc: '你在儀表板按「手動平倉」結算，獲利出場' }
            : p < 0 ? { label: '手動平倉', tone: 'neg', desc: '你在儀表板按「手動平倉」結算，認賠出場' }
