@@ -33,17 +33,23 @@ FEATURE_COLS = [
 
 
 def extract_features(prepared: pd.DataFrame,
-                     events: pd.DatetimeIndex) -> pd.DataFrame:
+                     events: pd.DatetimeIndex,
+                     vol_z_window: int = 20) -> pd.DataFrame:
     """從 prepared DataFrame 的 events 時間點擷取特徵。
 
     策略專屬欄位（fib_score / ema_t_dist / stoch_k / stoch_d / fib_ch_pos）缺失時
     填 NaN 後由 fillna(median) 補，等同「此策略不使用該特徵」。
+
+    vol_z（成交量 z-score）用「滾動視窗」而非整段資料的 mean/std 計算：
+    舊版拿全資料集的統計量，等於讓早期事件「偷看」了資料尾端才發生的爆量，
+    訓練/驗證時的特徵分佈跟實盤推論時（只看得到當下為止）不一致（look-ahead 洩漏）。
+    rolling().mean()/std() 在 t 時間點只用 [t-window, t] 的資料，因果、可對齊實盤。
     """
     if "volume" in prepared.columns:
-        v_mean = prepared["volume"].mean()
-        v_std  = prepared["volume"].std() + 1e-9
+        roll = prepared["volume"].rolling(vol_z_window, min_periods=max(2, vol_z_window // 2))
+        vol_z_series = (prepared["volume"] - roll.mean()) / (roll.std() + 1e-9)
     else:
-        v_mean = v_std = None
+        vol_z_series = None
 
     rows = []
     for t in events:
@@ -53,9 +59,10 @@ def extract_features(prepared: pd.DataFrame,
         r = prepared.loc[t]
         close = float(r.get("close", np.nan))
         atr   = float(r.get("atr",   np.nan))
-        vol   = float(r.get("volume", np.nan))
 
-        vol_z = (vol - v_mean) / v_std if v_mean is not None and not np.isnan(vol) else 0.0
+        vol_z = float(vol_z_series.loc[t]) if vol_z_series is not None else 0.0
+        if np.isnan(vol_z):
+            vol_z = 0.0
 
         ema_t = float(r.get("ema_t", np.nan))
         ema_t_dist = (close - ema_t) / close if (close and not np.isnan(ema_t)) else np.nan
@@ -88,14 +95,23 @@ def train_filter(X: pd.DataFrame, y: pd.Series,
 
     y 應為 Triple Barrier 標籤（+1 / -1 / 0）；
     模型把 +1 當 positive class，-1/0 合併為 negative class。
+
+    scale_pos_weight = 負樣本數/正樣本數：+1（贏單）通常遠少於 -1/0，不加權時
+    模型會學到「永遠猜負類」也能有高準確率的偷懶解（ML_TRAINING_GUIDE.md 記錄的
+    fib_channel/SOL 0.950 準確率案例——比 baseline 0.961 還差，就是這個問題）。
+    無正樣本（全負類，無法訓練有意義的模型）時退回 1.0，不除以零。
     """
     y_bin = (y == 1).astype(int)
+    n_pos = int(y_bin.sum())
+    n_neg = len(y_bin) - n_pos
+    scale_pos_weight = (n_neg / n_pos) if n_pos > 0 else 1.0
     model = XGBClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
         learning_rate=0.1,
         use_label_encoder=False,
         eval_metric="logloss",
+        scale_pos_weight=scale_pos_weight,
         random_state=seed,
         n_jobs=-1,
         verbosity=0,

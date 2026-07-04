@@ -170,12 +170,17 @@ def _param_combos(space: dict) -> list[dict]:
 
 def walk_forward_eval(df, name: str, cfg, grid: dict | None = None,
                       train_bars: int = 1500, test_bars: int = 500,
-                      min_trades_train: int = 10, purge: int = 0) -> dict:
+                      min_trades_train: int = 10, purge: int = 0,
+                      ml_model=None, ml_threshold: float = 0.55) -> dict:
     """單一策略的 walk-forward 樣本外評估。
 
     每個 fold：在訓練窗用 grid 選最佳參數（grid=None → 用預設參數），鎖定後只在
     「未見過的」測試窗回測，蒐集測試窗的平倉交易。跨所有 fold 彙總 OOS 指標——
     這才是「真 edge」的試金石：訓練窗挑的東西在樣本外還賺不賺。
+
+    ml_model：可選（撿起 #55）。傳入已訓練的 ML 過濾模型時，OOS 回測會在新進場
+    前套用機率門檻（語意見 run_backtest）。用同一份 df/fold 切法跑「有無 ML」兩次
+    即可公平對照——這是唯一保證兩邊 walk-forward 方法論一致的路徑。None 時完全不變。
     """
     bounds = _fold_bounds(len(df), train_bars, test_bars, purge=purge)
     oos_pnls: list[float] = []
@@ -195,7 +200,8 @@ def walk_forward_eval(df, name: str, cfg, grid: dict | None = None,
             params = best["params"] if best else {}
         try:
             res = run_backtest(test.copy(), build_strategy(name, **params),
-                               RiskOfficer(cfg), cfg)
+                               RiskOfficer(cfg), cfg,
+                               ml_model=ml_model, ml_threshold=ml_threshold)
         except Exception:                                      # noqa: BLE001
             continue
         pnls = [t["pnl"] for t in res.trades]

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from core.quant_researcher import Strategy
 from core.risk_officer import RiskOfficer
+from ml.ml_filter import extract_features, signal_proba
 
 
 def interval_to_minutes(interval: str) -> float:
@@ -95,7 +96,8 @@ class BacktestResult:
 
 
 def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
-                 trace: list | None = None) -> BacktestResult:
+                 trace: list | None = None,
+                 ml_model=None, ml_threshold: float = 0.55) -> BacktestResult:
     """逐根模擬。支援多/空：策略回傳目標倉位（+1/0/-1），引擎自動進出場。
 
     僅做多策略（allow_short=False、只回 0/＋1）的路徑與舊版逐行等價。
@@ -104,6 +106,13 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
     trace：可選。傳入一個 list 時，逐根附上「決策軌跡」（指標/信號/風控/動作），
     供前端攤開每個位置的決策。此 hook 只讀值與 append，不影響任何計算或結果
     （trace=None 時與未加 hook 完全等價）。
+
+    ml_model：可選（撿起 #55）。給定時，只在「新進場」（target 從非該方向轉為
+    +1/-1）套用機率門檻——語意與 run_live_futures.py 的即時 ML 閘門一致：不擋
+    既有倉位的續抱/出場。用 df.loc[:ts]（只到當根為止）擷取特徵，因果、無未來
+    洩漏。ml_model=None（預設）→ 完全不影響現有行為，是走 walk-forward 錦標賽
+    公平比較「有無 ML 過濾」的唯一入口（否則要另外寫一套評估邏輯，兩邊方法論
+    可能悄悄不一致）。
     """
     df = strategy.prepare(df).dropna()
     equity = cfg.start_equity
@@ -183,6 +192,19 @@ def run_backtest(df: pd.DataFrame, strategy: Strategy, risk: RiskOfficer, cfg,
         target = strategy.signal(row, position)
         if target == -1 and not allow_short:
             target = 0     # 安全網：不支援做空的策略，-1 一律當平倉
+
+        # ML 過濾閘門（撿起 #55）：只在「新進場」套用機率門檻，續抱/出場不受影響
+        # （語意與 run_live_futures.py 即時閘門一致）。df.loc[:ts] 只用到當根為止
+        # 的資料擷取特徵，因果、無未來洩漏。ml_model=None（預設）完全不影響行為。
+        if ml_model is not None and target in (1, -1) and target != position:
+            try:
+                feats = extract_features(df.loc[:ts], pd.DatetimeIndex([ts]))
+                p = signal_proba(ml_model, feats)
+                if p < ml_threshold:
+                    target = 0
+            except Exception:                      # noqa: BLE001 — 過濾失敗不擋回測，退回無過濾行為
+                pass
+
         if step is not None:
             step["target"] = int(target)
 

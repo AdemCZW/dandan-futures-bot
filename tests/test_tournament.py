@@ -236,3 +236,32 @@ def test_select_champion_none_when_none_significant():
     from backtest.tournament import _select_champion
     ranked = [{"strategy": "a", "eligible": True, "oos_expectancy_lb": -0.1}]
     assert _select_champion(ranked, require_significant=True) is None
+
+
+# ── ML 過濾閘門接入 walk_forward_eval（2026-07-04 撿起 #55）：讓錦標賽能用同一套
+#    OOS 方法論公平比較「策略單獨」vs「策略+ML 過濾」。ml_model=None 時行為不變。──
+class _StubMlModel:
+    """固定機率的假模型；proba<threshold 時應擋掉 walk_forward 的 OOS 進場。"""
+    def __init__(self, proba):
+        self.proba = proba
+    def predict_proba(self, X):
+        import numpy as _np
+        return _np.array([[1 - self.proba, self.proba]])
+
+
+def test_walk_forward_eval_ml_none_is_unchanged():
+    df = _synth_df(n=400)
+    a = walk_forward_eval(df, "ema_cross", Config(interval="5m"),
+                          grid=None, train_bars=120, test_bars=40)
+    b = walk_forward_eval(df, "ema_cross", Config(interval="5m"),
+                          grid=None, train_bars=120, test_bars=40, ml_model=None)
+    assert a["oos_trades"] == b["oos_trades"]     # 預設路徑逐位元等價
+
+
+def test_walk_forward_eval_ml_reject_all_yields_zero_oos_trades():
+    """模型對所有進場給極低機率 → OOS 一筆都不該成交（證明閘門確實接進 OOS 回測）。"""
+    df = _synth_df(n=400)
+    wf = walk_forward_eval(df, "ema_cross", Config(interval="5m"),
+                           grid=None, train_bars=120, test_bars=40,
+                           ml_model=_StubMlModel(proba=0.01), ml_threshold=0.55)
+    assert wf["oos_trades"] == 0

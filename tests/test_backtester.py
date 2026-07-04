@@ -504,3 +504,77 @@ def test_fill_lag_executes_signal_entry_at_next_bar_open():
 
 def test_fill_lag_zero_is_backward_compatible():
     assert Config().fill_lag == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ML 過濾閘門整合（2026-07-04 撿起 #55）：run_backtest 可選接受 ml_model/ml_threshold，
+# 讓 walk-forward 錦標賽能用同一套方法論公平比較「有無 ML 過濾」，語意與
+# run_live_futures.py 的即時 ML 閘門一致：只擋「新進場」，不擋既有倉位的出場/續抱。
+# ═══════════════════════════════════════════════════════════════════════════
+
+class FakeMlModel:
+    """假模型：predict_proba 回傳固定機率，模擬 XGBClassifier 介面。"""
+    def __init__(self, proba: float):
+        self.proba = proba
+        self.calls = []
+
+    def predict_proba(self, X):
+        self.calls.append(X)
+        return np.array([[1 - self.proba, self.proba]])
+
+
+class TestMlGateInBacktest:
+    def test_none_model_bypasses_gate_unchanged_behavior(self):
+        """ml_model=None（預設）→ 行為與未加此參數前完全一致（回歸安全網）。"""
+        df = df_with_sig([100, 101, 102, 103, 104], [0, 1, 1, 1, 0])
+        cfg = make_cfg()
+        res_a = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg), cfg)
+        res_b = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg), cfg, ml_model=None)
+        assert len(res_a.trades) == len(res_b.trades) == 1
+
+    def test_gate_blocks_new_entry_when_proba_below_threshold(self):
+        df = df_with_sig([100, 101, 102, 103, 104], [0, 1, 1, 1, 0])
+        cfg = make_cfg()
+        model = FakeMlModel(proba=0.30)     # 低於門檻
+        res = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg), cfg,
+                           ml_model=model, ml_threshold=0.55)
+        assert len(res.trades) == 0         # 進場被否決，連出場都沒有
+        assert len(model.calls) >= 1        # 確實有呼叫模型判斷
+
+    def test_gate_allows_new_entry_when_proba_meets_threshold(self):
+        df = df_with_sig([100, 101, 102, 103, 104], [0, 1, 1, 1, 0])
+        cfg = make_cfg()
+        model = FakeMlModel(proba=0.90)     # 高於門檻
+        res = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg), cfg,
+                           ml_model=model, ml_threshold=0.55)
+        assert len(res.trades) == 1
+
+    def test_gate_does_not_block_exit_of_existing_position(self):
+        """持倉中訊號轉平倉：出場不呼叫模型（gate 條件是 target∈{1,-1}，exit 的
+        target=0 不落在條件內）——用高 proba 讓進場先成立，才能觀察出場本身。"""
+        df = df_with_sig([100, 101, 102, 103, 104], [1, 1, 1, 0, 0])
+        cfg = make_cfg()
+        model = FakeMlModel(proba=0.90)      # 只需讓進場通過；出場邏輯本就不查模型
+        res = run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg), cfg,
+                           ml_model=model, ml_threshold=0.55)
+        assert len(res.trades) == 1
+        assert res.trades[0]["side"] == "exit_signal"
+
+    def test_gate_feature_slice_is_causal_no_future_rows(self, monkeypatch):
+        """驗證餵給模型的特徵只用「當下為止」的資料，不含尚未發生的未來根。"""
+        seen = {}
+        import backtest.backtester as bt_mod
+
+        def spy_extract(prepared, events, **kw):
+            seen["max_ts"] = prepared.index.max()
+            seen["event_ts"] = events[0]
+            return pd.DataFrame({"atr": [0.0]}, index=events)
+        monkeypatch.setattr(bt_mod, "extract_features", spy_extract, raising=False)
+
+        df = df_with_sig([100, 101, 102, 103, 104], [0, 1, 1, 1, 0])
+        cfg = make_cfg()
+        model = FakeMlModel(proba=0.90)
+        run_backtest(df.copy(), SigStrategy(), RiskOfficer(cfg), cfg,
+                    ml_model=model, ml_threshold=0.55)
+        assert "max_ts" in seen, "應該有呼叫特徵擷取（若被略過代表整合沒接上）"
+        assert seen["max_ts"] <= seen["event_ts"]

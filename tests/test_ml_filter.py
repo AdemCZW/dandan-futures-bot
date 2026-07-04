@@ -252,3 +252,79 @@ class TestMlFilter:
         model = train_filter(X, y)
         scores = cross_val_score(model, X, (y == 1).astype(int), cv=3)
         assert scores.mean() > 0.5, f"Model accuracy {scores.mean():.2f} not > 0.5"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Part 4 — ML 過濾層升級（2026-07-04 撿起 #55）：修 look-ahead 洩漏 + 類別不平衡
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestVolZNoLookahead:
+    """vol_z 舊版用「整段資料」的 mean/std，等於偷看未來（訓練時洩漏，實盤推論時
+    的分佈跟訓練時不同）。修復：只能用「當下時間點為止」的滾動視窗。"""
+
+    def _make_prepared(self, n=300, seed=1):
+        df = make_ohlcv(n, seed)
+        rng = np.random.default_rng(99)
+        df["atr"] = df["close"] * 0.01
+        df["adx"] = 20.0
+        df["rsi"] = 50.0
+        df["er"] = 0.5
+        df["choppiness"] = 50.0
+        return df
+
+    def test_early_event_vol_z_unaffected_by_future_volume_spike(self):
+        """把資料尾端（events 之後）的成交量改成極端值，早期 event 的 vol_z 不該變。"""
+        from ml.ml_filter import extract_features
+        prepared_a = self._make_prepared(300)
+        prepared_b = prepared_a.copy()
+        prepared_b.iloc[250:] = prepared_b.iloc[250:].assign(
+            volume=prepared_b["volume"].iloc[250:] * 1000)  # 尾端爆量
+        early_event = prepared_a.index[[20]]                # 遠在爆量之前
+        feats_a = extract_features(prepared_a, early_event)
+        feats_b = extract_features(prepared_b, early_event)
+        assert feats_a["vol_z"].iloc[0] == pytest.approx(feats_b["vol_z"].iloc[0], abs=1e-6), (
+            "早期事件的 vol_z 不該被「未來才發生」的爆量影響——現在會變，證明有 look-ahead 洩漏"
+        )
+
+    def test_vol_z_still_computed_when_no_lookahead_possible(self):
+        """功能面：vol_z 依然能正常算出數值（不是整欄變 0 或 NaN）。"""
+        from ml.ml_filter import extract_features
+        prepared = self._make_prepared(300)
+        events = prepared.index[100:120]
+        feats = extract_features(prepared, events)
+        assert feats["vol_z"].notna().all()
+        assert feats["vol_z"].std() > 0   # 不是全部塌縮成同一個值
+
+
+class TestScalePosWeight:
+    """train_filter 對稀少的 +1（贏單）類別加權，避免模型學到「永遠猜 0/-1」的偷懶解。"""
+
+    def _make_prepared(self, n=300, seed=1):
+        df = make_ohlcv(n, seed)
+        df["atr"] = df["close"] * 0.01
+        df["adx"] = 20.0
+        df["rsi"] = 50.0
+        df["er"] = 0.5
+        df["choppiness"] = 50.0
+        return df
+
+    def test_scale_pos_weight_matches_imbalance_ratio(self):
+        from ml.ml_filter import extract_features, train_filter
+        prepared = self._make_prepared(300)
+        events = prepared.index[::5][:40]
+        X = extract_features(prepared, events)
+        # 高度不平衡：只有 4 筆 +1，其餘 36 筆非 +1
+        y = pd.Series([1]*4 + [0]*36, index=events)
+        model = train_filter(X, y)
+        expected_ratio = 36 / 4
+        assert model.get_params()["scale_pos_weight"] == pytest.approx(expected_ratio)
+
+    def test_scale_pos_weight_defaults_to_one_when_no_positives(self):
+        """全部都不是 +1（沒有正樣本）→ 退回 1.0，不除以零。"""
+        from ml.ml_filter import extract_features, train_filter
+        prepared = self._make_prepared(300)
+        events = prepared.index[::5][:20]
+        X = extract_features(prepared, events)
+        y = pd.Series([0]*20, index=events)
+        model = train_filter(X, y)
+        assert model.get_params()["scale_pos_weight"] == pytest.approx(1.0)
