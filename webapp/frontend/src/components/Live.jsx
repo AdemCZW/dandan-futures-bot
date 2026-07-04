@@ -202,8 +202,8 @@ function BotCard({ data, num, color, livePrice: propLivePrice, botId, defaultCol
   async function handleClose() {
     setClosing(true); setCloseMsg(null); setConfirmClose(false)
     try {
-      // N 台籃子走通用代理 /api/close/{botId}；無 botId（舊資料）退回舊四端點
-      const r = botId ? await api.closeBot(botId) : await api.closePosition(num)
+      // N 台籃子走通用代理 /api/close/{botId}（bot 直連或 dashboard 代理，由 api 層決定）
+      const r = await api.closeBot(botId)
       setCloseMsg(r?.ok ? { ok: true, text: r.msg || '已送出平倉' }
                         : { ok: false, text: r?.msg || '平倉失敗' })
     } catch (e) {
@@ -387,6 +387,32 @@ function BotCard({ data, num, color, livePrice: propLivePrice, botId, defaultCol
                 <span className={(data.short_pnl ?? 0) >= 0 ? 'pos' : 'neg'} style={{ marginLeft: 5, fontSize: 10 }}>
                   {fmtSign(data.short_pnl)}
                 </span>
+              </MiniStat>
+            </div>
+            {/* 完善數據（2026-07-05）：期望值/獲利因子/平均賺虧/最大連虧/持倉時長 */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+              <MiniStat label="期望/筆" title="平均每筆已平倉損益（USDT）；>0 才是正期望系統">
+                <span className={data.expectancy == null ? 'muted' : data.expectancy >= 0 ? 'pos' : 'neg'}>
+                  {data.expectancy != null ? fmtSign(data.expectancy) : '—'}
+                </span>
+              </MiniStat>
+              <MiniStat label="獲利因子" title="總賺÷總虧；>1 賺錢、<1 虧錢；無虧損時顯示 —">
+                <span className={data.profit_factor == null ? 'muted' : data.profit_factor >= 1 ? 'pos' : 'neg'}>
+                  {data.profit_factor != null ? fmt(data.profit_factor, 2) : '—'}
+                </span>
+              </MiniStat>
+              <MiniStat label="均賺/均虧" title="贏單平均獲利 / 輸單平均虧損（賠率結構）">
+                <span className="pos">{data.avg_win != null ? fmt(data.avg_win) : '—'}</span>
+                <span className="muted" style={{ margin: '0 3px' }}>/</span>
+                <span className="neg">{data.avg_loss != null ? fmt(data.avg_loss) : '—'}</span>
+              </MiniStat>
+              <MiniStat label="最大連虧" title="歷史最長連續虧損筆數（熔斷器參考：3 筆暫停）">
+                <span className={(data.max_consec_losses ?? 0) >= 3 ? 'neg' : ''}>
+                  {data.max_consec_losses ?? '—'}
+                </span>
+              </MiniStat>
+              <MiniStat label="均持倉" title="平均每筆持倉時長（小時）">
+                <span>{data.avg_hold_hours != null ? `${fmt(data.avg_hold_hours, 1)}h` : '—'}</span>
               </MiniStat>
             </div>
           </>)}
@@ -619,7 +645,8 @@ export default function Live() {
   const timer = useRef(null)
 
   async function load() {
-    // 首選：bot 容器直連（/bots 清單 + 逐台 /live），支援 N 台、不吃 dashboard 資源
+    // bot 容器直連（/bots 清單 + 逐台 /live），支援 N 台、不吃 dashboard 資源。
+    // 2026-07-05 清理：移除舊四端點 fallback——目標服務已關閉合併，fallback 永遠拿不到資料。
     try {
       const list = await api.bots()
       if (Array.isArray(list) && list.length) {
@@ -628,19 +655,8 @@ export default function Live() {
           catch { return { id: b.id, meta: b, data: null } }
         }))
         setBots(datas)
-        return
       }
-    } catch { /* fallback ↓ */ }
-    // 舊版 fallback：dashboard 四端點（bot 容器未更新時仍可看）
-    const legacy = []
-    const fns = [api.live, api.live2, api.live3, api.live4]
-    for (let i = 0; i < fns.length; i++) {
-      try {
-        const d = await fns[i]()
-        if (d && d.active !== false) legacy.push({ id: `b${i + 1}`, meta: null, data: d })
-      } catch { /* ignore */ }
-    }
-    setBots(legacy)
+    } catch { /* bot 容器暫時不可達 → 保留上一輪資料，下一輪重試 */ }
   }
 
   useEffect(() => {

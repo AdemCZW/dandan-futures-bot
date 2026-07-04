@@ -230,10 +230,9 @@ def run_optimize_api(strategy: str, source: str = "synthetic",
     }
 
 
+# 2026-07-05 清理：移除 _RAILWAY_BOT_URL_2/3/4——舊分離 bot 服務已關閉合併，
+# 現行架構單一容器多 bot（/bots + /{id}/live），只剩合併容器根 URL。
 _RAILWAY_BOT_URL = os.getenv("RAILWAY_BOT_URL", "").rstrip("/")
-_RAILWAY_BOT_URL_2 = os.getenv("RAILWAY_BOT_URL_2", "").rstrip("/")
-_RAILWAY_BOT_URL_3 = os.getenv("RAILWAY_BOT_URL_3", "").rstrip("/")
-_RAILWAY_BOT_URL_4 = os.getenv("RAILWAY_BOT_URL_4", "").rstrip("/")
 _CLOSE_TOKEN = os.getenv("CLOSE_TOKEN", "")   # 手動平倉共用密鑰；空=停用平倉代理
 
 # Live API 降載設定（可由 Railway Variables 覆蓋）

@@ -52,12 +52,8 @@ export const api = {
   optimize: (body) => post('/api/optimize', body),
   trades: (limit = 50, mode) =>
     get(`/api/trades?limit=${limit}${mode ? `&mode=${encodeURIComponent(mode)}` : ''}`),
-  live: () => get('/api/live'),
-  live2: () => get('/api/live2'),
-  live3: () => get('/api/live3'),
-  live4: () => get('/api/live4'),
-  liveAll: () => get('/api/live-all'),
   // N 台籃子：bot 容器直連（/bots 清單 + /{id}/live 各台 enrich 狀態）
+  // 2026-07-05 清理：移除 live/live2/3/4/liveAll 舊四端點 client——目標服務已關閉合併
   bots: () => getAbs(`${BOT_BASE}/bots`),
   botLive: (id) => getAbs(`${BOT_BASE}/${id}/live`),
   // 該台近期成交（bot 直連，strategy+symbol 已在後端過濾好）
@@ -67,8 +63,6 @@ export const api = {
   closeBot: (id) => CLOSE_TOKEN
     ? postAbs(`${BOT_BASE}/${id}/close`, { 'X-Close-Token': CLOSE_TOKEN })
     : post(`/api/close/${id}`, {}),
-  // 舊版四台端點（fallback 相容）
-  closePosition: (n = 1) => post(`/api/live${n === 1 ? '' : n}/close`, {}),
   // K 線 + 費波那契通道 + 交易標記：bot 容器直連（省 dashboard 資源，資料同源更準）
   klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
     getAbs(`${BOT_BASE}/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),

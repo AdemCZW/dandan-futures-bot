@@ -79,34 +79,6 @@ def test_live_endpoint_returns_status():
     assert "active" in d and "recent_trades" in d and isinstance(d["recent_trades"], list)
 
 
-def test_live2_endpoint_exists_and_returns_valid_structure():
-    r = client.get("/api/live2")
-    assert r.status_code == 200
-    d = r.json()
-    # 有設定 URL → configured=True + 有 active；未設定 → configured=False
-    assert "configured" in d
-    if d["configured"]:
-        assert "active" in d
-
-
-def test_live3_endpoint_returns_configured_false_when_url_unset():
-    r = client.get("/api/live3")
-    assert r.status_code == 200
-    d = r.json()
-    assert "configured" in d   # RAILWAY_BOT_URL_3 未設定 → configured=False
-    if not d["configured"]:
-        assert d.get("active") is False
-
-
-def test_live4_endpoint_returns_configured_false_when_url_unset():
-    r = client.get("/api/live4")
-    assert r.status_code == 200
-    d = r.json()
-    assert "configured" in d   # RAILWAY_BOT_URL_4 未設定 → configured=False
-    if not d["configured"]:
-        assert d.get("active") is False
-
-
 def test_klines_synthetic_shape():
     r = client.get("/api/klines?source=synthetic")
     assert r.status_code == 200

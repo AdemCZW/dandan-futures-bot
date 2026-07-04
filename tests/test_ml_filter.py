@@ -328,3 +328,62 @@ class TestScalePosWeight:
         y = pd.Series([0]*20, index=events)
         model = train_filter(X, y)
         assert model.get_params()["scale_pos_weight"] == pytest.approx(1.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SMC 結構特徵（2026-07-05）：先前嚴格重測證實泛用波動度特徵無預測力（AUC 0.557），
+# 根因處方是「換結構特徵」。新增三個：fvg_size_atr（FVG 缺口大小/ATR）、
+# bos_dist_atr（BOS 突破距離/ATR）、bos_body_atr（突破棒實體/ATR）。
+# 非 SMC 策略缺這些欄位 → NaN → fillna(median) 降級，與 fib_score 等同一慣例。
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestSmcStructuralFeatures:
+    def _smc_prepared(self, n=120):
+        """帶 swing/atr/bos 欄位的 prepared（模擬 smc_structure.prepare() 輸出）。"""
+        rng = np.random.default_rng(3)
+        closes = 100 + np.cumsum(rng.normal(0.1, 1.0, n))
+        idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+        df = pd.DataFrame({
+            "open": closes - 0.2, "high": closes + 1.0, "low": closes - 1.0,
+            "close": closes, "volume": np.full(n, 100.0)}, index=idx)
+        df["atr"] = 2.0
+        df["adx"] = 25.0; df["rsi"] = 55.0; df["er"] = 0.5; df["choppiness"] = 45.0
+        df["swing_high"] = closes - 3.0          # close 高於 swing_high 3.0 → bos_dist = 1.5×ATR
+        df["swing_low"] = closes - 10.0
+        return df
+
+    def test_feature_cols_include_structural(self):
+        from ml.ml_filter import FEATURE_COLS
+        for col in ("fvg_size_atr", "bos_dist_atr", "bos_body_atr"):
+            assert col in FEATURE_COLS, f"FEATURE_COLS 缺 {col}"
+
+    def test_structural_values_computed_when_columns_present(self):
+        from ml.ml_filter import extract_features
+        prepared = self._smc_prepared()
+        events = prepared.index[50:55]
+        X = extract_features(prepared, events)
+        # bos_dist = (close − swing_high)/atr = 3.0/2.0 = 1.5
+        assert X["bos_dist_atr"].iloc[0] == pytest.approx(1.5)
+        # bos_body = |close − open|/atr = 0.2/2.0 = 0.1
+        assert X["bos_body_atr"].iloc[0] == pytest.approx(0.1)
+
+    def test_fvg_size_positive_when_gap_exists(self):
+        from ml.ml_filter import extract_features
+        prepared = self._smc_prepared()
+        # 人工造一個看漲 FVG：event 根的 low 高於 i-2 根的 high → 缺口 = low − high[i-2]
+        i = 60
+        prepared.iloc[i - 2, prepared.columns.get_loc("high")] = prepared["low"].iloc[i] - 4.0
+        X = extract_features(prepared, prepared.index[[i]])
+        assert X["fvg_size_atr"].iloc[0] == pytest.approx(4.0 / 2.0)   # 缺口 4.0 / ATR 2.0
+
+    def test_non_smc_prepared_degrades_gracefully(self):
+        """無 swing/atr 欄位的策略（如 fib_ema）→ 結構特徵 NaN→median 降級，不炸。"""
+        from ml.ml_filter import extract_features
+        rng = np.random.default_rng(5)
+        n = 60
+        closes = 100 + np.cumsum(rng.normal(0, 1, n))
+        idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+        prepared = pd.DataFrame({"open": closes, "high": closes + 1, "low": closes - 1,
+                                 "close": closes, "volume": np.full(n, 10.0)}, index=idx)
+        X = extract_features(prepared, prepared.index[10:15])
+        assert len(X) == 5                        # 不拋例外、行數正確

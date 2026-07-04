@@ -29,6 +29,12 @@ FEATURE_COLS = [
     "stoch_d",          # Stochastic %D
     # ── fib_channel 專屬 ──
     "fib_ch_pos",       # 價格在費波那契通道的相對位置 0~1
+    # ── smc_structure 專屬（2026-07-05 結構特徵）──
+    # 2026-07-04 嚴格重測證實泛用波動度特徵對 BOS 訊號成敗無預測力（AUC 0.557），
+    # 根因處方是「訊號自身的結構品質」；文獻（SMC 品質分級）同方向。
+    "fvg_size_atr",     # FVG 缺口大小 / ATR（缺口越大 = 失衡越強）
+    "bos_dist_atr",     # BOS 突破距離 / ATR（close 越過 swing 位準多遠 = 突破力道）
+    "bos_body_atr",     # 突破棒實體 / ATR（大實體 = 決斷性突破，小實體 = 猶豫）
 ]
 
 
@@ -51,6 +57,11 @@ def extract_features(prepared: pd.DataFrame,
     else:
         vol_z_series = None
 
+    # SMC 結構特徵需要 i-2 根的 high/low（FVG 缺口）→ 先建位置索引
+    idx_pos = {t: i for i, t in enumerate(prepared.index)}
+    high_v = prepared["high"].to_numpy() if "high" in prepared.columns else None
+    low_v = prepared["low"].to_numpy() if "low" in prepared.columns else None
+
     rows = []
     for t in events:
         if t not in prepared.index:
@@ -67,6 +78,35 @@ def extract_features(prepared: pd.DataFrame,
         ema_t = float(r.get("ema_t", np.nan))
         ema_t_dist = (close - ema_t) / close if (close and not np.isnan(ema_t)) else np.nan
 
+        # ── SMC 結構特徵（swing/atr 欄位缺失 → NaN → fillna(median) 降級）──
+        fvg_size_atr = bos_dist_atr = bos_body_atr = np.nan
+        atr_ok = atr and not np.isnan(atr) and atr > 0
+        if atr_ok:
+            opn = float(r.get("open", np.nan))
+            if not np.isnan(opn) and close:
+                bos_body_atr = abs(close - opn) / atr
+            sw_hi = float(r.get("swing_high", np.nan))
+            sw_lo = float(r.get("swing_low", np.nan))
+            # 突破距離取「當下方向」：多頭 BOS 用 close−swing_high、空頭用 swing_low−close，
+            # 兩者取有正值的一側（事件點本來就是某一側的 BOS 訊號）
+            cands = []
+            if not np.isnan(sw_hi):
+                cands.append(close - sw_hi)
+            if not np.isnan(sw_lo):
+                cands.append(sw_lo - close)
+            pos_c = [c for c in cands if c > 0]
+            if pos_c:
+                bos_dist_atr = max(pos_c) / atr
+            elif cands:
+                bos_dist_atr = max(cands) / atr    # 都非正 → 取較接近突破的一側（負值也有資訊）
+            # FVG 缺口：i-2 根 vs 當根（與 se.smc_levels 同定義，兩方向取有缺口的一側）
+            i = idx_pos.get(t)
+            if i is not None and i >= 2 and high_v is not None and low_v is not None:
+                gap_bull = low_v[i] - high_v[i - 2]     # >0 → 看漲缺口
+                gap_bear = low_v[i - 2] - high_v[i]     # >0 → 看跌缺口
+                gap = max(gap_bull, gap_bear)
+                fvg_size_atr = (gap / atr) if gap > 0 else 0.0
+
         rows.append({
             "atr":        atr,
             "adx":        float(r.get("adx",        np.nan)),
@@ -80,6 +120,9 @@ def extract_features(prepared: pd.DataFrame,
             "stoch_k":    float(r.get("stoch_k",    np.nan)),
             "stoch_d":    float(r.get("stoch_d",    np.nan)),
             "fib_ch_pos": float(r.get("fib_ch_pos", np.nan)),
+            "fvg_size_atr": fvg_size_atr,
+            "bos_dist_atr": bos_dist_atr,
+            "bos_body_atr": bos_body_atr,
         })
 
     df = pd.DataFrame(rows, index=events)[FEATURE_COLS]

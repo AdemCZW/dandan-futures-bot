@@ -996,3 +996,44 @@ def test_cvd_divergence_no_taker_base_returns_zeros():
                        "close": closes, "volume": np.full(n, 100.0)}, index=idx)
     div = se.cvd_price_divergence(df, window=5)
     assert (div == 0.0).all()
+
+
+# ── SMC 結構特徵欄位（2026-07-05，ML 結構特徵用）：swing 位準輸出 ──────────────
+def _smc_df(n=60):
+    rng = np.random.default_rng(7)
+    closes = 100 + np.cumsum(rng.normal(0.1, 1.0, n))
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    return pd.DataFrame({
+        "open": closes, "high": closes + np.abs(rng.normal(0, 0.6, n)) + 0.1,
+        "low": closes - np.abs(rng.normal(0, 0.6, n)) - 0.1,
+        "close": closes, "volume": np.full(n, 100.0)}, index=idx)
+
+
+def test_smc_levels_outputs_swing_levels():
+    """smc_levels additive 輸出 swing_high/swing_low（BOS 判定用的位準，ML 結構特徵需要）。"""
+    out = se.smc_levels(_smc_df(), pivot_left=5, pivot_right=3)
+    assert "swing_high" in out.columns and "swing_low" in out.columns
+    tail = out.iloc[20:]                       # 暖機後
+    assert tail["swing_high"].notna().any()
+    assert (tail["swing_high"].dropna() >= tail["swing_low"].dropna().reindex(
+        tail["swing_high"].dropna().index).fillna(-1e18)).all()
+
+
+def test_smc_levels_swing_matches_bos_semantics():
+    """bos_bull=1 的根，close 必 > swing_high（同一位準判定，語意一致不分岔）。"""
+    out = se.smc_levels(_smc_df(120), pivot_left=5, pivot_right=3)
+    mask = out["bos_bull"] == 1.0
+    sub = out[mask].dropna(subset=["swing_high"])
+    if len(sub):
+        assert (sub["close"] > sub["swing_high"]).all()
+
+
+def test_smc_levels_existing_columns_unchanged():
+    """回歸鎖：加 swing 欄不影響 bos/fvg 既有輸出（跟舊版逐位元一致的代理檢查）。"""
+    df = _smc_df(120)
+    out = se.smc_levels(df, pivot_left=5, pivot_right=3)
+    for col in ("bos_bull", "bos_bear", "fvg_bull", "fvg_bear"):
+        assert col in out.columns
+    # FVG 定義直接可重算驗證
+    fvg_bull_expect = (df["high"].shift(2) < df["low"]).astype(float)
+    assert (out["fvg_bull"].fillna(0) == fvg_bull_expect.fillna(0)).all()

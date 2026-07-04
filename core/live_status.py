@@ -29,15 +29,25 @@ def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
     """
     chrono = list(reversed(all_hist))   # newest-first → 時間正序
 
+    def _ts(t):
+        try:
+            return datetime.fromisoformat(str(t.get("ts", "")).strip())
+        except (ValueError, TypeError):
+            return None
+
     cur_dir = 0
+    entry_ts = None
     events: list[tuple[int, float, float | None]] = []
+    hold_hours: list[float] = []
     for t in chrono:
         side = str(t.get("side", ""))
         pnl = t.get("pnl")
         if side == "entry":
             cur_dir = 1
+            entry_ts = _ts(t)
         elif side == "entry_short":
             cur_dir = -1
+            entry_ts = _ts(t)
         elif side == "scale_out" or side.startswith("exit"):
             if pnl is not None and pnl != 0:
                 try:
@@ -46,7 +56,13 @@ def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
                     notional = 0.0
                 events.append((cur_dir, float(pnl), notional or None))
             if side.startswith("exit"):
+                ex_ts = _ts(t)
+                if entry_ts is not None and ex_ts is not None:
+                    dh = (ex_ts - entry_ts).total_seconds() / 3600
+                    if dh >= 0:
+                        hold_hours.append(dh)
                 cur_dir = 0
+                entry_ts = None
 
     long_pnls  = [pnl for d, pnl, _ in events if d == 1]
     short_pnls = [pnl for d, pnl, _ in events if d == -1]
@@ -72,9 +88,31 @@ def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
         if std > 0:
             sharpe = round(mean / std, 3)
 
+    # 完善數據（2026-07-05）：期望值/獲利因子/平均賺虧/最大連虧/平均持倉時長
+    pnls = [pnl for _, pnl, _ in events]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    expectancy = round(sum(pnls) / len(pnls), 4) if pnls else None
+    gross_loss = -sum(losses)
+    profit_factor = (round(sum(wins) / gross_loss, 3)
+                     if wins and gross_loss > 0 else None)   # 無虧損 → None（∞ 非合法 JSON）
+    avg_win = round(sum(wins) / len(wins), 2) if wins else None
+    avg_loss = round(sum(losses) / len(losses), 2) if losses else None
+    max_consec = cur = 0
+    for p in pnls:
+        cur = cur + 1 if p <= 0 else 0
+        max_consec = max(max_consec, cur)
+    avg_hold = round(sum(hold_hours) / len(hold_hours), 1) if hold_hours else None
+
     return {
         "max_drawdown_pct": _fin(max_dd_pct),
         "sharpe": _fin(sharpe),
+        "expectancy": _fin(expectancy),
+        "profit_factor": _fin(profit_factor),
+        "avg_win": _fin(avg_win),
+        "avg_loss": _fin(avg_loss),
+        "max_consec_losses": max_consec,
+        "avg_hold_hours": _fin(avg_hold),
         "long_trades": len(long_pnls),
         "long_wins": sum(1 for p in long_pnls if p > 0),
         "long_pnl": round(sum(long_pnls), 2),
@@ -148,6 +186,11 @@ def bot_live_status(state: dict, strategy: str, symbol: str, interval: str,
         "win_trades": win_trades,
         "max_drawdown_pct": stats["max_drawdown_pct"],
         "sharpe": stats["sharpe"],
+        "expectancy": stats["expectancy"],
+        "profit_factor": stats["profit_factor"],
+        "avg_win": stats["avg_win"], "avg_loss": stats["avg_loss"],
+        "max_consec_losses": stats["max_consec_losses"],
+        "avg_hold_hours": stats["avg_hold_hours"],
         "long_trades": stats["long_trades"], "long_wins": stats["long_wins"],
         "long_pnl": stats["long_pnl"],
         "short_trades": stats["short_trades"], "short_wins": stats["short_wins"],

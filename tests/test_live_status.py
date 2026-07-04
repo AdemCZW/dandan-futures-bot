@@ -61,3 +61,56 @@ def test_bot_live_status_short_unrealized(monkeypatch):
              "entry_price": 100.0, "cash": 5000.0, "base": 2.0, "last_price": 95.0}
     out = bot_live_status(state, "s", "BTCUSDT", "15m")
     assert out["unrealized_pnl"] == 10.0        # 空單 (100-95)*2 = +10
+
+
+# ── 完善 bot 數據（2026-07-05）：期望值/獲利因子/平均賺虧/最大連虧/平均持倉時長 ──
+def test_trade_stats_expectancy_profit_factor_and_streak():
+    rows = [  # newest-first：多 +10、多 -5、多 -3、多 +6（時間正序為 +6,-3,-5,+10）
+        {"side": "exit_tp", "price": 110, "qty": 1, "pnl": 10, "ts": "2026-07-04 12:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-04 08:00:00"},
+        {"side": "exit_sl", "price": 95, "qty": 1, "pnl": -5, "ts": "2026-07-03 12:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-03 08:00:00"},
+        {"side": "exit_sl", "price": 97, "qty": 1, "pnl": -3, "ts": "2026-07-02 12:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-02 08:00:00"},
+        {"side": "exit_tp", "price": 106, "qty": 1, "pnl": 6, "ts": "2026-07-01 12:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-01 00:00:00"},
+    ]
+    s = trade_stats(rows)
+    assert s["expectancy"] == 2.0                      # (6-3-5+10)/4
+    assert s["profit_factor"] == 2.0                   # (6+10)/(3+5)
+    assert s["avg_win"] == 8.0                         # (6+10)/2
+    assert s["avg_loss"] == -4.0                       # (-3-5)/2
+    assert s["max_consec_losses"] == 2                 # -3,-5 連續兩筆
+    assert s["avg_hold_hours"] == 6.0                  # (12+4+4+4)/4 = 24/4 小時
+
+
+def test_trade_stats_new_fields_none_when_no_trades():
+    s = trade_stats([])
+    assert s["expectancy"] is None
+    assert s["profit_factor"] is None
+    assert s["avg_win"] is None and s["avg_loss"] is None
+    assert s["max_consec_losses"] == 0
+    assert s["avg_hold_hours"] is None
+
+
+def test_trade_stats_profit_factor_none_when_no_losses():
+    rows = [
+        {"side": "exit_tp", "price": 110, "qty": 1, "pnl": 10, "ts": "2026-07-01 04:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-01 00:00:00"},
+    ]
+    s = trade_stats(rows)
+    assert s["profit_factor"] is None                  # 無虧損 → 無法計（∞ 不是合法 JSON）
+    assert s["expectancy"] == 10.0
+
+
+def test_bot_live_status_exposes_new_stats(monkeypatch):
+    def fake_read(limit=50, strategy=None, symbol=None, db_path=None, **kw):
+        return [
+            {"side": "exit_tp", "price": 110, "qty": 1, "pnl": 10, "ts": "2026-07-01 06:00:00"},
+            {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-01 00:00:00"},
+        ]
+    monkeypatch.setattr("core.live_status.read_trades_db", fake_read)
+    out = bot_live_status({"mode": "futures", "cash": 5000.0}, "s", "BTCUSDT", "4h")
+    for key in ("expectancy", "profit_factor", "avg_win", "avg_loss",
+                "max_consec_losses", "avg_hold_hours"):
+        assert key in out, f"bot_live_status 缺 {key}"

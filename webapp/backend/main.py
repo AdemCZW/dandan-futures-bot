@@ -102,95 +102,18 @@ def trades(limit: int = 50, mode: str | None = None):
     return service.read_trades(limit=limit, mode=mode)
 
 
+# 2026-07-05 清理：移除 /api/live2/3/4、/api/live-all、/api/liveN/close 遺留端點——
+# 它們代理 RAILWAY_BOT_URL_2/3/4 指向的「舊分離 bot 服務」，該些服務已關閉合併進
+# 單一 BOTS_CONFIG 容器（/bots + /{id}/live + /api/close/{bot_id} 為現行路徑）。
 @app.get("/api/live")
 def live():
     return service.live_status()
 
 
-@app.get("/api/live2")
-def live2():
-    """第二台 bot 的即時狀態。未設定 RAILWAY_BOT_URL_2 → configured=False。"""
-    if not service._RAILWAY_BOT_URL_2:
-        return {"active": False, "configured": False}
-    out = service.live_status(railway_url=service._RAILWAY_BOT_URL_2)
-    out["configured"] = True
-    return out
-
-
-@app.get("/api/live3")
-def live3():
-    """第三台 bot 的即時狀態。未設定 RAILWAY_BOT_URL_3 → configured=False。"""
-    if not service._RAILWAY_BOT_URL_3:
-        return {"active": False, "configured": False}
-    out = service.live_status(railway_url=service._RAILWAY_BOT_URL_3)
-    out["configured"] = True
-    return out
-
-
-@app.get("/api/live4")
-def live4():
-    """第四台 bot 的即時狀態。未設定 RAILWAY_BOT_URL_4 → configured=False。"""
-    if not service._RAILWAY_BOT_URL_4:
-        return {"active": False, "configured": False}
-    out = service.live_status(railway_url=service._RAILWAY_BOT_URL_4)
-    out["configured"] = True
-    return out
-
-
-@app.get("/api/live-all")
-def live_all():
-    """一次回傳 1~4 台 bot 狀態，降低前端四次輪詢造成的流量與 CPU 負擔。"""
-    b1 = service.live_status()
-    b2 = service.live_status(railway_url=service._RAILWAY_BOT_URL_2) if service._RAILWAY_BOT_URL_2 else {
-        "active": False, "configured": False
-    }
-    b3 = service.live_status(railway_url=service._RAILWAY_BOT_URL_3) if service._RAILWAY_BOT_URL_3 else {
-        "active": False, "configured": False
-    }
-    b4 = service.live_status(railway_url=service._RAILWAY_BOT_URL_4) if service._RAILWAY_BOT_URL_4 else {
-        "active": False, "configured": False
-    }
-    if service._RAILWAY_BOT_URL_2:
-        b2["configured"] = True
-    if service._RAILWAY_BOT_URL_3:
-        b3["configured"] = True
-    if service._RAILWAY_BOT_URL_4:
-        b4["configured"] = True
-    return {"bot1": b1, "bot2": b2, "bot3": b3, "bot4": b4}
-
-
-_BOT_URLS = {
-    1: lambda: service._RAILWAY_BOT_URL,
-    2: lambda: service._RAILWAY_BOT_URL_2,
-    3: lambda: service._RAILWAY_BOT_URL_3,
-    4: lambda: service._RAILWAY_BOT_URL_4,
-}
-
-
-def _close_bot(n: int) -> dict:
-    """代理第 n 台 bot 的手動平倉（持 CLOSE_TOKEN 轉發到 bot /close）。"""
-    base = _BOT_URLS[n]()
-    return service.close_position(base, service._CLOSE_TOKEN)
-
-
 @app.post("/api/live/close")
 def live_close():
-    return _close_bot(1)
-
-
-@app.post("/api/live2/close")
-def live2_close():
-    return _close_bot(2)
-
-
-@app.post("/api/live3/close")
-def live3_close():
-    return _close_bot(3)
-
-
-@app.post("/api/live4/close")
-def live4_close():
-    return _close_bot(4)
+    """向後相容：代理合併容器根路由的平倉（root → 第一台 bot）。"""
+    return service.close_position(service._RAILWAY_BOT_URL, service._CLOSE_TOKEN)
 
 
 @app.post("/api/close/{bot_id}")

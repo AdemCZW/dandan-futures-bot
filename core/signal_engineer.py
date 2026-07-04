@@ -410,6 +410,10 @@ def smc_levels(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5) -> p
 
     out["bos_bull"] = (df["close"] > fib_high).astype(float)
     out["bos_bear"] = (df["close"] < fib_low).astype(float)
+    # swing 位準本身也輸出（ML 結構特徵用：BOS 突破距離 = close − swing 位準）。
+    # 與 bos 判定同一份 _confirmed_swing_levels → 語意一致、不分岔。
+    out["swing_high"] = fib_high
+    out["swing_low"] = fib_low
 
     # FVG：用 shift(2) 取 i-2 根的極值，與當根比較 → 完全 causal
     out["fvg_bull"] = (df["high"].shift(2) < df["low"]).astype(float)
