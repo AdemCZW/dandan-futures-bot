@@ -290,3 +290,76 @@ def test_implied_open_full_cycle_then_reopen():
     op = implied_open_position(rows)
     assert op["dir"] == -1
     assert op["price"] == 90.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F1（高，2026-07-04 風控審查）：PG 連線死掉時 log() 須重連重試，而非拋例外。
+# 背景：Railway PG 會重啟/閒置逾時，self._conn 死掉後原本 log() 直接拋例外——
+# 進場流程在「已於交易所開倉」後、「掛保護性停損 _place_protective」前中斷 →
+# 交易所留下裸倉、無 journal 記錄、無 state → 重啟讀不到 → 幽靈持倉跑到爆倉。
+# ═══════════════════════════════════════════════════════════════════════════
+
+class _FakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def execute(self, sql, vals=None):
+        import psycopg2
+        if self.conn.always_fail or self.conn.fail_next:
+            self.conn.fail_next = False
+            raise psycopg2.OperationalError("server closed the connection unexpectedly")
+        self.conn.executed.append((sql, vals))
+
+    def fetchall(self):
+        return []
+
+
+class _FakePgConn:
+    def __init__(self, fail_next=False, always_fail=False):
+        self.fail_next = fail_next
+        self.always_fail = always_fail
+        self.executed = []
+        self.closed = False
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+    def commit(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def _patch_pg(monkeypatch, conns):
+    """讓 TradeJournal 走 PG 路徑；_pg_connect 依序回傳假連線。"""
+    import core.trade_journal as tj
+    monkeypatch.setattr(tj, "_DATABASE_URL", "postgres://fake")
+    it = iter(conns)
+    monkeypatch.setattr(tj, "_pg_connect", lambda: next(it))
+
+
+def test_log_reconnects_and_retries_on_dead_connection(monkeypatch):
+    """transient 斷線：log() 重連到新連線並成功寫入，不拋例外。"""
+    import core.trade_journal as tj
+    conn_init = _FakePgConn()          # __init__ + _init_db 用（健康）
+    conn_new  = _FakePgConn()          # 重連後的新連線（健康）
+    _patch_pg(monkeypatch, [conn_init, conn_new])
+    j = tj.TradeJournal(mode="live", symbol="BTCUSDT", strategy="smc_structure")
+    conn_init.fail_next = True                          # 模擬 PG 在 init 之後死掉
+    rec = j.log("entry", 100.0, 1.0, ts="2026-07-04")
+    assert j._conn is conn_new                          # 已重連到新連線
+    assert any("INSERT INTO trades" in s for s, _ in conn_new.executed)  # 這筆寫進新連線
+    assert rec["side"] == "entry"                       # 正常回傳，未拋例外
+
+
+def test_log_does_not_raise_when_reconnect_also_fails(monkeypatch):
+    """DB 全滅（重連後仍失敗）→ log() 不拋例外，讓呼叫端掛停損/存檔仍能跑。"""
+    import core.trade_journal as tj
+    conn_init = _FakePgConn()
+    conn_dead = _FakePgConn(always_fail=True)           # 重連後的連線也壞
+    _patch_pg(monkeypatch, [conn_init, conn_dead])
+    j = tj.TradeJournal(mode="live", symbol="BTCUSDT", strategy="smc_structure")
+    conn_init.fail_next = True
+    rec = j.log("entry", 100.0, 1.0, ts="2026-07-04")   # 不應拋例外
+    assert rec["side"] == "entry"

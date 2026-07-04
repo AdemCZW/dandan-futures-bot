@@ -106,6 +106,38 @@ class TradeJournal:
             with open(self.csv_path, "a", newline="") as fh:
                 csv.writer(fh).writerow(_COLUMNS)
 
+    def _pg_write(self, sql: str, vals: list) -> bool:
+        """PG 寫入，連線層級錯誤時重連重試一次。回傳 True=成功、False=重試後仍失敗。
+
+        F1（高，2026-07-04 風控審查）：Railway PG 會重啟/閒置逾時。原本 log() 用
+        建構時建立的 self._conn，連線死掉後直接拋例外，導致進場流程在「已於交易所
+        開倉」後、「掛保護性停損」前中斷 → 交易所裸倉、無 journal/state → 幽靈持倉。
+        改成：連線層級錯誤（OperationalError/InterfaceError）時關舊連線、重連、重試；
+        重試後仍失敗則印警告並回 False（不拋例外），讓呼叫端的 _place_protective /
+        _save 仍能執行——最壞情況只是漏一筆 journal 列（CSV/state 仍有、重啟可對帳）。
+        """
+        import psycopg2
+        for attempt in (1, 2):
+            try:
+                cur = self._conn.cursor()
+                cur.execute(sql, vals)
+                self._conn.commit()
+                return True
+            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                try:
+                    self._conn.close()
+                except Exception:                       # noqa: BLE001 — 死連線 close 也可能拋，忽略
+                    pass
+                if attempt == 2:
+                    print(f"[TradeJournal] PG 寫入重連後仍失敗，略過此筆（{e}）")
+                    return False
+                try:
+                    self._conn = _pg_connect()          # 重連，下一輪重試
+                except Exception as e2:                 # noqa: BLE001 — 重連本身失敗（DB 全滅）
+                    print(f"[TradeJournal] PG 重連失敗（{e2}）")
+                    return False
+        return False
+
     def log(self, side: str, price: float, qty: float = 0.0,
             pnl: float = 0.0, equity: float | None = None, ts=None) -> dict:
         """記錄一筆交易事件。回傳寫入的 row dict。"""
@@ -125,11 +157,9 @@ class TradeJournal:
         vals = [rec[c] for c in _COLUMNS]
         if self._pg:
             ph = ",".join(["%s"] * len(_COLUMNS))
-            cur = self._conn.cursor()
-            cur.execute(
+            self._pg_write(
                 f"INSERT INTO trades ({','.join(_COLUMNS)}) VALUES ({ph})", vals
             )
-            self._conn.commit()
         else:
             self._conn.execute(
                 f"INSERT INTO trades ({','.join(_COLUMNS)}) "
