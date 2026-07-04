@@ -33,6 +33,7 @@ class BotState:
     dcg_state: str = ""              # 方向感知通道護欄狀態（JSON 字串，空=乾淨）
     last_balance: float = 0.0         # 上次已知帳戶餘額，用於測試網重置偵測
     scaled_out: bool = False          # 本輪持倉已執行 scale-out（防重複）
+    scaled_pnl: float = 0.0           # F4：scale-out 已實現獲利（出場時與剩餘倉 pnl 合併給熔斷）
     entry_sl_dist: float = 0.0        # 進場時的原始停損距離（scale-out 閾值計算用）
     stop_oid: str = ""               # 交易所掛單式停損 orderId（空=無）
     tp_oid: str = ""                 # 交易所掛單式停利 orderId（空=無）

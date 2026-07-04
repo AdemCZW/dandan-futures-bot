@@ -284,6 +284,22 @@ class PortfolioGuard:
         except Exception:
             pass
 
+    def clear_equity(self) -> None:
+        """清空組合層淨值/峰值表（F6，testnet 重置時呼叫）。
+
+        重置後帳戶餘額驟降，但 portfolio_equity.peak 停在重置前高水位（peak 只升不降）
+        → PORTFOLIO_MAX_DRAWDOWN 一旦啟用，check_portfolio_drawdown 會永久擋新倉
+        （與 R1 的 RiskOfficer._equity_peak 同一類故障，這是組合層版本）。
+        清掉整表即可：各 bot 下一根 upsert_equity 會以重置後餘額重新播種 peak。
+        8 台共用同一 testnet 帳戶，任一台偵測到重置時清整表對所有列都是正確的。
+        """
+        try:
+            with self._conn() as conn:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM portfolio_equity")
+        except Exception:
+            pass
+
     def portfolio_drawdown(self) -> tuple[float, float, float]:
         """回傳 (組合現值總和, 組合峰值總和, 回撤比例)。
 

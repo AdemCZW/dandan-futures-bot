@@ -275,3 +275,18 @@ class TestLegacySchemaMigration:
         # 遷移後可容納同策略不同標的（舊結構會因 PK 衝突失敗）
         guard.upsert_position("fib_channel", "BTCUSDT", 1, 0.01, 60000.0)
         assert len(guard.get_positions()) == 2
+
+
+# ── F6（2026-07-04）：clear_equity — testnet 重置時清掉組合層淨值/峰值殘留 ──
+def test_clear_equity_wipes_all_rows(tmp_path):
+    g = PortfolioGuard(db_path=str(tmp_path / "g.db"))
+    g.upsert_equity("s1", "BTCUSDT", 5000.0)
+    g.upsert_equity("s2", "ETHUSDT", 4000.0)
+    g.clear_equity()
+    assert g.portfolio_drawdown() == (0.0, 0.0, 0.0)
+
+
+def test_clear_equity_on_empty_table_is_noop(tmp_path):
+    g = PortfolioGuard(db_path=str(tmp_path / "g.db"))
+    g.clear_equity()                                          # 不拋例外
+    assert g.portfolio_drawdown() == (0.0, 0.0, 0.0)

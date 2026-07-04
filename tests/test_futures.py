@@ -1191,3 +1191,99 @@ def test_reconcile_exit_resets_peak_pnl(patched, monkeypatch):
     t._peak_pnl = 55.0                       # 上一筆殘留峰盈
     t._reconcile_exit(104.5, "bar")
     assert t._peak_pnl == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F4（中，2026-07-04 風控審查）：scale-out 淨贏的交易不該被熔斷記成連虧。
+# 原況：scale_out 的獲利只進 journal 不進 cb；剩餘半倉小虧出場時 record_trade
+# 只看剩餘 pnl → 整筆淨賺被記一次連虧 → 三筆「假連虧」就熔斷停機 24h。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_f4_scale_out_pnl_accumulates(patched):
+    """scale-out 成交時，其已實現獲利記入 self._scaled_pnl（供出場時合併計算）。"""
+    ex = FakeExecu(); ex.amt = 0.02
+    t = _trader([1], ex)                                     # 策略續抱多單
+    t.dir, t.entry_price, t.qty = 1, 99.0, 0.02
+    t.sl, t.tp = 90.0, 200.0                                 # 不觸發停損停利
+    t._entry_sl_dist = 2.0                                   # 現價 100 → 浮盈 1.0 = 0.5R → scale out
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))
+    assert t._scaled_out is True
+    assert t._scaled_pnl > 0                                 # 半倉獲利已入袋且被追蹤
+
+
+def test_f4_net_win_after_scale_out_does_not_count_as_loss(patched):
+    """scale-out 賺 5、剩餘半倉出場小虧 → 淨賺 → 熔斷連虧計數應為 0。"""
+    ex = FakeExecu(); ex.amt = 0.01
+    t = _trader([0], ex)                                     # 策略轉空手 → 平剩餘倉
+    t.dir, t.entry_price, t.qty = 1, 100.0, 0.01
+    t.sl, t.tp = 90.0, 200.0
+    t._scaled_out, t._scaled_pnl = True, 5.0                 # 前段 scale-out 已賺 5
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))         # 現價 100 平倉 → pnl≈-手續費（小虧）
+    assert t.dir == 0
+    assert t.cb.consecutive_losses == 0                      # 淨賺 → 不是連虧
+    assert t._scaled_pnl == 0.0                              # 出場後歸零，不污染下一筆
+
+
+def test_f4_net_loss_after_scale_out_still_counts(patched):
+    """scale-out 只賺 0.001、剩餘出場虧更多 → 淨虧 → 連虧計數 +1（不可漏記真虧損）。"""
+    ex = FakeExecu(); ex.amt = 0.01
+    t = _trader([0], ex)
+    t.dir, t.entry_price, t.qty = 1, 110.0, 0.01             # 現價 100 → 剩餘倉虧 0.1
+    t.sl, t.tp = 90.0, 200.0
+    t._scaled_out, t._scaled_pnl = True, 0.001
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))
+    assert t.cb.consecutive_losses == 1
+
+
+def test_f4_scaled_pnl_persisted_and_restored(patched):
+    """_scaled_pnl 隨 BotState 持久化：_write_sop 保住、restore 讀回（重啟不歸零）。"""
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t._scaled_pnl = 3.5
+    row = _flat_df().iloc[-2]
+    t._write_sop(100.0, pd.Timestamp("2026-06-22 00:05"), row, {}, 0, None, None, [], False)
+    st = BotState.load(M.STATE_PATH)
+    assert st.scaled_pnl == 3.5                              # 寫檔保住
+    ex2 = FakeExecu(); ex2.amt = 0.01
+    BotState(in_position=True, direction=1, entry_price=100.0, sl=95.0, tp=110.0,
+             qty=0.01, symbol="BTCUSDT", strategy="x", scaled_pnl=3.5).save(M.STATE_PATH)
+    t2 = _trader([1], ex2)
+    t2.restore()
+    assert t2._scaled_pnl == 3.5                             # 重啟讀回
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F5（中）：Kelly 樣本須以本 bot 的 journal mode 過濾，避免本機 paper 交易
+# （同策略同幣種、寫進同一個 PG）污染實盤倉位計算。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_f5_kelly_filters_by_journal_mode(patched, monkeypatch):
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    seen = {}
+    def spy(*a, **k):
+        seen.update(k); return []
+    monkeypatch.setattr("core.trade_journal.read_trades_db", spy)
+    t._kelly_pct()
+    assert seen.get("mode") == "live_futures_testnet"        # 實盤 bot 只吃實盤紀錄
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F6（中）：testnet 重置時組合層 equity 表的 peak 也要清——否則
+# PORTFOLIO_MAX_DRAWDOWN 一旦啟用，重置後 kill-switch 永久擋新倉（R1 的組合層翻版）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_f6_testnet_reset_clears_portfolio_equity(patched, tmp_path):
+    from core.portfolio_guard import PortfolioGuard
+    ex = FakeExecu()
+    ex.balance = lambda a="USDT": 100.0                      # 重置後小額餘額
+    t = _trader([0], ex)
+    t._guard = PortfolioGuard(db_path=str(tmp_path / "guard.db"))
+    t._guard.upsert_equity("s1", "BTCUSDT", 5000.0)          # 重置前的高峰殘留
+    t._guard.upsert_equity("s2", "ETHUSDT", 5000.0)
+    prev = BotState(last_balance=5000.0)
+    prev.save(t.state_path)
+    row = _flat_df().iloc[-2]
+    t._write_sop(100.0, pd.Timestamp("2026-06-22 00:05"), row, {}, 0, None, None, [], False)
+    eq, peak, dd = t._guard.portfolio_drawdown()
+    assert peak < 10000.0                                    # 舊高峰已被清（不再殘留 2×5000）

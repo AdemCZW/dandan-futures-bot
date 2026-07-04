@@ -98,6 +98,7 @@ class FuturesLiveTrader:
         self._peak_pnl = 0.0               # 進場後最高浮盈 USDT（盈利保底用）
         self._profit_above_since = None    # 浮盈首次超標的時間（持續計時用）
         self._scaled_out = False            # Scale-out：本輪持倉已部分獲利了結
+        self._scaled_pnl = 0.0             # F4：scale-out 已實現獲利（出場時合併給熔斷判淨損益）
         self._entry_sl_dist = 0.0          # 進場時的原始停損距離（scale-out 閾值用）
         # 交易所掛單式硬停損（EXCHANGE_STOP_ENABLED；預設關，逐台 env 開）：
         # bot 當機/熔斷/網路斷期間仍由交易所端 STOP_MARKET/TAKE_PROFIT_MARKET 守護倉位。
@@ -150,6 +151,7 @@ class FuturesLiveTrader:
                       cb_paused_until=cb_dict["paused_until"] or "",
                       dcg_state=json.dumps(self._dcg.to_dict()),
                       scaled_out=self._scaled_out,
+                      scaled_pnl=self._scaled_pnl,
                       entry_sl_dist=self._entry_sl_dist,
                       stop_oid=str(self._stop_oid or ""),
                       tp_oid=str(self._tp_oid or ""))
@@ -234,6 +236,7 @@ class FuturesLiveTrader:
             self.peak = self.trough = self.entry_price
             # 還原 scale-out 狀態，避免重啟後再次觸發已做過的 scale-out
             self._scaled_out = st.scaled_out
+            self._scaled_pnl = st.scaled_pnl        # F4：重啟不歸零，出場時仍能合併判淨損益
             self._entry_sl_dist = st.entry_sl_dist
             self._stop_oid = st.stop_oid or None
             self._tp_oid = st.tp_oid or None
@@ -501,8 +504,11 @@ class FuturesLiveTrader:
         pnl = ((fill - self.entry_price) * abs(self.qty) * d
                - self._round_trip_fee(self.qty, self.entry_price, fill))   # 扣雙邊 taker 費（OPT-01）
         self.journal.log(reason, fill, abs(self.qty), pnl, ts=bar_time)
-        self.cb.record_trade(pnl)
-        self._dcg.record_trade(d, pnl)
+        # F4：熔斷/護欄以「整筆淨損益」計（剩餘倉 pnl + scale-out 已實現獲利），
+        # 否則 scale-out 賺一半、剩餘半倉小虧的淨賺交易會被記成連虧 → 假熔斷停機。
+        net_pnl = pnl + self._scaled_pnl
+        self.cb.record_trade(net_pnl)
+        self._dcg.record_trade(d, net_pnl)
         print(f"[{bar_time}] [對帳] 交易所掛單已平倉 {reason} @ {fill:.2f}（pnl {pnl:+.2f}）")
         # 殘留掛單（closePosition 成交後幣安已自動撤另一張）→ 清本地記錄
         self._stop_oid = self._tp_oid = self._stop_sl = None
@@ -511,6 +517,7 @@ class FuturesLiveTrader:
         self._peak_pnl = 0.0                        # F3：漏清會讓下一筆新倉被盈利保底用舊峰盈秒平
         self._profit_above_since = None
         self._scaled_out = False
+        self._scaled_pnl = 0.0                      # F4：出場後歸零，不污染下一筆的熔斷判定
         self._entry_sl_dist = 0.0
         self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)
         self._save()
@@ -528,14 +535,17 @@ class FuturesLiveTrader:
             pnl = ((price - self.entry_price) * qty * self.dir          # dir 帶號 → 多空 pnl 方向正確
                    - self._round_trip_fee(qty, self.entry_price, price))   # 扣雙邊 taker 費（OPT-01）
             self.journal.log(reason, price, qty, pnl, ts=bar_time)
-            self.cb.record_trade(pnl)                 # Circuit Breaker 記錄本筆損益
-            self._dcg.record_trade(self.dir, pnl)     # 方向感知通道護欄記錄（self.dir 此時仍是平倉方向）
+            # F4：熔斷/護欄以整筆淨損益計（剩餘倉 + scale-out 已實現），防淨賺被記連虧
+            net_pnl = pnl + self._scaled_pnl
+            self.cb.record_trade(net_pnl)             # Circuit Breaker 記錄本筆「淨」損益
+            self._dcg.record_trade(self.dir, net_pnl)  # 方向感知通道護欄記錄（self.dir 此時仍是平倉方向）
             print(f"[{bar_time}] {reason} @ {price:.2f}")
         self.dir, self.entry_price, self.sl, self.tp, self.qty = 0, 0.0, 0.0, 0.0, 0.0
         self.peak = self.trough = 0.0
         self._peak_pnl = 0.0
         self._profit_above_since = None
         self._scaled_out = False
+        self._scaled_pnl = 0.0                      # F4：出場後歸零，不污染下一筆的熔斷判定
         self._entry_sl_dist = 0.0
         self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)
         self._save()
@@ -625,7 +635,11 @@ class FuturesLiveTrader:
         try:
             from core.trade_journal import read_trades_db
             from core.risk_officer import kelly_fraction
-            rows = read_trades_db(limit=200, strategy=self.cfg.strategy, symbol=self.cfg.symbol)
+            # F5：一併以本 bot 的 journal mode 過濾——同策略同幣種的本機 paper 交易
+            # 寫進同一個 PG 時，不加 mode 篩會污染實盤 Kelly 倉位計算。
+            mode = getattr(self.journal, "mode", None) or "live_futures_testnet"
+            rows = read_trades_db(limit=200, mode=mode,
+                                  strategy=self.cfg.strategy, symbol=self.cfg.symbol)
             pnl = [r["pnl"] for r in rows
                    if r.get("pnl") is not None and str(r.get("side", "")).startswith("exit")]
             # OPT-15：min_trades 提到 30（20 筆噪音過大）；加槓桿 bot 用 quarter-Kelly(0.25) 上限。
@@ -679,6 +693,7 @@ class FuturesLiveTrader:
         self.sl, self.tp = self.risk.exit_levels(price, direction, atr=atr)
         self._entry_sl_dist = abs(price - self.sl)  # 原始停損距離，scale-out 閾值計算用
         self._scaled_out = False                    # 新倉重設
+        self._scaled_pnl = 0.0                      # F4：新倉從零起算
         self.journal.log(side, price, decision.quantity, 0.0, ts=bar_time)
         self._guard.upsert_position(self.cfg.strategy, self.cfg.symbol,
                                     direction, decision.quantity, price)
@@ -813,6 +828,7 @@ class FuturesLiveTrader:
                     self.qty -= half_qty
                     self.sl = self.entry_price      # 剩餘半倉停損移到成本（保本）
                     self._scaled_out = True
+                    self._scaled_pnl += pnl_half    # F4：入袋獲利記下，出場時與剩餘倉合併判淨損益
                     # 同步共用 DB 暴露為減半後的真實倉量，避免他台 check_exposure 高估而誤擋進場
                     self._guard.upsert_position(self.cfg.strategy, self.cfg.symbol,
                                                 self.dir, self.qty, self.entry_price)
@@ -860,9 +876,11 @@ class FuturesLiveTrader:
             self.peak = self.trough = 0.0
             self._scaled_out = False
             self._entry_sl_dist = 0.0
+            self._scaled_pnl = 0.0                                           # F4：重置一併歸零
             self._guard.clear_position(self.cfg.strategy, self.cfg.symbol)   # 清共用 DB 殘列
             self._cancel_protective()                                        # 撤殘留掛單（旗標關時 no-op）
             self.risk.reset_equity_peak()   # R1：不清會讓峰值回撤熔斷永久誤觸、bot 默默停擺
+            self._guard.clear_equity()      # F6：組合層淨值/峰值殘留不清 → kill-switch 啟用時永久擋新倉
         last_balance = equity if equity is not None else prev.last_balance
 
         last_decision = {
@@ -891,7 +909,8 @@ class FuturesLiveTrader:
             cb_paused_until=cb_dict["paused_until"] or "",
             dcg_state=json.dumps(self._dcg.to_dict()),
             last_balance=last_balance,
-            scaled_out=self._scaled_out, entry_sl_dist=self._entry_sl_dist,
+            scaled_out=self._scaled_out, scaled_pnl=self._scaled_pnl,
+            entry_sl_dist=self._entry_sl_dist,
             stop_oid=str(self._stop_oid or ""), tp_oid=str(self._tp_oid or ""),
         )
         state = {
