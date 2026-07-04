@@ -36,6 +36,7 @@ export function getChartColors() {
     accent:    v('--accent', '#5b8cff'),
     pos:       v('--pos', '#4fb286'),
     neg:       v('--neg', '#d8685f'),
+    warn:      v('--warn', '#d4a24e'),
     muted:     v('--muted', '#9a988f'),
     faint:     v('--faint', '#6a6862'),
     text2:     v('--text', '#f5f3ee'),

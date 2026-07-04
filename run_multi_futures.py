@@ -163,6 +163,18 @@ def route_get(workers: dict, path: str):
             return 200, json.dumps(data).encode()
         except Exception as e:                       # noqa: BLE001
             return 200, json.dumps({"error": str(e), "candles": []}).encode()
+    # 六線密集/發散圖表資料（雙均線系統版面，2026-07-05）：與 klines 同一套 fail-open 慣例。
+    if len(segs) == 1 and segs[0] == "ma6":
+        q = urllib.parse.parse_qs(parsed.query)
+        try:
+            from core.chart_data import ma6_overlay_data
+            data = ma6_overlay_data(q.get("symbol", ["BTCUSDT"])[0],
+                                    q.get("interval", ["4h"])[0],
+                                    int(q.get("limit", ["300"])[0]),
+                                    source="testnet")
+            return 200, json.dumps(data).encode()
+        except Exception as e:                       # noqa: BLE001
+            return 200, json.dumps({"error": str(e), "candles": []}).encode()
     if len(segs) == 1 and segs[0] == "markers":
         q = urllib.parse.parse_qs(parsed.query)
         try:

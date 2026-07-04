@@ -99,35 +99,43 @@ def trade_markers(symbol: str = "BTCUSDT", bucket_hours: int = 6,
     return build_trade_markers(rows, symbol, bucket_hours)
 
 
+def _fetch_ohlcv_df(symbol: str, interval: str, limit: int, source: str):
+    """抓 K 線 → 標準 OHLCV DataFrame（供 klines_data / ma6_overlay_data 共用，避免重複）。
+
+    source="synthetic" 離線合成（測試用，lazy-import 才不背回測相依）；
+    source="testnet" 抓幣安期貨公開 K 線（免金鑰）。
+    """
+    import json, urllib.request
+    import pandas as pd
+
+    if source == "synthetic":
+        from run_optimize import make_synthetic       # lazy：合成資料才需要（本機測試）
+        return make_synthetic(limit)
+
+    url = (f"https://fapi.binance.com/fapi/v1/klines"
+           f"?symbol={symbol}&interval={interval}&limit={limit}")
+    with urllib.request.urlopen(url, timeout=10) as r:
+        raw = json.loads(r.read())
+    cols = ["open_time", "open", "high", "low", "close", "volume",
+            "close_time", "quote_volume", "trades", "taker_buy_base",
+            "taker_buy_quote", "ignore"]
+    df = pd.DataFrame(raw, columns=cols)
+    for c in ("open", "high", "low", "close", "volume"):
+        df[c] = pd.to_numeric(df[c])
+    df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms")
+    return df.set_index("timestamp")
+
+
 def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 limit: int = 200, source: str = "testnet") -> dict:
     """K 線 + 指標資料 — 供前端 TradingView 式圖表使用。
 
-    source="synthetic" 離線合成（測試用，lazy-import 才不背回測相依）；
-    source="testnet" 抓幣安期貨公開 K 線（免金鑰）。
     回傳 lightweight-charts 格式：{time, open/high/low/close} 蠟燭 +
     supertrend_bull/bear + ema_fast/slow/trend + donchian + 費波那契單一通道各線。
     """
-    import json, urllib.request
-    import pandas as pd
     from core import signal_engineer as se
 
-    if source == "synthetic":
-        from run_optimize import make_synthetic       # lazy：合成資料才需要（本機測試）
-        df = make_synthetic(limit)
-    else:
-        url = (f"https://fapi.binance.com/fapi/v1/klines"
-               f"?symbol={symbol}&interval={interval}&limit={limit}")
-        with urllib.request.urlopen(url, timeout=10) as r:
-            raw = json.loads(r.read())
-        cols = ["open_time", "open", "high", "low", "close", "volume",
-                "close_time", "quote_volume", "trades", "taker_buy_base",
-                "taker_buy_quote", "ignore"]
-        df = pd.DataFrame(raw, columns=cols)
-        for c in ("open", "high", "low", "close", "volume"):
-            df[c] = pd.to_numeric(df[c])
-        df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms")
-        df = df.set_index("timestamp")
+    df = _fetch_ohlcv_df(symbol, interval, limit, source)
 
     st = se.supertrend(df, period=10, multiplier=3.0)
     df["st_dir"] = st["st_dir"]
@@ -201,3 +209,49 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
         "donchian_lower": dc_lower,
         **fib_series,
     }
+
+
+def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
+                     limit: int = 300, source: str = "testnet") -> dict:
+    """六線密集/發散圖表資料（2026-07-05，使用者要求還原 YouTube 雙均線系統）。
+
+    直接重用 MaConvergencePullbackStrategy.prepare()（單一事實來源）——圖上畫的
+    密集/發散判斷與 b9（LINKUSDT 觀察倉）實際下單依據的邏輯完全一致，不重寫
+    一份平行的狀態機（否則圖表跟真實訊號兩邊各自維護、容易悄悄不同步）。
+
+    回傳 lightweight-charts 格式：candles + ma20/ma60/ma120/ema20/ema60/ema120
+    六條線 + ma6_signals（is_first_pullback 觸發點，dir=+1/-1，供前端標記進場訊號）。
+    """
+    from core.quant_researcher import build_strategy
+
+    df = _fetch_ohlcv_df(symbol, interval, limit, source)
+    out = build_strategy("ma_convergence_pullback").prepare(df)
+
+    def _ts(idx):
+        return int(idx.timestamp())
+
+    def _f(v):
+        try:
+            x = float(v)
+            return None if (x != x) else x
+        except Exception:
+            return None
+
+    lines = {k: [] for k in ("ma20", "ma60", "ma120", "ema20", "ema60", "ema120")}
+    candles, signals = [], []
+
+    for idx, row in out.iterrows():
+        t = _ts(idx)
+        o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
+        if None in (o, h, lo, c):
+            continue
+        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+        for k in lines:
+            if (v := _f(row[k])) is not None:
+                lines[k].append({"time": t, "value": v})
+        if bool(row.get("is_first_pullback", False)):
+            trend_dir = _f(row.get("trend_dir"))
+            if trend_dir is not None:
+                signals.append({"time": t, "dir": 1 if trend_dir > 0 else -1})
+
+    return {"candles": candles, **lines, "ma6_signals": signals}

@@ -22,6 +22,7 @@ from run_optimize import make_synthetic, GRIDS
 # 這裡 re-export 保留舊介面（service.klines_data / build_trade_markers / trade_markers）不變。
 from core.chart_data import (
     klines_data, build_trade_markers, trade_markers, parse_ts_unix as _parse_ts_unix,
+    ma6_overlay_data,
 )
 
 

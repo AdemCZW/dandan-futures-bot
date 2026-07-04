@@ -11,6 +11,7 @@ import Explain from './components/Explain.jsx'
 import Optimize from './components/Optimize.jsx'
 import Journal from './components/Journal.jsx'
 import Chart from './components/Chart.jsx'
+import DualMa from './components/DualMa.jsx'
 import LiveDecisions from './components/LiveDecisions.jsx'
 import { useTheme, toggleTheme } from './lib/theme.js'
 
@@ -22,6 +23,7 @@ const PUBLIC_BUILD = import.meta.env.VITE_PUBLIC_BUILD === 'true'
 const ALL_TABS = [
   { key: 'live', label: '即時監控', Comp: Live, public: true },
   { key: 'chart', label: 'K 線圖表', Comp: Chart, public: true },
+  { key: 'dualma', label: '雙均線系統', Comp: DualMa, public: true },
   { key: 'backtest', label: '回測', Comp: Backtest, public: false },
   { key: 'explain', label: '決策流程', Comp: PUBLIC_BUILD ? LiveDecisions : Explain, public: true },
   { key: 'optimize', label: '參數最佳化', Comp: Optimize, public: false },

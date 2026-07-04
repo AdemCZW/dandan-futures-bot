@@ -72,6 +72,9 @@ export const api = {
   // K 線 + 費波那契通道 + 交易標記：bot 容器直連（省 dashboard 資源，資料同源更準）
   klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
     getAbs(`${BOT_BASE}/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  // 六線密集/發散（雙均線系統版面）：MA20/60/120 + EMA20/60/120 + 首次回踩訊號
+  ma6: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
+    getAbs(`${BOT_BASE}/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`),
   tradeMarkers: (symbol = 'BTCUSDT', bucketHours = 6) =>
     getAbs(`${BOT_BASE}/markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
   price: (symbol = 'BTCUSDT') => get(`/api/price?symbol=${symbol}`),

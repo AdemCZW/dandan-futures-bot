@@ -57,3 +57,56 @@ def test_build_trade_markers_short_direction():
                "side": "entry_short", "price": 100.0, "strategy": "s", "mode": "m"}]
     out = build_trade_markers(trades, "BTCUSDT")
     assert out["markers"][0]["dir"] == -1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 六線密集/發散圖表資料（2026-07-05）：使用者要求另建版面還原 YouTube 雙均線系統，
+# 重用已驗證過的 MaConvergencePullbackStrategy，不重寫狀態機（單一事實來源）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_ma6_import_does_not_require_heavy_backtest_deps(monkeypatch):
+    """同上：確保新函式的相依（core.quant_researcher）沒有偷偷拉進肥依賴。"""
+    real_import = builtins.__import__
+    blocked = ("backtest", "backtest.backtester", "backtest.optimize",
+               "run_optimize", "optuna", "vectorbt", "matplotlib")
+
+    def guard(name, *a, **k):
+        if name in blocked or name.split(".")[0] in ("optuna", "vectorbt", "matplotlib"):
+            raise ImportError(f"blocked heavy dep: {name}")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", guard)
+    sys.modules.pop("core.chart_data", None)
+    mod = importlib.import_module("core.chart_data")
+    assert hasattr(mod, "ma6_overlay_data")
+
+
+def test_ma6_overlay_data_returns_six_lines_and_signals():
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    for key in ("candles", "ma20", "ma60", "ma120", "ema20", "ema60", "ema120", "ma6_signals"):
+        assert key in out, f"缺欄位 {key}"
+    assert len(out["candles"]) > 0
+    # 六線在暖機（前120根）應該是空/短，暖機後應該有值
+    assert len(out["ma120"]) < len(out["candles"])   # 120期 rolling 暖機期沒有值，天然比蠟燭少
+
+
+def test_ma6_signals_have_time_and_direction():
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    for sig in out["ma6_signals"]:
+        assert "time" in sig and "dir" in sig
+        assert sig["dir"] in (1, -1)
+
+
+def test_ma6_overlay_data_uses_same_strategy_as_live_bot():
+    """驗證圖表用的是 MaConvergencePullbackStrategy 本尊算出來的欄位，不是另外重寫的邏輯
+    （避免圖表畫的密集/發散跟 b9 實際下單依據的訊號不一致）。"""
+    from core.chart_data import ma6_overlay_data
+    from core.quant_researcher import build_strategy
+    from run_optimize import make_synthetic
+    df = make_synthetic(300)
+    expected = build_strategy("ma_convergence_pullback").prepare(df.copy())
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    # 訊號數量應與策略本身算出的 is_first_pullback True 數一致
+    assert len(out["ma6_signals"]) == int(expected["is_first_pullback"].sum())

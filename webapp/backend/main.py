@@ -218,6 +218,15 @@ def klines(symbol: str = "BTCUSDT", interval: str = "4h",
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+@app.get("/api/ma6")
+def ma6(symbol: str = "BTCUSDT", interval: str = "4h", limit: int = 300, source: str = "testnet"):
+    """六線密集/發散圖表資料（雙均線系統版面）。"""
+    try:
+        return service.ma6_overlay_data(symbol, interval, limit, source)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.get("/api/trade-markers")
 def trade_markers(symbol: str = "BTCUSDT", bucket_hours: int = 6, limit: int = 5000):
     """機器人下單點：全部紀錄，每 bucket_hours 小時聚合一個點，依 bot 分色並標明 mode。"""

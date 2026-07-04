@@ -275,6 +275,29 @@ def test_route_get_markers_returns_aggregated(tmp_path, monkeypatch):
     assert json.loads(body)["markers"][0]["price"] == 100.0
 
 
+def test_route_get_ma6_returns_six_line_overlay(tmp_path, monkeypatch):
+    """GET /ma6?symbol=&interval=&limit= → 呼叫輕量 chart_data.ma6_overlay_data 回六線圖表 JSON。"""
+    captured = {}
+    def fake_ma6(symbol="BTCUSDT", interval="4h", limit=300, source="testnet"):
+        captured.update(symbol=symbol, interval=interval, limit=limit, source=source)
+        return {"candles": [], "ma20": [], "ma6_signals": []}
+    monkeypatch.setattr("core.chart_data.ma6_overlay_data", fake_ma6)
+    workers = _two_workers(tmp_path)
+    status, body = MM.route_get(workers, "/ma6?symbol=LINKUSDT&interval=4h&limit=250")
+    assert status == 200
+    assert captured == {"symbol": "LINKUSDT", "interval": "4h", "limit": 250, "source": "testnet"}
+    assert "ma6_signals" in json.loads(body)
+
+
+def test_route_get_ma6_error_returns_empty_candles(tmp_path, monkeypatch):
+    def boom(**kw):
+        raise RuntimeError("network down")
+    monkeypatch.setattr("core.chart_data.ma6_overlay_data", boom)
+    status, body = MM.route_get(_two_workers(tmp_path), "/ma6?symbol=BTCUSDT")
+    assert status == 200
+    assert json.loads(body)["candles"] == []
+
+
 def test_route_post_close_writes_only_target_flag(tmp_path):
     """POST /eth/close 只寫 eth 旗標 + set eth event，絕不誤觸 sol。"""
     workers = _two_workers(tmp_path)
