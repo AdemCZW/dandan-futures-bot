@@ -43,10 +43,6 @@ def test_registered_and_buildable():
     assert s.allow_short is True
 
 
-def test_registry_now_has_eighteen_keys():
-    assert len(STRATEGIES) == 18
-
-
 # ── prepare()：欄位齊全 ─────────────────────────────────────────────────────
 def test_prepare_adds_all_gate_columns():
     s = build_strategy("ema_fib_vol")

@@ -1210,6 +1210,117 @@ class EmaFibVolStrategy(Strategy):
         return 0
 
 
+class MaConvergencePullbackStrategy(Strategy):
+    """六線密集/發散 + 首次回踩 20 均線（2026-07-05，還原 YouTube 分析的雙均線系統）。
+
+    核心概念（與 ema_cross 的死叉觸發完全不同）：
+      1. 六線（MA20/60/120 + EMA20/60/120）密集 = 盤整；發散且排列一致
+         （短週期在最外側）= 趨勢確立。
+      2. 進場不是發散的當下，是發散確立**之後**、價格第一次拉回觸及 20 均線
+         但收盤未跌破（"回踩不破"）——確認拉回結束、趨勢延續才進場，
+         同一段趨勢只觸發一次（避免每次小拉回都重複進場）。
+      3. 出場：均線排列被打破（趨勢結束）強制平倉；獲利了結交給既有風控層
+         的 R 倍數停利/Chandelier 追蹤停損（與其他策略一致，策略層不重複做）。
+
+    此設計刻意不用死叉當出場——影片原始系統的出場是固定賠率/前密集區/
+    費波那契擴張位，全部是「結構性目標」而非「反轉訊號」，對應本庫的
+    risk_officer.exit_levels（tp_R_mult）與 Chandelier 追蹤停損。
+    """
+    name = "ma_convergence_pullback"
+    defaults = {"ma_fast": 20, "ma_mid": 60, "ma_slow": 120,
+                "divergence_thresh": 0.03, "pullback_tolerance": 0.0}
+    allow_short = True
+    regime_pref = "any"          # 趨勢判斷已內建在 trend_dir，不疊加外層 regime 閘門
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        f, m, sl = int(self.params["ma_fast"]), int(self.params["ma_mid"]), int(self.params["ma_slow"])
+        out["ma20"] = out["close"].rolling(f, min_periods=f).mean()
+        out["ma60"] = out["close"].rolling(m, min_periods=m).mean()
+        out["ma120"] = out["close"].rolling(sl, min_periods=sl).mean()
+        out["ema20"] = se.ema(out["close"], f)
+        out["ema60"] = se.ema(out["close"], m)
+        out["ema120"] = se.ema(out["close"], sl)
+        out["atr"] = se.atr(out, 14)
+
+        lines = out[["ma20", "ma60", "ma120", "ema20", "ema60", "ema120"]]
+        out["spread"] = (lines.max(axis=1) - lines.min(axis=1)) / out["close"]
+
+        bull_order = ((out["ma20"] > out["ma60"]) & (out["ma60"] > out["ma120"]) &
+                      (out["ema20"] > out["ema60"]) & (out["ema60"] > out["ema120"]))
+        bear_order = ((out["ma20"] < out["ma60"]) & (out["ma60"] < out["ma120"]) &
+                      (out["ema20"] < out["ema60"]) & (out["ema60"] < out["ema120"]))
+        thresh = float(self.params["divergence_thresh"])
+        divergent_bull = bull_order & (out["spread"] > thresh)
+        divergent_bear = bear_order & (out["spread"] > thresh)
+
+        # 狀態機（單次正向掃描）：trend_dir 在同向排列持續期間維持 ±1，排列打破歸零；
+        # is_first_pullback 在每個新趨勢區間內最多標記一次 True（首次觸及 20 均線不破）。
+        n = len(out)
+        trend_dir = np.zeros(n)
+        first_pullback = np.zeros(n, dtype=bool)
+        cur_dir = 0
+        used = False
+        tol = float(self.params["pullback_tolerance"])
+        close_v = out["close"].to_numpy()
+        low_v = out["low"].to_numpy()
+        high_v = out["high"].to_numpy()
+        ma20_v = out["ma20"].to_numpy()
+        db = divergent_bull.to_numpy()
+        de = divergent_bear.to_numpy()
+        bo = bull_order.to_numpy()
+        be = bear_order.to_numpy()
+
+        for i in range(n):
+            if np.isnan(ma20_v[i]):
+                continue
+            if cur_dir == 1:
+                if not bo[i]:               # 多頭排列被打破 → 趨勢結束
+                    cur_dir, used = 0, False
+                elif not used and low_v[i] <= ma20_v[i] * (1 + tol) and close_v[i] > ma20_v[i] * (1 - tol):
+                    first_pullback[i] = True
+                    used = True
+            elif cur_dir == -1:
+                if not be[i]:
+                    cur_dir, used = 0, False
+                elif not used and high_v[i] >= ma20_v[i] * (1 - tol) and close_v[i] < ma20_v[i] * (1 + tol):
+                    first_pullback[i] = True
+                    used = True
+            else:
+                if db[i]:
+                    cur_dir, used = 1, False
+                elif de[i]:
+                    cur_dir, used = -1, False
+            trend_dir[i] = cur_dir
+
+        out["trend_dir"] = trend_dir
+        out["is_first_pullback"] = first_pullback
+        return out
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        trend_dir = _num(g("trend_dir"))
+        if trend_dir is None:
+            return position                          # 暖機 → 維持現狀
+
+        if position != 0:
+            # 出場：均線排列被打破 / 趨勢翻轉（結構性停損），獲利了結交給風控層
+            if position == 1 and trend_dir != 1:
+                return 0
+            if position == -1 and trend_dir != -1:
+                return 0
+            return position
+
+        first_pb = bool(g("is_first_pullback"))
+        if not first_pb:
+            return 0
+        if trend_dir == 1:
+            return 1
+        if trend_dir == -1:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -1229,6 +1340,7 @@ STRATEGIES = {
     FibEmaStrategy.name: FibEmaStrategy,
     VolMomentumStrategy.name: VolMomentumStrategy,
     EmaFibVolStrategy.name: EmaFibVolStrategy,
+    MaConvergencePullbackStrategy.name: MaConvergencePullbackStrategy,
 }
 
 
