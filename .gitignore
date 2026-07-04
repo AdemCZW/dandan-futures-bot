@@ -26,6 +26,7 @@ dist/
 
 # IDE / 工具設定
 .claude/
+.vscode/
 
 # Python
 __pycache__/
@@ -48,3 +49,6 @@ paper_forward.out
 bot_state_paper.json.bak
 walk_forward_report.json
 close_request.flag
+
+# 執行期日誌（本地產物，不上版控）
+*.log
