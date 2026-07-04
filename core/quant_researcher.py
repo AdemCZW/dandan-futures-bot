@@ -1126,6 +1126,90 @@ class VolMomentumStrategy(Strategy):
         return 0
 
 
+class EmaFibVolStrategy(Strategy):
+    """雙均線 × 斐波那契通道 × 量能 三重確認複合策略（2026-07-04）。
+
+    設計依據（pullback trading 文獻標準做法）：順勢策略最大的敗因是「追突破」——
+    在動能耗盡點進場。改成三個獨立維度同時確認才進場：
+      1. 趨勢（雙均線）：ema_fast/ema_slow 交叉方向 + ATR 分離緩衝
+         （沿用 ema_cross 驗證過的抗假交叉設計：分離 > sep_atr_k×ATR 才算有效）
+      2. 時機（斐波那契通道）：fib_channel_levels 的 fib_ch_pos < entry_zone
+         —— 只在「回調到通道原點區」買，不追已走遠的價格（買回調不買突破）
+      3. 參與度（量能）：vol_ratio ≥ vol_min —— 只在量能放大時進場，
+         過濾無量假動（沿用 vol_momentum 的量能計時原則）
+    且通道方向必須與均線方向一致（confluence，兩個獨立趨勢判定互相驗證）。
+
+    出場（hysteresis，進嚴出鬆）：
+      · 均線翻轉（裸交叉，不需分離）→ 趨勢結束
+      · fib_ch_pos > exit_zone → 到達通道目標側，停利
+      · fib_ch_pos < -break_buffer → 跌破通道原點，停損
+    """
+    name = "ema_fib_vol"
+    defaults = {"fast": 12, "slow": 26, "sep_atr_k": 0.5,
+                "pivot_left": 5, "pivot_right": 3,
+                "entry_zone": 0.382, "exit_zone": 0.80, "break_buffer": 0.10,
+                "vol_period": 20, "vol_min": 1.2}
+    allow_short = True
+    regime_pref = "trend"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = se.fib_channel_levels(df.copy(),
+                                    int(self.params["pivot_left"]),
+                                    int(self.params["pivot_right"]))
+        out["ema_fast"] = se.ema(out["close"], int(self.params["fast"]))
+        out["ema_slow"] = se.ema(out["close"], int(self.params["slow"]))
+        out["atr"] = se.atr(out, 14)
+        vp = max(1, int(self.params["vol_period"]))
+        vavg = out["volume"].rolling(vp, min_periods=1).mean().replace(0, float("nan"))
+        out["vol_ratio"] = out["volume"] / vavg
+        return self._prepare_regime(out)
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        fast = _num(g("ema_fast"))
+        slow = _num(g("ema_slow"))
+        if fast is None or slow is None:
+            return position                          # 暖機 → 維持現狀（全庫契約一致）
+        pos_in_ch = _num(g("fib_ch_pos"))
+        ch_dir = _num(g("fib_ch_dir"))
+
+        exit_z = float(self.params["exit_zone"])
+        brk = float(self.params["break_buffer"])
+
+        # ── 持倉中出場：均線翻轉（裸交叉）或通道目標/跌破 ──
+        if position != 0:
+            if position == 1 and fast < slow:
+                return 0
+            if position == -1 and fast > slow:
+                return 0
+            if pos_in_ch is not None:
+                if pos_in_ch > exit_z or pos_in_ch < -brk:
+                    return 0
+            return position
+
+        # ── 空手進場：三閘門 + 方向一致 ──
+        if pos_in_ch is None or ch_dir is None or ch_dir == 0:
+            return 0
+        if not self._regime_ok(row):
+            return 0
+        # 閘門 2：時機 — 回調到通道原點區才進，不追價
+        if pos_in_ch >= float(self.params["entry_zone"]):
+            return 0
+        # 閘門 3：參與度 — 量能放大確認
+        vol_r = _num(g("vol_ratio"))
+        if vol_r is None or vol_r < float(self.params["vol_min"]):
+            return 0
+        # 閘門 1：趨勢 — 均線方向與通道方向一致，且分離超過 ATR 緩衝（防假交叉）
+        atr_val = _num(g("atr"))
+        sep = float(self.params["sep_atr_k"]) * atr_val if (atr_val is not None) else 0.0
+        target = int(ch_dir)
+        if target == 1 and (fast - slow) > sep:
+            return 1
+        if target == -1 and (slow - fast) > sep:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -1144,6 +1228,7 @@ STRATEGIES = {
     TrendPullbackStrategy.name: TrendPullbackStrategy,
     FibEmaStrategy.name: FibEmaStrategy,
     VolMomentumStrategy.name: VolMomentumStrategy,
+    EmaFibVolStrategy.name: EmaFibVolStrategy,
 }
 
 
