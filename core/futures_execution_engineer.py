@@ -78,31 +78,40 @@ class FuturesExecutionEngineer:
 
     # ── 交易所掛單式停損/停利（硬停損：bot 當機/熔斷期間仍由交易所守護）──
     def stop_order_params(self, current_dir: int, trigger_price: float,
-                          order_type: str = "STOP_MARKET") -> dict:
+                          order_type: str = "STOP_MARKET", qty=None) -> dict:
         """建立 STOP_MARKET / TAKE_PROFIT_MARKET 條件單參數（純函式，方便測試）。
 
         side 永遠是「平倉側」（多單→SELL、空單→BUY）；觸發方向由 order_type 決定：
           - STOP_MARKET：價格不利穿越 stopPrice 觸發（多單跌破、空單突破）→ 停損
           - TAKE_PROFIT_MARKET：價格有利穿越 stopPrice 觸發（多單突破、空單跌破）→ 停利
-        closePosition='true'：整倉市價平、倉位歸零後幣安自動撤銷此單（免管 qty 精度、scale-out 後也對）。
+        qty=None（預設）：closePosition='true' 整倉市價平、倉位歸零後幣安自動撤銷此單。
+        qty 給定：改「帶數量 + reduceOnly」——幣安每方向只允許一張 closePosition 條件單
+        （-4130），testnet 偶發幽靈單佔用名額（open_orders 查不到、cancel_all 撤不掉）
+        → 帶量單不受此唯一性限制，作為保護不中斷的後備。
         workingType='CONTRACT_PRICE'：以最新成交價判定，對齊本地軟停損（用 close 比價）。
         """
         side = "SELL" if current_dir == 1 else "BUY"
-        return {
+        p = {
             "symbol": self.symbol, "side": side, "type": order_type,
             "stopPrice": self.round_price(trigger_price),
-            "closePosition": "true", "workingType": "CONTRACT_PRICE",
+            "workingType": "CONTRACT_PRICE",
         }
+        if qty is None:
+            p["closePosition"] = "true"
+        else:
+            p["quantity"] = self.round_qty(qty)
+            p["reduceOnly"] = "true"
+        return p
 
-    def place_stop(self, current_dir: int, stop_price: float):
-        """掛保護性停損單（STOP_MARKET, closePosition）。回傳含 orderId 的下單回應。"""
+    def place_stop(self, current_dir: int, stop_price: float, qty=None):
+        """掛保護性停損單。qty=None → closePosition 整倉；qty 給定 → 帶量 reduceOnly（-4130 後備）。"""
         return self.client.futures_create_order(
-            **self.stop_order_params(current_dir, stop_price, "STOP_MARKET"))
+            **self.stop_order_params(current_dir, stop_price, "STOP_MARKET", qty=qty))
 
-    def place_take_profit(self, current_dir: int, tp_price: float):
-        """掛停利單（TAKE_PROFIT_MARKET, closePosition）。回傳含 orderId 的下單回應。"""
+    def place_take_profit(self, current_dir: int, tp_price: float, qty=None):
+        """掛停利單。qty=None → closePosition 整倉；qty 給定 → 帶量 reduceOnly（-4130 後備）。"""
         return self.client.futures_create_order(
-            **self.stop_order_params(current_dir, tp_price, "TAKE_PROFIT_MARKET"))
+            **self.stop_order_params(current_dir, tp_price, "TAKE_PROFIT_MARKET", qty=qty))
 
     def cancel_order(self, order_id):
         """撤單（薄包裝）。已成交/不存在的單會由 client 丟錯，由呼叫端決定是否容忍。"""

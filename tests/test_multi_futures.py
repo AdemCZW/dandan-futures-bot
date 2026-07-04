@@ -220,6 +220,61 @@ def test_route_get_trades_filters_by_strategy_and_symbol(tmp_path, monkeypatch):
     assert json.loads(body)[0]["symbol"] == "SOLUSDT"
 
 
+def test_route_get_live_enriches_state(tmp_path, monkeypatch):
+    """GET /{id}/live → bot_live_status enrich（含統計），用該台 strategy+symbol。"""
+    captured = {}
+    def fake_live(state, strategy, symbol, interval, **kw):
+        captured.update(strategy=strategy, symbol=symbol, interval=interval,
+                        in_pos=state.get("in_position"))
+        return {"active": True, "symbol": symbol, "strategy": strategy, "realized_pnl": 5.0}
+    monkeypatch.setattr("core.live_status.bot_live_status", fake_live)
+    workers = _two_workers(tmp_path)
+    with open(workers["sol"].state_path, "w") as f:
+        f.write('{"in_position": true, "direction": 1}')
+    status, body = MM.route_get(workers, "/sol/live")
+    assert status == 200
+    assert captured["strategy"] == "trend_pullback" and captured["symbol"] == "SOLUSDT"
+    assert captured["in_pos"] is True
+    assert json.loads(body)["realized_pnl"] == 5.0
+
+
+def test_route_get_klines_returns_chart_json(tmp_path, monkeypatch):
+    """GET /klines?symbol=&interval=&limit= → 呼叫輕量 chart_data.klines_data 回圖表 JSON。"""
+    captured = {}
+    def fake_klines(symbol="BTCUSDT", interval="4h", limit=200, source="testnet"):
+        captured.update(symbol=symbol, interval=interval, limit=limit, source=source)
+        return {"candles": [{"time": 1, "open": 1, "high": 2, "low": 0.5, "close": 1.5}]}
+    monkeypatch.setattr("core.chart_data.klines_data", fake_klines)
+    workers = _two_workers(tmp_path)
+    status, body = MM.route_get(workers, "/klines?symbol=BTCUSDT&interval=15m&limit=120")
+    assert status == 200
+    assert captured == {"symbol": "BTCUSDT", "interval": "15m", "limit": 120, "source": "testnet"}
+    assert json.loads(body)["candles"][0]["close"] == 1.5
+
+
+def test_route_get_klines_error_returns_empty_candles(tmp_path, monkeypatch):
+    """klines_data 拋錯（如網路失敗）→ 200 + 空 candles，不讓前端 500。"""
+    def boom(**kw):
+        raise RuntimeError("network down")
+    monkeypatch.setattr("core.chart_data.klines_data", boom)
+    status, body = MM.route_get(_two_workers(tmp_path), "/klines?symbol=BTCUSDT")
+    assert status == 200
+    assert json.loads(body)["candles"] == []
+
+
+def test_route_get_markers_returns_aggregated(tmp_path, monkeypatch):
+    """GET /markers?symbol=&bucket_hours=&limit= → chart_data.trade_markers 聚合標記。"""
+    captured = {}
+    def fake_markers(symbol="BTCUSDT", bucket_hours=6, limit=5000, **kw):
+        captured.update(symbol=symbol, bucket_hours=bucket_hours, limit=limit)
+        return {"markers": [{"time": 1, "price": 100.0}], "bots": []}
+    monkeypatch.setattr("core.chart_data.trade_markers", fake_markers)
+    status, body = MM.route_get(_two_workers(tmp_path), "/markers?symbol=ETHUSDT&bucket_hours=3&limit=99")
+    assert status == 200
+    assert captured == {"symbol": "ETHUSDT", "bucket_hours": 3, "limit": 99}
+    assert json.loads(body)["markers"][0]["price"] == 100.0
+
+
 def test_route_post_close_writes_only_target_flag(tmp_path):
     """POST /eth/close 只寫 eth 旗標 + set eth event，絕不誤觸 sol。"""
     workers = _two_workers(tmp_path)
@@ -314,9 +369,11 @@ def test_poll_loop_swallows_transient_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(MM, "fetch_klines", fake_fetch)
 
     class FakeTrader:
+        _profit_above_since = None
         def on_bar_close(self, bt): calls["bars"] += 1
         def _heartbeat(self, p=None): pass
         def manual_close(self): return {"ok": True}
+        def check_profit_floor(self, p): return False
 
     stop = threading.Event()
     def sleep_fn(secs, st, ev=None):
@@ -342,9 +399,11 @@ def test_poll_loop_processes_close_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(MM, "fetch_klines", fake_fetch)
 
     class FakeTrader:
+        _profit_above_since = None
         def on_bar_close(self, bt): pass
         def _heartbeat(self, p=None): pass
         def manual_close(self): closed["n"] += 1; return {"ok": True}
+        def check_profit_floor(self, p): return False
 
     stop = threading.Event()
     MM.poll_loop(w, FakeTrader(), None, _StubCfg(), stop,
@@ -476,3 +535,98 @@ def test_single_main_no_delegation_without_bots_config(monkeypatch):
     with pytest.raises(SystemExit):
         M.main()
     assert called["n"] == 0          # 未委派多 bot
+
+
+# ── 決策路徑修補：ML 過濾旗標 + 重啟不重複決策同一根 K 棒 ────────────────────
+
+def test_resolve_ml_path_disabled_by_conf():
+    """conf ml_filter:false → 回空字串（不載未驗證模型；錦標賽驗證不含 ML 層）。"""
+    assert MM.resolve_ml_path({"ml_filter": False}, "smc_structure") == ""
+
+
+def test_resolve_ml_path_default_uses_strategy_model(monkeypatch):
+    monkeypatch.delenv("ML_FILTER_PATH", raising=False)
+    assert MM.resolve_ml_path({}, "smc_structure") == "models/smc_structure.pkl"
+
+
+def test_resolve_ml_path_env_override(monkeypatch):
+    monkeypatch.setenv("ML_FILTER_PATH", "custom/path.pkl")
+    assert MM.resolve_ml_path({}, "whatever") == "custom/path.pkl"
+    # 顯式 false 優先於 env
+    assert MM.resolve_ml_path({"ml_filter": False}, "whatever") == ""
+
+
+def test_poll_loop_skips_bar_already_decided_before_restart(tmp_path, monkeypatch):
+    """重啟後：restored_last_bar() 回傳「已決策過的 bar」→ 同 bar 不再 on_bar_close
+    （只刷心跳），避免重啟重複進出、白繳手續費。"""
+    import pandas as pd
+    workers = _two_workers(tmp_path)
+    w = workers["eth"]
+    idx = pd.date_range("2026-06-30", periods=3, freq="1h")
+
+    def fake_fetch(client, symbol, interval, n, futures=True):
+        return pd.DataFrame({"close": [1.0, 2.0, 3.0]}, index=idx)
+    monkeypatch.setattr(MM, "fetch_klines", fake_fetch)
+
+    calls = {"bars": 0, "hb": 0}
+
+    class FakeTrader:
+        _profit_above_since = None
+        def on_bar_close(self, bt): calls["bars"] += 1
+        def _heartbeat(self, p=None): calls["hb"] += 1
+        def manual_close(self): return {"ok": True}
+        def check_profit_floor(self, p): return False
+        def restored_last_bar(self): return idx[-2]      # state 檔說這根已決策過
+
+    stop = threading.Event()
+    MM.poll_loop(w, FakeTrader(), None, _StubCfg(), stop,
+                 lambda secs, st, ev=None: st.set(), lambda *a: None)
+    assert calls["bars"] == 0      # 同根不重複決策
+    assert calls["hb"] == 1        # 只刷心跳
+
+
+def test_poll_loop_decides_when_no_restored_bar(tmp_path, monkeypatch):
+    """restored_last_bar() 回 None（fresh 啟動）→ 正常決策。"""
+    import pandas as pd
+    workers = _two_workers(tmp_path)
+    w = workers["eth"]
+    idx = pd.date_range("2026-06-30", periods=3, freq="1h")
+    monkeypatch.setattr(MM, "fetch_klines",
+                        lambda *a, **k: pd.DataFrame({"close": [1.0, 2.0, 3.0]}, index=idx))
+    calls = {"bars": 0}
+
+    class FakeTrader:
+        _profit_above_since = None
+        def on_bar_close(self, bt): calls["bars"] += 1
+        def _heartbeat(self, p=None): pass
+        def manual_close(self): return {"ok": True}
+        def check_profit_floor(self, p): return False
+        def restored_last_bar(self): return None
+
+    stop = threading.Event()
+    MM.poll_loop(w, FakeTrader(), None, _StubCfg(), stop,
+                 lambda secs, st, ev=None: st.set(), lambda *a: None)
+    assert calls["bars"] == 1
+
+
+def test_route_get_bots_lists_ids_in_order(tmp_path):
+    """GET /bots → 依設定順序列出所有 bot id + symbol/strategy/interval（前端動態渲染 N 台用）。"""
+    workers = _two_workers(tmp_path)
+    status, body = MM.route_get(workers, "/bots")
+    assert status == 200
+    bots = json.loads(body)
+    assert [b["id"] for b in bots] == ["eth", "sol"]
+    assert bots[0]["symbol"] == "ETHUSDT" and bots[0]["strategy"] == "trend_pullback"
+    assert bots[0]["interval"] == "1h"
+
+
+# ── CORS 預檢（OPTIONS）：直連 bot 平倉需要瀏覽器 preflight 通過 ──────────────
+
+def test_cors_preflight_headers_allow_close_token_header():
+    """OPTIONS 預檢回應必須宣告允許 POST 方法 + X-Close-Token 自訂標頭，
+    否則瀏覽器會擋掉跨網域帶自訂 header 的 POST（GitHub Pages 直連 bot 平倉會失敗）。"""
+    status, headers = MM.cors_preflight_response()
+    assert status == 204
+    assert headers["Access-Control-Allow-Origin"] == "*"
+    assert "POST" in headers["Access-Control-Allow-Methods"]
+    assert "x-close-token" in headers["Access-Control-Allow-Headers"].lower()

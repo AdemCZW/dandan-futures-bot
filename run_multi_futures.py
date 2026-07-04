@@ -111,9 +111,10 @@ def _worker_trades_bytes(worker: BotWorker, query: str) -> bytes:
     """
     from core.trade_journal import read_trades_db
     qs = urllib.parse.parse_qs(query)
-    limit = int(qs.get("limit", ["50"])[0])
     mode = qs.get("mode", [None])[0]
     try:
+        # limit 夾限 [1,2000]：非數字/負數不再噴 traceback 或 SQLite LIMIT -1 全表傾倒
+        limit = max(1, min(int(qs.get("limit", ["50"])[0]), 2000))
         rows = read_trades_db(limit=limit, mode=mode,
                               strategy=worker.strategy, symbol=worker.symbol)
         return json.dumps(rows, default=str).encode()
@@ -144,6 +145,34 @@ def route_get(workers: dict, path: str):
     if p == "/health":
         return 200, b'{"ok":true}'
     segs = [s for s in p.split("/") if s]
+    # bot 清單（前端動態渲染 N 台用：先問有哪些台，再逐台打 /{id}/live）
+    if len(segs) == 1 and segs[0] == "bots":
+        out = [{"id": w.id, "symbol": w.symbol, "strategy": w.strategy,
+                "interval": w.interval} for w in workers.values()]
+        return 200, json.dumps(out).encode()
+    # 圖表資料（前端 GitHub Pages 直接打）：K 線+費波那契通道 / 交易標記。
+    # 走輕量 core.chart_data，不背回測相依；任一步失敗回空資料（前端不 500）。
+    if len(segs) == 1 and segs[0] == "klines":
+        q = urllib.parse.parse_qs(parsed.query)
+        try:
+            from core.chart_data import klines_data
+            data = klines_data(q.get("symbol", ["BTCUSDT"])[0],
+                               q.get("interval", ["1h"])[0],
+                               int(q.get("limit", ["200"])[0]),
+                               source="testnet")
+            return 200, json.dumps(data).encode()
+        except Exception as e:                       # noqa: BLE001
+            return 200, json.dumps({"error": str(e), "candles": []}).encode()
+    if len(segs) == 1 and segs[0] == "markers":
+        q = urllib.parse.parse_qs(parsed.query)
+        try:
+            from core.chart_data import trade_markers
+            data = trade_markers(q.get("symbol", ["BTCUSDT"])[0],
+                                 int(q.get("bucket_hours", ["6"])[0]),
+                                 int(q.get("limit", ["5000"])[0]))
+            return 200, json.dumps(data).encode()
+        except Exception as e:                       # noqa: BLE001
+            return 200, json.dumps({"error": str(e), "markers": [], "bots": []}).encode()
     # 向後相容根路由：/state、/trades（無 id）→ 第一台 bot
     if len(segs) == 1 and segs[0] in ("state", "trades"):
         first = next(iter(workers.values()), None)
@@ -162,6 +191,18 @@ def route_get(workers: dict, path: str):
         return 200, _read_state_bytes(worker)
     if action == "trades":
         return 200, _worker_trades_bytes(worker, parsed.query)
+    if action == "live":
+        # enrich 過的即時監控（與舊 dashboard /api/live 同 shape），前端 GitHub Pages 直接打。
+        try:
+            state = json.loads(_read_state_bytes(worker) or b"{}")
+        except (json.JSONDecodeError, TypeError):
+            state = {}
+        try:
+            from core.live_status import bot_live_status
+            data = bot_live_status(state, worker.strategy, worker.symbol, worker.interval)
+            return 200, json.dumps(data).encode()
+        except Exception as e:                       # noqa: BLE001
+            return 200, json.dumps({"active": False, "error": str(e)}).encode()
     return 404, b'{"error":"not found"}'
 
 
@@ -184,7 +225,8 @@ def route_post(workers: dict, path: str, token_header, env_token):
         return 404, {"ok": False, "msg": "not found"}
     if worker is None:
         return 404, {"ok": False, "msg": "unknown bot id"}
-    if not env_token or token_header != env_token:
+    import hmac
+    if not env_token or not hmac.compare_digest(str(token_header or ""), str(env_token)):
         return 403, {"ok": False, "msg": "未授權（CLOSE_TOKEN 未設或不符）"}
     try:
         with open(worker.close_flag_path, "w") as f:
@@ -193,6 +235,34 @@ def route_post(workers: dict, path: str, token_header, env_token):
         return 200, {"ok": True, "queued": True, "msg": "已排入平倉，下一輪執行"}
     except OSError as e:
         return 500, {"ok": False, "msg": f"寫入平倉旗標失敗：{e}"}
+
+
+def cors_preflight_response() -> tuple[int, dict]:
+    """CORS 預檢（OPTIONS）回應：(status, headers)。純函式，方便測試。
+
+    前端搬 GitHub Pages 後直連 bot 平倉（POST + 自訂 X-Close-Token 標頭）跨網域，
+    瀏覽器會先送 OPTIONS 預檢；沒有這組標頭，實際的 POST 永遠送不出去（CORS 擋）。
+    204 No Content：預檢本身不需要 body。
+    """
+    return 204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Close-Token",
+        "Access-Control-Max-Age": "600",
+    }
+
+
+def resolve_ml_path(conf: dict, strategy: str) -> str:
+    """per-bot ML 過濾旗標 → 模型路徑。conf["ml_filter"] is False → 空字串（停用）。
+
+    背景：策略驗證（walk-forward 錦標賽 + bootstrap 閘門）完全不含 ML 過濾層，
+    但載入邏輯是「models/<strategy>.pkl 存在就自動載入」→ 半成品模型會 silently
+    擋在已驗證的策略前面（live 行為 ≠ 驗證過的行為）。BOTS_CONFIG 各台應明確設
+    ml_filter:false，除非該模型本身通過同等驗證。未指定 → 沿用舊行為（向後相容）。
+    """
+    if conf.get("ml_filter") is False:
+        return ""
+    return os.getenv("ML_FILTER_PATH", f"models/{strategy}.pkl")
 
 
 # ── 監督執行緒 + 崩潰隔離 ───────────────────────────────────────────────
@@ -225,8 +295,13 @@ def poll_loop(worker, trader, client, cfg, stop_event, sleep_fn, log) -> None:
     on_bar_close、否則只刷心跳。逐輪 try/except：暫態錯誤（網路抖動等）吞掉續跑，
     不讓單輪失敗中斷整台；真正的致命錯誤往上拋給 supervise 重建。
     stop_event 設定時乾淨退出（關機/重啟）。
+
+    last_bar 以 trader.restored_last_bar()（state 檔 last_decision.ts）初始化：
+    重啟/崩潰重建後，已決策過的那根 K 棒不再重複決策——否則每次重啟都會對同一根
+    K 棒再進出一次（實測 7/1 的同 bar 進出對就是這樣白繳手續費）。
     """
-    last_bar = None
+    last_bar = getattr(trader, "restored_last_bar", lambda: None)()
+    wait_s = cfg.poll_seconds
     while not stop_event.is_set():
         try:
             if os.path.exists(worker.close_flag_path):
@@ -239,14 +314,25 @@ def poll_loop(worker, trader, client, cfg, stop_event, sleep_fn, log) -> None:
             df = fetch_klines(client, cfg.symbol, cfg.interval, 3, futures=True)
             bar_time = df.index[-2]
             live_price = float(df["close"].iloc[-1])
+            # 每輪軟停損/停利（交易所掛單失效時的即時後備；testnet 條件單偶發故障）
+            _soft = getattr(trader, "check_soft_stops", None)
+            if _soft is not None:
+                reason = _soft(live_price)
+                if reason:
+                    log(worker.id, f"軟停損觸發（{reason}）@ {live_price}")
+            if trader.check_profit_floor(live_price):
+                log(worker.id, "盈利保底觸發", trader.manual_close())
             if bar_time == last_bar:
                 trader._heartbeat(live_price)        # 同一根 K 棒：只刷 updated_at，前端綠燈
             else:
                 last_bar = bar_time
                 trader.on_bar_close(bar_time)
+            # 計時中 → 縮短 poll 間隔到 5s，確保能及時確認浮盈持續
+            wait_s = 5 if trader._profit_above_since is not None else cfg.poll_seconds
         except Exception:                            # noqa: BLE001 — 暫態錯誤吞掉續跑（韌性）
             log(worker.id, "迴圈錯誤", traceback.format_exc())
-        sleep_fn(cfg.poll_seconds, stop_event, worker.close_event)
+            wait_s = cfg.poll_seconds
+        sleep_fn(wait_s, stop_event, worker.close_event)
 
 
 def supervise(worker, build_fn, run_fn, stop_event, sleep_fn, log, max_backoff=60) -> None:
@@ -310,7 +396,7 @@ def build_trader(worker):
     risk = RiskOfficer(cfg)
     journal = TradeJournal(db_path="trades.db", csv_path=f"trades_{worker.id}.csv",
                            mode="live_futures_testnet", symbol=cfg.symbol, strategy=cfg.strategy)
-    ml_path = os.getenv("ML_FILTER_PATH", f"models/{cfg.strategy}.pkl")
+    ml_path = resolve_ml_path(conf, cfg.strategy)
     trader = R.FuturesLiveTrader(
         cfg, client, strat, risk, execu, journal,
         cb_max_losses=int(conf.get("cb_max_losses", 3)),
@@ -366,6 +452,13 @@ def start_http_server(workers: dict, port: int):
             status, payload = route_post(
                 workers, self.path, self.headers.get("X-Close-Token"), token)
             self._send(status, json.dumps(payload).encode())
+
+        def do_OPTIONS(self):
+            status, headers = cors_preflight_response()
+            self.send_response(status)
+            for k, v in headers.items():
+                self.send_header(k, v)
+            self.end_headers()
 
         def _send(self, status, body):
             if not isinstance(body, bytes):

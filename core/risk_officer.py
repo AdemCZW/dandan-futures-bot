@@ -78,6 +78,16 @@ class RiskOfficer:
         self._daily_key = None
         self._equity_peak = None   # 運行期間淨值高點（峰值回撤熔斷用）
 
+    def reset_equity_peak(self) -> None:
+        """清空峰值回撤熔斷的高點記錄（測試網重置後呼叫）。
+
+        R1（2026-07-04 全系統體檢）：testnet 每月重置餘額，若不重置 _equity_peak，
+        峰值停在重置前的高水位、equity 驟降後 peak_dd 立刻超過閾值——且 peak 只會
+        漲不會跌，此後永遠回不去，bot 從此拒絕所有新倉，故障狀態全程無錯誤訊息、
+        使用者只會看到「一直不交易」。呼叫端：run_live_futures 偵測到重置時一併呼叫。
+        """
+        self._equity_peak = None
+
     def mark_bar(self, ts, equity: float) -> None:
         """每根 K 線推進時呼叫：在日界用「當日第一根的總權益」當單日熔斷基準。
 

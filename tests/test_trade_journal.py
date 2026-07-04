@@ -9,7 +9,9 @@ import sqlite3
 
 import pytest
 
-from core.trade_journal import TradeJournal, _COLUMNS, read_trades_db
+from core.trade_journal import (
+    TradeJournal, _COLUMNS, read_trades_db, implied_open_position,
+)
 
 
 def _read_csv_rows(csv_path):
@@ -207,3 +209,84 @@ def test_equity_none_is_null_in_db_and_empty_in_csv(tmp_path):
     eq_idx = _COLUMNS.index("equity")
     assert rows[0] == _COLUMNS  # 表頭
     assert rows[1][eq_idx] == ""
+
+
+# ── implied_open_position：從交易紀錄推算「是否還有未平倉的 entry」──────────────
+# 輸入為 read_trades_db 的格式（最新在最前），回傳未平倉 entry dict 或 None。
+
+def _rows_newest_first(events):
+    """把 (side, price, qty) 的時間正序列表轉成 read_trades_db 格式（最新在前）。"""
+    return [{"side": s, "price": p, "qty": q} for (s, p, q) in reversed(events)]
+
+
+def test_implied_open_none_when_entry_then_exit():
+    rows = _rows_newest_first([
+        ("entry", 100.0, 1.0),
+        ("exit_tp", 110.0, 1.0),
+    ])
+    assert implied_open_position(rows) is None
+
+
+def test_implied_open_returns_entry_when_unmatched():
+    rows = _rows_newest_first([
+        ("entry", 100.0, 1.0),
+    ])
+    op = implied_open_position(rows)
+    assert op is not None
+    assert op["side"] == "entry"
+    assert op["price"] == 100.0
+    assert op["qty"] == 1.0
+    assert op["dir"] == 1
+
+
+def test_implied_open_short_direction():
+    rows = _rows_newest_first([
+        ("entry_short", 100.0, 2.0),
+    ])
+    op = implied_open_position(rows)
+    assert op["dir"] == -1
+    assert op["side"] == "entry_short"
+
+
+def test_implied_open_consecutive_entries_keeps_latest():
+    """連續兩筆 entry 無 exit（資料缺漏）→ 以最後一筆為未平倉倉位。"""
+    rows = _rows_newest_first([
+        ("entry", 100.0, 1.0),
+        ("entry", 105.0, 1.5),
+    ])
+    op = implied_open_position(rows)
+    assert op["price"] == 105.0
+    assert op["qty"] == 1.5
+
+
+def test_implied_open_scale_out_reduces_qty():
+    rows = _rows_newest_first([
+        ("entry", 100.0, 2.0),
+        ("scale_out", 105.0, 0.8),
+    ])
+    op = implied_open_position(rows)
+    assert op["qty"] == pytest.approx(1.2)
+
+
+def test_implied_open_scale_out_to_zero_closes():
+    rows = _rows_newest_first([
+        ("entry", 100.0, 1.0),
+        ("scale_out", 105.0, 1.0),
+    ])
+    assert implied_open_position(rows) is None
+
+
+def test_implied_open_empty_rows():
+    assert implied_open_position([]) is None
+
+
+def test_implied_open_full_cycle_then_reopen():
+    """完整一回合後又開新倉 → 回傳新倉。"""
+    rows = _rows_newest_first([
+        ("entry", 100.0, 1.0),
+        ("exit_sl", 95.0, 1.0),
+        ("entry_short", 90.0, 2.0),
+    ])
+    op = implied_open_position(rows)
+    assert op["dir"] == -1
+    assert op["price"] == 90.0

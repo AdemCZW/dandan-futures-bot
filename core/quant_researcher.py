@@ -836,7 +836,14 @@ class FibChannelStrategy(Strategy):
         # mom_pct = 過去 N 根 K 棒的絕對漲跌幅 (%)，供動能閘門使用
         win = max(1, int(self.params.get("momentum_window", 3)))
         out["mom_pct"] = out["close"].pct_change(win).abs() * 100
-        return self._prepare_regime(out)
+        out = self._prepare_regime(out)
+        # 訂單流閘門欄位只在啟用時才加（避免關閉時多一欄全 NaN 被 dropna 清空整段，
+        # 例如放進 consensus 或合成資料無 taker_base 時）。
+        if {**self.STRUCTURE_DEFAULTS, **self.params}["use_structure"]:
+            out = self._prepare_structure(out)
+            if out["taker_ratio_s"].isna().all():        # 缺 taker_base（舊快取）→ 中性值放行，不清空
+                out["taker_ratio_s"] = 0.5
+        return out
 
     def signal(self, row, position: int) -> int:
         g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
@@ -895,17 +902,25 @@ class FibChannelStrategy(Strategy):
                 if abs(ch100 - ch0) < min_w_atr * atr_val:
                     return 0
 
+        # 先決定候選進場方向，再過訂單流閘門（use_structure）
         if mode == "reversion":
             if pos_in_ch < entry_z:
-                return int(ch_dir)           # 原點側 → 順趨勢（上升=多、下降=空）
-            if pos_in_ch > (1.0 - entry_z):
-                return -int(ch_dir)          # 目標側 → 逆趨勢（上升=空、下降=多）
-            return 0
+                target = int(ch_dir)         # 原點側 → 順趨勢（上升=多、下降=空）
+            elif pos_in_ch > (1.0 - entry_z):
+                target = -int(ch_dir)        # 目標側 → 逆趨勢（上升=空、下降=多）
+            else:
+                return 0
+        else:                                # trend mode（預設）
+            if pos_in_ch < entry_z:
+                target = int(ch_dir)
+            else:
+                return 0
 
-        # trend mode（預設）
-        if pos_in_ch < entry_z:
-            return int(ch_dir)
-        return 0
+        # 訂單流閘門：主動買賣盤失衡與進場方向衝突 → 不進場
+        #   做多需買盤佔比 ≥ of_long_min、做空需 ≤ of_short_max（use_structure=False 恆放行）
+        if not self._structure_ok(row, target):
+            return 0
+        return target
 
 
 class TrendPullbackStrategy(Strategy):
@@ -1045,6 +1060,72 @@ class FibEmaStrategy(Strategy):
         return 0
 
 
+class VolMomentumStrategy(Strategy):
+    """成交量計時的時序動量（Volume-timed Time-Series Momentum）。
+
+    文獻依據：Bitcoin intraday time-series momentum（Shen 2022, Financial Review）—
+    「高成交量／高波動時段的動量最可預測」。策略庫既有的動量策略（ema_cross/supertrend/
+    donchian）都失敗在「不分量能一律追」；本策略的差異化就是**只在量能放大時才順動量進場**，
+    過濾掉無量的假動量漂移。
+
+    進場：
+      · 近 lookback 根報酬 mom > +thresh（強勢上行）且量能 vol_ratio ≥ vol_min
+        且（無趨勢過濾 or close > 200EMA）→ 做多
+      · mom < −thresh 且量能足且（close < 200EMA）→ 做空
+    出場：
+      · 動量衰竭：持多時 mom 跌回 0 以下、持空時 mom 升回 0 以上 → 平倉
+      （硬停損 / 追蹤停損由風控引擎另外處理，與策略層無關）
+
+    causal：mom 用 pct_change(lookback)（只看過去）、vol_ratio 用滾動均量、EMA 只用過去。
+    """
+    name = "vol_momentum"
+    defaults = {"lookback": 6, "entry_thresh": 0.010, "vol_period": 20,
+                "vol_min": 1.2, "use_trend_filter": True, "trend_ema_period": 200}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        lb = max(1, int(self.params["lookback"]))
+        out["mom"] = out["close"].pct_change(lb)
+        vp = max(1, int(self.params["vol_period"]))
+        vavg = out["volume"].rolling(vp, min_periods=1).mean().replace(0, float("nan"))
+        out["vol_ratio"] = out["volume"] / vavg
+        out["ema_trend"] = se.ema(out["close"], int(self.params["trend_ema_period"]))
+        out["atr"] = se.atr(out, 14)
+        return out
+
+    def signal(self, row: pd.Series, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        mom = _num(g("mom"))
+        if mom is None:
+            return position                          # 暖機 → 維持現狀
+        # ── 出場：動量衰竭（穿回 0）──
+        if position == 1 and mom < 0:
+            return 0
+        if position == -1 and mom > 0:
+            return 0
+        if position != 0:
+            return position                          # 動量仍同向 → 續抱
+
+        # ── 進場：強動量 + 量能放大 + （可選）順大趨勢 ──
+        thresh = float(self.params["entry_thresh"])
+        vol_r = _num(g("vol_ratio"))
+        vol_ok = vol_r is not None and vol_r >= float(self.params["vol_min"])
+        if not vol_ok:
+            return 0
+        close = _num(g("close"))
+        et = _num(g("ema_trend"))
+        use_tf = bool(self.params.get("use_trend_filter", True))
+        trend_up = (not use_tf) or et is None or close is None or close > et
+        trend_dn = (not use_tf) or et is None or close is None or close < et
+        if mom > thresh and trend_up:
+            return 1
+        if mom < -thresh and trend_dn:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -1062,6 +1143,7 @@ STRATEGIES = {
     FibChannelStrategy.name: FibChannelStrategy,
     TrendPullbackStrategy.name: TrendPullbackStrategy,
     FibEmaStrategy.name: FibEmaStrategy,
+    VolMomentumStrategy.name: VolMomentumStrategy,
 }
 
 

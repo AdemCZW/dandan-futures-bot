@@ -49,5 +49,11 @@ class CircuitBreaker:
         cb = cls(max_losses=max_losses, pause_hours=pause_hours)
         cb.consecutive_losses = data.get("consecutive_losses", 0)
         pu = data.get("paused_until")
-        cb._paused_until = datetime.fromisoformat(pu) if pu else None
+        if pu:
+            loaded = datetime.fromisoformat(pu)
+            now = datetime.now(timezone.utc)
+            # 新設定的 pause_hours 為上限：若設定縮短，舊暫停跟著縮短（立即生效）
+            cap = now + timedelta(hours=pause_hours)
+            effective = min(loaded, cap)
+            cb._paused_until = effective if effective > now else None
         return cb

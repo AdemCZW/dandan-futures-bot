@@ -3,6 +3,8 @@
 只驗證可離線驗證的部分（精度/訂單參數/解析/決策與換邊）；實際對合約測試網的
 網路往返需 BINANCE_FUTURES_TESTNET_* 金鑰才能完整驗證。
 """
+import json
+import os
 from decimal import Decimal
 
 import pandas as pd
@@ -181,7 +183,9 @@ class FakeExecu:
         self._filters = {"min_qty": Decimal("0.001")}
         self.orders = []
         self.stops = []           # place_stop 呼叫 (dir, price)
+        self.stop_qtys = []       # 各次 place_stop 的 qty（None=closePosition、數值=帶量後備）
         self.tps = []             # place_take_profit 呼叫 (dir, price)
+        self.tp_qtys = []
         self.cancelled = []       # cancel_order 的 orderId
         self.cancel_all_count = 0
         self._open_orders = []
@@ -201,11 +205,12 @@ class FakeExecu:
     def open_short(self, q): self.amt = -float(q); self.orders.append(("open_short", float(q)))
     def close(self, q, d): self.amt = 0.0; self.orders.append(("close", float(q), d))
     # 交易所掛單式停損/停利
-    def place_stop(self, d, price):
-        self._oid += 1; self.stops.append((d, float(price)))
+    def place_stop(self, d, price, qty=None):
+        self._oid += 1; self.stops.append((d, float(price))); self.stop_qtys.append(qty)
         return {} if self._stop_resp_empty else {"orderId": f"S{self._oid}"}
-    def place_take_profit(self, d, price):
-        self._oid += 1; self.tps.append((d, float(price))); return {"orderId": f"T{self._oid}"}
+    def place_take_profit(self, d, price, qty=None):
+        self._oid += 1; self.tps.append((d, float(price))); self.tp_qtys.append(qty)
+        return {"orderId": f"T{self._oid}"}
     def cancel_order(self, oid): self.cancelled.append(oid); return {"status": "CANCELED"}
     def cancel_all_stops(self): self.cancel_all_count += 1; return {}
     def open_orders(self): return self._open_orders
@@ -404,6 +409,115 @@ def test_classify_exit_short_take_profit(patched):
     t = _trader([0], FakeExecu())
     t.dir, t.entry_price, t.sl, t.tp = -1, 100.0, 102.0, 96.0
     assert t._classify_exit(96.0) == "exit_tp"           # 空單觸及下方停利
+
+
+def test_profit_floor_disabled_when_threshold_zero(patched):
+    """min_profit_close_usdt=0（預設）→ 停用，永遠回 False。"""
+    t = _trader([0], FakeExecu())
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    assert t.check_profit_floor(200.0) is False   # 浮盈 +100U 但功能關閉
+
+
+def test_profit_floor_starts_timer_but_not_immediate(patched):
+    """浮盈首次達標 → 開始計時、當輪不平（回 False），_profit_above_since 被設定。"""
+    t = _trader([0], FakeExecu())
+    t.cfg.strategy_params = {"min_profit_close_usdt": 20, "profit_sustain_seconds": 5}
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    assert t.check_profit_floor(125.0) is False    # 浮盈 +25U ≥ 20，但剛開始計時
+    assert t._profit_above_since is not None
+
+
+def test_profit_floor_fires_after_sustain(patched):
+    """浮盈達標且持續超過 sustain 秒 → 回 True（可平倉）。"""
+    from datetime import datetime, timezone, timedelta
+    t = _trader([0], FakeExecu())
+    t.cfg.strategy_params = {"min_profit_close_usdt": 20, "profit_sustain_seconds": 5}
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    # 模擬 6 秒前就已超標
+    t._profit_above_since = datetime.now(timezone.utc) - timedelta(seconds=6)
+    t._peak_pnl = 25.0
+    assert t.check_profit_floor(125.0) is True
+
+
+def test_profit_floor_resets_timer_when_drops_below(patched):
+    """計時中浮盈跌破閾值 → 計時重置為 None（要重新累積 5 秒）。"""
+    from datetime import datetime, timezone, timedelta
+    t = _trader([0], FakeExecu())
+    t.cfg.strategy_params = {"min_profit_close_usdt": 20, "profit_sustain_seconds": 5}
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    t._profit_above_since = datetime.now(timezone.utc) - timedelta(seconds=6)
+    t._peak_pnl = 25.0
+    # 現價使浮盈掉到 +10U（< 20）→ 計時重置，且未觸發保底（10 > 25*0.5=12.5? 否，10<12.5 →保底）
+    # 用 +18U 避開保底條件（18 > 25*0.5）：純測計時重置
+    assert t.check_profit_floor(118.0) is False
+    assert t._profit_above_since is None
+
+
+def test_profit_floor_giveback_locks_in(patched):
+    """峰盈曾達 70%、回落超一半仍在盈 → 保底結算（無需計時）。"""
+    t = _trader([0], FakeExecu())
+    t.cfg.strategy_params = {"min_profit_close_usdt": 20, "profit_sustain_seconds": 5}
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    t._peak_pnl = 15.0            # 峰值 ≥ 20*0.7=14
+    # 現價浮盈 +5U：< 峰值一半(7.5) 且 > 0 → 保底
+    assert t.check_profit_floor(105.0) is True
+
+
+def test_restore_backfills_missing_exit_when_db_open_but_exchange_flat(patched, monkeypatch):
+    """重啟還原：DB 顯示仍持倉、但交易所已空手（狀態檔被清＋交易所端已平倉漏記）
+       → 補記一筆 exit_reconciled，避免該筆交易與損益消失。"""
+    ex = FakeExecu()                 # amt=0 → 交易所空手
+    ex._mark = 110.0
+    t = _trader([0], ex)
+    monkeypatch.setattr(
+        "core.trade_journal.read_trades_db",
+        lambda *a, **k: [{"side": "entry", "price": 100.0, "qty": 1.0, "pnl": 0.0}])
+    t.restore()
+    sides = [r["side"] for r in t.journal.records]
+    assert "exit_reconciled" in sides
+    rec = next(r for r in t.journal.records if r["side"] == "exit_reconciled")
+    assert rec["pnl"] > 0            # (110-100)*1 − fee > 0
+    assert t.dir == 0                # 補記後維持空手
+
+
+def test_restore_no_backfill_when_position_live(patched, monkeypatch):
+    """交易所實際仍有倉 → 正常還原，不補記平倉。"""
+    ex = FakeExecu()
+    ex.amt = 1.0                     # 交易所有多倉
+    t = _trader([0], ex)
+    monkeypatch.setattr(
+        "core.trade_journal.read_trades_db",
+        lambda *a, **k: [{"side": "entry", "price": 100.0, "qty": 1.0, "pnl": 0.0}])
+    t.restore()
+    assert "exit_reconciled" not in [r["side"] for r in t.journal.records]
+    assert t.dir == 1
+
+
+def test_restore_no_backfill_when_db_properly_closed(patched, monkeypatch):
+    """DB 已正常平倉（entry→exit 配對）＋交易所空手 → 不補記。"""
+    ex = FakeExecu()                 # flat
+    t = _trader([0], ex)
+    monkeypatch.setattr(
+        "core.trade_journal.read_trades_db",
+        lambda *a, **k: [
+            {"side": "entry", "price": 100.0, "qty": 1.0, "pnl": 0.0},
+            {"side": "exit_tp", "price": 110.0, "qty": 1.0, "pnl": 10.0},
+        ][::-1])                     # read_trades_db 最新在前
+    t.restore()
+    assert "exit_reconciled" not in [r["side"] for r in t.journal.records]
+
+
+def test_restore_backfill_short_pnl_sign(patched, monkeypatch):
+    """未平倉為空單、標記價高於進場 → 補記為虧損（pnl < 0）。"""
+    ex = FakeExecu()
+    ex._mark = 110.0
+    t = _trader([0], ex)
+    monkeypatch.setattr(
+        "core.trade_journal.read_trades_db",
+        lambda *a, **k: [{"side": "entry_short", "price": 100.0, "qty": 1.0, "pnl": 0.0}])
+    t.restore()
+    rec = next(r for r in t.journal.records if r["side"] == "exit_reconciled")
+    assert rec["pnl"] < 0            # 空單、價漲 → 虧損
 
 
 def test_go_flat_deducts_round_trip_taker_fee_from_pnl(patched):
@@ -901,3 +1015,179 @@ def test_ws_handler_ignores_invalid_msg(patched):
     handle({"type": "ping"})           # 無 k 鍵
     handle({})                         # 空 dict
     assert len(heartbeats) == 0
+
+
+def test_restored_last_bar_reads_state_ts(patched, tmp_path):
+    """state 檔有 last_decision.ts 且 symbol/interval 相符 → 回該 bar Timestamp。"""
+    t = _trader([0], FakeExecu())
+    state = {"symbol": t.cfg.symbol, "interval": t.cfg.interval,
+             "last_decision": {"ts": "2026-07-03 08:00:00"}}
+    with open(t.state_path, "w") as f:
+        json.dump(state, f)
+    assert t.restored_last_bar() == pd.Timestamp("2026-07-03 08:00:00")
+
+
+def test_restored_last_bar_none_on_symbol_mismatch(patched, tmp_path):
+    """config 剛換過市場 → state 的 ts 不可沿用（不同市場的 bar 時間無意義）。"""
+    t = _trader([0], FakeExecu())
+    state = {"symbol": "OTHERUSDT", "interval": t.cfg.interval,
+             "last_decision": {"ts": "2026-07-03 08:00:00"}}
+    with open(t.state_path, "w") as f:
+        json.dump(state, f)
+    assert t.restored_last_bar() is None
+
+
+def test_restored_last_bar_none_when_no_file(patched):
+    t = _trader([0], FakeExecu())
+    try:
+        os.remove(t.state_path)
+    except FileNotFoundError:
+        pass
+    assert t.restored_last_bar() is None
+
+
+# ── 掛單競態自癒（-4130 全帳戶裸奔事故的修復）─────────────────────────────
+
+def test_place_protective_adopts_existing_order_on_reject(patched):
+    """掛停損被拒（-4130 同方向已有 closePosition 單）→ 反查 open_orders 認養既有單，
+    不留裸倉（重啟撤舊→掛新競態：撤單未完成時掛新單被拒，舊單稍後才消失）。"""
+    ex = FakeExecu()
+    def boom(d, price): raise RuntimeError("APIError(code=-4130): existing")
+    ex.place_stop = boom
+    ex._open_orders = [{"type": "STOP_MARKET", "orderId": "S77"},
+                       {"type": "TAKE_PROFIT_MARKET", "orderId": "T88"}]
+    t = _trader([0], ex)
+    t._exchange_stop = True
+    t.dir, t.entry_price, t.qty, t.sl, t.tp = 1, 100.0, 1.0, 95.0, 110.0
+    t._place_protective("bar")
+    assert t._stop_oid == "S77"      # 認養既有停損單，保護不中斷
+
+
+def test_on_bar_close_reheals_missing_protective(patched):
+    """持倉 + exchange_stop 開 + stop_oid 缺（先前掛單失敗）→ 每根 K 棒自動補掛。"""
+    ex = FakeExecu()
+    t = _trader([1], ex)             # 策略持多（target=1 == dir → hold）
+    t._exchange_stop = True
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    t.sl, t.tp = 95.0, 110.0
+    t._entry_sl_dist = 5.0
+    t._stop_oid = None               # 缺停損掛單（裸奔狀態）
+    t.on_bar_close("2026-07-04 00:00:00")
+    assert len(ex.stops) >= 1        # 已補掛 STOP
+    assert t._stop_oid is not None
+
+
+def test_sync_protective_reheals_missing_tp(patched):
+    """TP 掛單曾失敗（tp_oid 缺）→ 每根 K 棒補掛（原版永不再試）。"""
+    ex = FakeExecu()
+    t = _trader([1], ex)
+    t._exchange_stop = True
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    t.sl, t.tp = 95.0, 110.0
+    t._stop_oid, t._stop_sl = "S1", t._rounded_sl()   # STOP 正常 → 不換單
+    t._tp_oid = None                                   # TP 缺
+    t._sync_protective_stop("bar")
+    assert len(ex.tps) == 1 and t._tp_oid is not None
+
+
+def test_restore_waits_for_stop_clearance_before_replacing(patched, monkeypatch):
+    """restore：撤殘單後等交易所端真正清空（open_orders 空）才掛新單，消滅 -4130 競態。"""
+    ex = FakeExecu()
+    ex.amt = 1.0                                       # 交易所有多倉 → 走重掛路徑
+    seq = {"n": 0}
+    residual = [{"type": "STOP_MARKET", "orderId": "OLD"}]
+    def open_orders():
+        seq["n"] += 1
+        return residual if seq["n"] <= 2 else []       # 前兩次查還有殘單，之後才清空
+    ex.open_orders = open_orders
+    monkeypatch.setattr("time.sleep", lambda s: None)  # 不真睡
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: [])
+    t = _trader([0], ex)
+    t._exchange_stop = True
+    t.restore()
+    assert seq["n"] >= 3                               # 有輪詢等待清空
+    assert len(ex.stops) == 1                          # 清空後才掛新 STOP
+
+
+def test_place_protective_falls_back_to_qty_stop_when_ghost_blocks(patched):
+    """-4130 且 open_orders 查不到可認養的單（testnet 幽靈單）→ 改帶量 reduceOnly STOP。"""
+    ex = FakeExecu()
+    orig = ex.place_stop
+    def picky(d, price, qty=None):
+        if qty is None:
+            raise RuntimeError("APIError(code=-4130): existing")   # closePosition 被幽靈單擋
+        return orig(d, price, qty=qty)                              # 帶量 → 成功
+    ex.place_stop = picky
+    ex._open_orders = []                                            # 查無單可認養
+    t = _trader([0], ex)
+    t._exchange_stop = True
+    t.dir, t.entry_price, t.qty, t.sl, t.tp = 1, 100.0, 1.5, 95.0, 110.0
+    t._place_protective("bar")
+    assert t._stop_oid is not None
+    assert ex.stop_qtys[-1] == 1.5                                  # 帶量後備（非 closePosition）
+
+
+def test_engineer_qty_stop_params_use_reduce_only():
+    """帶量條件單參數：quantity + reduceOnly，無 closePosition。"""
+    e = FuturesExecutionEngineer(FakeFuturesClient(), "BTCUSDT", set_leverage=False)
+    p = e.stop_order_params(current_dir=1, trigger_price=95.0, order_type="STOP_MARKET", qty=0.5)
+    assert p["quantity"] == "0.5" and p["reduceOnly"] == "true"
+    assert "closePosition" not in p
+
+
+def test_check_soft_stops_long_sl_hit_closes(patched):
+    """每輪 poll 軟停損：多單即時價跌破 SL → 立即市價平倉（掛單失效後備）。"""
+    ex = FakeExecu()
+    t = _trader([1], ex)
+    t.dir, t.entry_price, t.qty, t.sl, t.tp = 1, 100.0, 1.0, 95.0, 110.0
+    reason = t.check_soft_stops(94.5)
+    assert reason == "exit_sl"
+    assert t.dir == 0                        # 已平倉
+    assert t.journal.records[-1]["side"] == "exit_sl"
+
+
+def test_check_soft_stops_short_tp_hit_closes(patched):
+    ex = FakeExecu()
+    t = _trader([-1], ex)
+    t.dir, t.entry_price, t.qty, t.sl, t.tp = -1, 100.0, 1.0, 105.0, 92.0
+    assert t.check_soft_stops(91.5) == "exit_tp"
+    assert t.dir == 0
+
+
+def test_check_soft_stops_no_hit_returns_none(patched):
+    t = _trader([1], FakeExecu())
+    t.dir, t.entry_price, t.qty, t.sl, t.tp = 1, 100.0, 1.0, 95.0, 110.0
+    assert t.check_soft_stops(100.0) is None
+    assert t.dir == 1                        # 沒動
+
+
+def test_check_soft_stops_flat_noop(patched):
+    t = _trader([0], FakeExecu())
+    assert t.check_soft_stops(1.0) is None
+
+
+def test_write_sop_resets_risk_equity_peak_on_testnet_reset(patched):
+    """R1（2026-07-04 全系統體檢）：_write_sop 偵測到 testnet 重置時，必須連帶重置
+    self.risk._equity_peak，否則峰值回撤熔斷會用重置前的高水位對重置後的小額餘額
+    算回撤，永遠觸發、bot 從此拒絕所有新倉且無任何錯誤訊息可查。"""
+    ex = FakeExecu()
+    ex.balance = lambda a="USDT": 100.0              # 重置後的小額餘額
+    t = _trader([0], ex)
+    t.risk._equity_peak = 5000.0                    # 重置前的高水位
+    prev = BotState(last_balance=5000.0)             # 上次持久化的餘額基準（>>100 觸發重置偵測）
+    prev.save(t.state_path)
+    row = _flat_df().iloc[-2]
+    # equity=100（重置後小額）驟降到 << prev.last_balance(5000) → 觸發偵測
+    t._write_sop(100.0, pd.Timestamp("2026-06-22 00:05"), row, {}, 0, None, None, [], False)
+    assert t.risk._equity_peak is None               # 已隨重置一併清空
+
+
+def test_reconcile_exit_resets_peak_pnl(patched, monkeypatch):
+    """F3：對帳出場必須清 _peak_pnl，否則下一筆新倉被盈利保底用舊峰盈秒平。"""
+    ex = FakeExecu()
+    t = _trader([0], ex)
+    t.dir, t.entry_price, t.qty = 1, 100.0, 1.0
+    t.sl, t.tp, t._entry_sl_dist = 98.0, 104.0, 2.0
+    t._peak_pnl = 55.0                       # 上一筆殘留峰盈
+    t._reconcile_exit(104.5, "bar")
+    assert t._peak_pnl == 0.0

@@ -401,3 +401,28 @@ class TestUseFixedTP:
         cfg_off = Config(use_fixed_tp=False)
         _, tp_off = RiskOfficer(cfg_off).exit_levels(100.0, 1, atr=None)
         assert tp_off > 100.0 * (1 + Config().take_profit_pct)
+
+
+# ── R1（2026-07-04 全系統體檢）：測試網重置後峰值回撤熔斷永久觸發 ──────────────
+# 背景：testnet 每月重置一次餘額。RiskOfficer._equity_peak 停在重置前的高點，
+# 重置後 equity 驟降 → peak_dd 立刻超過 max_peak_drawdown_pct 且永遠回不去
+# （因為 peak 只會漲不會跌）。bot 因此永久拒絕所有新倉，且原因難以察覺
+# （check_entry 的 reason 字串會顯示，但使用者只會看到「一直不交易」）。
+
+def test_equity_peak_survives_testnet_reset_blocks_forever(officer, cfg):
+    """重現 bug：重置後不重置 peak → 熔斷永久卡死（RED，證明問題存在）。"""
+    cfg.max_peak_drawdown_pct = 0.20
+    officer.check_entry(equity=5000.0, price=100.0, ts="2026-07-01", direction=1)  # 建立 peak=5000
+    # testnet 重置：餘額驟降到 100（新一輪虛擬資金），但 peak 沒被重置
+    d = officer.check_entry(equity=100.0, price=100.0, ts="2026-07-02", direction=1)
+    assert d.allow is False   # 重置後的合理小額波動也會被舊 peak 誤判成 -98% 回撤
+
+
+def test_reset_equity_peak_clears_after_testnet_reset(officer, cfg):
+    """修復：呼叫 reset_equity_peak() 後，新的 equity 立刻成為新 peak，不再誤觸熔斷。"""
+    cfg.max_peak_drawdown_pct = 0.20
+    officer.check_entry(equity=5000.0, price=100.0, ts="2026-07-01", direction=1)
+    officer.reset_equity_peak()
+    d = officer.check_entry(equity=100.0, price=100.0, ts="2026-07-02", direction=1)
+    assert d.allow is True   # peak 已跟著重置 → 100 是新高點，回撤 0%
+    assert officer._equity_peak == 100.0

@@ -228,6 +228,53 @@ class TestFibChannelStrategy:
         assert strat.signal(row, 0) == 0
 
 
+class TestFibChannelOrderFlow:
+    """訂單流閘門（use_structure）：進場方向須與主動買賣盤失衡一致。
+
+    taker_ratio_s = 平滑後主動買盤佔比 ∈ [0,1]（>0.5 買盤壓過賣盤）。
+      做多需 ≥ of_long_min(0.45)；做空需 ≤ of_short_max(0.55)。
+      use_structure=False（預設）/ 缺欄 / NaN → 一律放行（向後相容）。
+    """
+
+    def _row(self, taker, ch_dir=1.0, pos=0.10):
+        """進場用 row：pos < entry_zone(0.30) 在進場區；無 regime → 閘門放行。"""
+        r = {"fib_ch_pos": pos, "fib_ch_dir": ch_dir, "close": 100.0}
+        if taker is not None:
+            r["taker_ratio_s"] = taker
+        return r
+
+    def test_default_off_allows_any_orderflow(self):
+        """預設 use_structure=False → 訂單流不影響進場（不改既有行為）。"""
+        strat = build_strategy("fib_channel")
+        assert strat.signal(self._row(0.01, ch_dir=1.0), 0) == 1   # 極低買盤仍放行
+
+    def test_long_blocked_when_sellers_dominant(self):
+        strat = build_strategy("fib_channel", use_structure=True)
+        assert strat.signal(self._row(0.30, ch_dir=1.0), 0) == 0   # 買盤佔比 0.30 < 0.45 → 擋多
+
+    def test_long_allowed_when_buyers_dominant(self):
+        strat = build_strategy("fib_channel", use_structure=True)
+        assert strat.signal(self._row(0.60, ch_dir=1.0), 0) == 1   # 0.60 ≥ 0.45 → 放行做多
+
+    def test_short_blocked_when_buyers_dominant(self):
+        strat = build_strategy("fib_channel", use_structure=True)
+        assert strat.signal(self._row(0.70, ch_dir=-1.0), 0) == 0  # 0.70 > 0.55 → 擋空
+
+    def test_short_allowed_when_sellers_dominant(self):
+        strat = build_strategy("fib_channel", use_structure=True)
+        assert strat.signal(self._row(0.30, ch_dir=-1.0), 0) == -1  # 0.30 ≤ 0.55 → 放行做空
+
+    def test_missing_column_allows_entry(self):
+        """缺 taker_ratio_s（合成資料）→ 即使閘門開啟仍放行（優雅退化）。"""
+        strat = build_strategy("fib_channel", use_structure=True)
+        assert strat.signal(self._row(None, ch_dir=1.0), 0) == 1
+
+    def test_prepare_adds_taker_ratio_column(self):
+        strat = build_strategy("fib_channel", use_structure=True)
+        out = strat.prepare(_df(120, "up"))
+        assert "taker_ratio_s" in out.columns
+
+
 class TestFibChannelMinWidth:
     """通道寬度過濾：通道太窄（壓縮行情）時拒絕進場，避免小幅震盪過度交易。
 

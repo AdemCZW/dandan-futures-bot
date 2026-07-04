@@ -230,6 +230,39 @@ def read_trades_db(limit: int = 50, mode: str | None = None,
             return []
 
 
+def implied_open_position(rows: list[dict], dust: float = 1e-9) -> dict | None:
+    """從交易紀錄推算「目前是否仍有未平倉的 entry」。
+
+    輸入為 read_trades_db 的格式（最新在最前，每列含 side/price/qty）。
+    由舊到新走一遍，維護一個開倉狀態：
+      · entry / entry_short → 開新倉（覆蓋既有，連續 entry 無 exit 時以最後一筆為準）
+      · scale_out           → 遞減剩餘量，歸零即視為平倉
+      · exit*               → 平倉、清空
+    回傳未平倉 entry dict {side, price, qty, dir}（dir: 1 多 / -1 空）或 None。
+
+    用途：重啟還原時，若 DB 顯示仍持倉但交易所已空手（狀態檔被 railway up 清掉、
+    交易所端 STOP/TP 已觸發平倉但漏記），據此補記遺漏的平倉，避免該筆交易與損益消失。
+    """
+    open_pos = None
+    for t in reversed(rows):                       # 轉時間正序（最舊→最新）
+        side = t.get("side", "")
+        if side in ("entry", "entry_short"):
+            open_pos = {
+                "side": side,
+                "price": float(t.get("price", 0.0)),
+                "qty": float(t.get("qty", 0.0)),
+                "dir": 1 if side == "entry" else -1,
+            }
+        elif side == "scale_out":
+            if open_pos is not None:
+                open_pos["qty"] -= float(t.get("qty", 0.0))
+                if open_pos["qty"] <= dust:
+                    open_pos = None
+        elif side.startswith("exit"):
+            open_pos = None
+    return open_pos
+
+
 def _print_tail(n: int = 20, db_path: str = "trades.db") -> None:
     rows_raw = read_trades_db(limit=n, db_path=db_path)
     if not rows_raw:
