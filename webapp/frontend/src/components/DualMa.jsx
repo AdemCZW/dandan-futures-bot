@@ -3,6 +3,7 @@ import { createChart, CrosshairMode, CandlestickSeries, LineSeries, createSeries
 import { api } from '../api'
 import { Plain } from './Hint'
 import { getChartColors, useTheme } from '../lib/theme.js'
+import { createBackoffState, fetchBinancePublic } from '../lib/binancePoll'
 
 // 雙均線系統版面（2026-07-05，還原 YouTube 分析的六線密集/發散系統）。
 // MA20/60/120 + EMA20/60/120 六線同框；六線緊密糾結＝密集（盤整），
@@ -122,12 +123,12 @@ export default function DualMa() {
   useEffect(() => {
     setWsReady(false)
     let alive = true
+    const backoff = createBackoffState()
 
     async function poll() {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       try {
-        const res = await fetch(BINANCE_KLINES(symbol, tf, 2))
-        const arr = await res.json()
+        const arr = await fetchBinancePublic(BINANCE_KLINES(symbol, tf, 2), backoff)
         if (!alive || !Array.isArray(arr) || !arr.length) return
         const series = seriesRef.current.candles
         if (!series) return

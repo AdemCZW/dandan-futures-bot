@@ -3,6 +3,7 @@ import { createChart, CrosshairMode, CandlestickSeries, LineSeries, createSeries
 import { api } from '../api'
 import { Plain } from './Hint'
 import { getChartColors, useTheme } from '../lib/theme.js'
+import { createBackoffState, fetchBinancePublic } from '../lib/binancePoll'
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
 const TFS = ['1h', '4h', '1d']
@@ -166,12 +167,12 @@ export default function Chart() {
   useEffect(() => {
     setWsReady(false)
     let alive = true
+    const backoff = createBackoffState()
 
     async function poll() {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       try {
-        const res = await fetch(BINANCE_KLINES(symbol, tf, 2))
-        const arr = await res.json()
+        const arr = await fetchBinancePublic(BINANCE_KLINES(symbol, tf, 2), backoff)
         if (!alive || !Array.isArray(arr) || !arr.length) return
         const series = seriesRef.current.candles
         if (!series) return

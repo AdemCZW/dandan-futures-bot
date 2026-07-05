@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import MiniChart from './MiniChart'
 import { pairTrades, calcBalances, lossStreak, roiPct, holdDuration, exitReason } from '../lib/trades'
+import { createBackoffState, fetchBinancePublic } from '../lib/binancePoll'
 import Hint, { Plain } from './Hint'
 
 const BOT_COLORS   = ['var(--bot1)', 'var(--bot2)', 'var(--bot3)', 'var(--bot4)']
@@ -675,15 +676,17 @@ export default function Live() {
   useEffect(() => {
     if (!symbolKey) return
     const symbols = symbolKey.split(',')
+    const backoff = createBackoffState()   // 9 個 symbol 共用一個退避狀態（同一個 IP 被封）
 
     async function fetchPrices() {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
       const update = {}
       await Promise.all(symbols.map(async sym => {
         try {
-          const res  = await fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`)
-          const data = await res.json()
-          const p    = parseFloat(data.price)
+          const data = await fetchBinancePublic(
+            `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`, backoff)
+          if (!data) return                // 429/418 或封鎖中：這輪跳過，不重試
+          const p = parseFloat(data.price)
           if (p > 0) update[sym] = p
         } catch {}
       }))

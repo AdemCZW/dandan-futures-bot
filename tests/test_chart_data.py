@@ -152,3 +152,146 @@ def test_ma6_signal_types_match_strategy_columns():
     assert by_type.get("breakout", 0) == int(prep["is_breakout"].sum())
     assert by_type.get("pullback1", 0) == int(prep["is_first_pullback"].sum())
     assert by_type.get("pullback2", 0) == int(prep["is_second_pullback"].sum())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# _fetch_ohlcv_df 快取 + 429/418 退避（2026-07-06）：real fetch（source="testnet"，
+# 其實是打 fapi.binance.com 公開合約 API）原本每次呼叫都重新打 Binance、完全沒有
+# 快取或退避——今天測試+部署期間反覆打 /ma6 把伺服器的共用 IP 打到被 Binance
+# 回 418(IP已被封)。修法：短 TTL 快取 + 429/418 退避（記錄封鎖到期時間，封鎖中
+# 有舊資料就先給舊的、沒有就明確報錯，不再重複觸發/延長封鎖）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+import urllib.error
+
+
+def _raw_kline(open_time_ms, price=100.0):
+    return [open_time_ms, str(price), str(price + 1), str(price - 1), str(price),
+            "1000", open_time_ms + 1, "100000", 10, "500", "50000", "0"]
+
+
+def _reset_chart_data_cache():
+    from core import chart_data
+    chart_data._KLINE_CACHE.clear()
+    chart_data._BINANCE_BACKOFF["blocked_until"] = 0.0
+
+
+def test_fetch_ohlcv_df_caches_within_ttl(monkeypatch):
+    """TTL 窗口內重複呼叫同一 symbol/interval/limit → 不重新打 Binance。"""
+    from core import chart_data
+    _reset_chart_data_cache()
+
+    calls = {"n": 0}
+
+    class FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            import json
+            return json.dumps([_raw_kline(1_000_000)]).encode()
+
+    def fake_urlopen(req, timeout=10):
+        calls["n"] += 1
+        return FakeResp()
+
+    monkeypatch.setattr(chart_data.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(chart_data, "_now", lambda: 1000.0)
+
+    chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")
+    chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")
+    assert calls["n"] == 1, "TTL 窗口內第二次呼叫應該吃快取，不重打 Binance"
+
+
+def test_fetch_ohlcv_df_refetches_after_ttl_expires(monkeypatch):
+    """TTL 過期後應該重新打 Binance。"""
+    from core import chart_data
+    _reset_chart_data_cache()
+
+    calls = {"n": 0}
+
+    class FakeResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            import json
+            return json.dumps([_raw_kline(1_000_000)]).encode()
+
+    def fake_urlopen(req, timeout=10):
+        calls["n"] += 1
+        return FakeResp()
+
+    monkeypatch.setattr(chart_data.urllib.request, "urlopen", fake_urlopen)
+    now_box = {"t": 1000.0}
+    monkeypatch.setattr(chart_data, "_now", lambda: now_box["t"])
+
+    chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")
+    now_box["t"] = 1000.0 + chart_data._KLINE_CACHE_TTL + 1
+    chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")
+    assert calls["n"] == 2, "TTL 過期後應該重新打一次"
+
+
+def test_fetch_ohlcv_df_backs_off_on_429_and_serves_stale_cache(monkeypatch):
+    """429 時記錄退避；若有舊快取，用舊資料頂上，不整個報錯，也不再打第二次。"""
+    from core import chart_data
+    _reset_chart_data_cache()
+
+    calls = {"n": 0}
+
+    class OkResp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self):
+            import json
+            return json.dumps([_raw_kline(1_000_000)]).encode()
+
+    def fake_urlopen_ok(req, timeout=10):
+        calls["n"] += 1
+        return OkResp()
+
+    now_box = {"t": 1000.0}
+    monkeypatch.setattr(chart_data, "_now", lambda: now_box["t"])
+    monkeypatch.setattr(chart_data.urllib.request, "urlopen", fake_urlopen_ok)
+    chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")   # 先成功一次、灌快取
+    assert calls["n"] == 1
+
+    now_box["t"] = 1000.0 + chart_data._KLINE_CACHE_TTL + 1     # 讓快取過期，逼下一次真的發請求
+
+    def fake_urlopen_429(req, timeout=10):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url if hasattr(req, "full_url") else "x",
+                                     429, "Too Many Requests", {"Retry-After": "30"}, None)
+
+    monkeypatch.setattr(chart_data.urllib.request, "urlopen", fake_urlopen_429)
+    df = chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")
+    assert calls["n"] == 2
+    assert df is not None and len(df) > 0, "429 時應該用舊快取頂上，不能整個掛掉"
+
+    # 退避期間再呼叫一次：不應該再打 Binance（避免延長封鎖）
+    now_box["t"] += 5
+    chart_data._fetch_ohlcv_df("BTCUSDT", "4h", 5, "testnet")
+    assert calls["n"] == 2, "退避期間不該再打 Binance"
+
+
+def test_fetch_ohlcv_df_raises_clearly_when_rate_limited_with_no_cache(monkeypatch):
+    """第一次呼叫就被 418，且沒有舊快取可頂 → 明確報錯（不是靜默回傳壞資料）。"""
+    from core import chart_data
+    _reset_chart_data_cache()
+
+    calls = {"n": 0}
+
+    def fake_urlopen_418(req, timeout=10):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(req.full_url if hasattr(req, "full_url") else "x",
+                                     418, "I'm a teapot", {}, None)
+
+    monkeypatch.setattr(chart_data.urllib.request, "urlopen", fake_urlopen_418)
+    monkeypatch.setattr(chart_data, "_now", lambda: 1000.0)
+
+    with pytest.raises(Exception):
+        chart_data._fetch_ohlcv_df("LINKUSDT", "4h", 5, "testnet")
+    assert calls["n"] == 1
+
+    # 封鎖中再呼叫：不該再打 Binance（沒有 Retry-After 時 418 用比 429 更長的預設退避）
+    with pytest.raises(Exception):
+        chart_data._fetch_ohlcv_df("LINKUSDT", "4h", 5, "testnet")
+    assert calls["n"] == 1, "封鎖中不該再打 Binance"
