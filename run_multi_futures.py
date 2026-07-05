@@ -33,6 +33,28 @@ _DEFAULTS = {
 }
 
 
+# 允許 BOTS_CONFIG 的 "risk" 區塊逐台覆蓋的 Config 出場/風控欄位（白名單）。
+# 刻意不含金鑰/連線類欄位——只開放出場機制參數，防注入亂設敏感欄。
+_RISK_OVERRIDE_WHITELIST = frozenset({
+    "tp_R_mult", "use_fixed_tp", "tp_far_factor", "chand_mult",
+    "atr_mult_sl", "atr_mult_tp", "take_profit_pct", "stop_loss_pct",
+    "max_peak_drawdown_pct",
+})
+
+
+def apply_risk_overrides(cfg, risk_conf) -> None:
+    """把 BOTS_CONFIG 的 "risk" dict 逐台套到 cfg（白名單，非白名單鍵靜默忽略）。
+
+    用途：讓每台 bot 用不同的出場設定（例如 smc 籃子升到 tp_R_mult=3.0，經切半驗證
+    優於預設 2.0），不必動全域 env、不必改策略碼。None/空 → no-op。
+    """
+    if not risk_conf:
+        return
+    for k, v in risk_conf.items():
+        if k in _RISK_OVERRIDE_WHITELIST:
+            setattr(cfg, k, v)
+
+
 def parse_bots_config(raw, defaults=None):
     """解析 BOTS_CONFIG（JSON 陣列）成正規化 bot 設定 list。
 
@@ -394,6 +416,7 @@ def build_trader(worker):
     cfg.strategy_params = {**cfg.strategy_params, **(conf.get("params") or {})}
     if conf.get("risk_per_trade") is not None:
         cfg.risk_per_trade = float(conf["risk_per_trade"])
+    apply_risk_overrides(cfg, conf.get("risk"))   # 逐台出場參數覆蓋（如 tp_R_mult=3.0）
 
     if not cfg.futures_api_key or not cfg.futures_api_secret:
         raise RuntimeError(f"[{worker.id}] 缺合約測試網金鑰（BINANCE_FUTURES_TESTNET_*）")

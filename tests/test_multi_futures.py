@@ -653,3 +653,38 @@ def test_cors_preflight_headers_allow_close_token_header():
     assert headers["Access-Control-Allow-Origin"] == "*"
     assert "POST" in headers["Access-Control-Allow-Methods"]
     assert "x-close-token" in headers["Access-Control-Allow-Headers"].lower()
+
+
+# ── BOTS_CONFIG 出場參數逐台覆蓋（2026-07-05）：apply_risk_overrides 白名單設 cfg ──
+def test_apply_risk_overrides_sets_whitelisted_fields():
+    cfg = Config()
+    assert cfg.tp_R_mult == 2.0                       # 預設
+    MM.apply_risk_overrides(cfg, {"tp_R_mult": 3.0, "use_fixed_tp": False,
+                                  "atr_mult_sl": 1.5, "chand_mult": 4.0})
+    assert cfg.tp_R_mult == 3.0
+    assert cfg.use_fixed_tp is False
+    assert cfg.atr_mult_sl == 1.5
+    assert cfg.chand_mult == 4.0
+
+
+def test_apply_risk_overrides_ignores_non_whitelisted():
+    """非白名單鍵（防注入亂設 cfg，例如金鑰欄）一律忽略、不拋例外。"""
+    cfg = Config()
+    original_key = cfg.futures_api_key
+    MM.apply_risk_overrides(cfg, {"futures_api_key": "HACKED", "tp_R_mult": 3.0})
+    assert cfg.futures_api_key == original_key        # 未被亂改
+    assert cfg.tp_R_mult == 3.0                        # 白名單的仍生效
+
+
+def test_apply_risk_overrides_none_or_empty_is_noop():
+    cfg = Config()
+    MM.apply_risk_overrides(cfg, None)
+    MM.apply_risk_overrides(cfg, {})
+    assert cfg.tp_R_mult == 2.0                         # 不變
+
+
+def test_parse_bots_config_preserves_risk_block():
+    raw = json.dumps([{"id": "b1", "symbol": "BTCUSDT", "strategy": "smc_structure",
+                       "interval": "4h", "risk": {"tp_R_mult": 3.0}}])
+    bots = MM.parse_bots_config(raw)
+    assert bots[0]["risk"] == {"tp_R_mult": 3.0}
