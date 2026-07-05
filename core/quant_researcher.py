@@ -1249,7 +1249,12 @@ class MaConvergencePullbackStrategy(Strategy):
                 # 多週期共振（2026-07-05，文獻：雙均線最常見的假訊號過濾器）：
                 # 開啟後進場方向須與日線 MA 排列一致（htf_trend=0 中性/暖機也擋，
                 # 嚴格共振語意）。預設關 → 行為與舊版逐位元一致。
-                "use_htf_filter": False, "htf_fast": 20, "htf_slow": 60}
+                "use_htf_filter": False, "htf_fast": 20, "htf_slow": 60,
+                # 2026-07-06：is_breakout 補「必須先真的密集過」的前提（見下方 prepare()）。
+                # 預設關＝b9 現行線上邏輯逐位元不變；圖表面板（core.chart_data.
+                # ma6_overlay_data）明確開啟，只影響顯示，不動 b9 實際下單依據。
+                # 之後若要讓 b9 也吃這個修正，再由使用者決定開啟 + 重新回測。
+                "require_density_for_breakout": False}
     allow_short = True
     regime_pref = "any"          # 趨勢判斷已內建在 trend_dir，不疊加外層 regime 閘門
 
@@ -1285,12 +1290,12 @@ class MaConvergencePullbackStrategy(Strategy):
 
         # 狀態機（單次正向掃描）：trend_dir 在同向排列持續期間維持 ±1，排列打破歸零；
         # is_first_pullback 在每個新趨勢區間內最多標記一次 True（首次觸及 20 均線不破）。
-        # is_breakout（方法一）：密集→發散的突破當根，且必須先真的密集過（seen_density），
-        # 否則只是排列剛好對齊+spread夠大（可能是已經在半路的強趨勢），不算「糾結後發散」。
-        # 2026-07-06 修正：原本 is_breakout 沒檢查是否曾密集，會把真實幣種資料上「半路的
-        # 強趨勢」誤標成突破，連帶讓 trend_dir 起點跟著跑偏、is_first_pullback 位置對不上
-        # 使用者參照的影片系統。此修正會改變 trend_dir / is_first_pullback 的觸發時機
-        # （即 b9 實際下單依據），是刻意的行為變更，非純加法——部署前需重新回測驗證。
+        # is_breakout（方法一）：密集→發散的突破當根。require_density_for_breakout 開啟時，
+        # 必須先真的密集過（seen_density）才算數，否則只是排列剛好對齊+spread夠大（可能是
+        # 已經在半路的強趨勢），不算「糾結後發散」——2026-07-06：原本沒這個前提，會把真實
+        # 幣種資料上「半路的強趨勢」誤標成突破。此開關預設關，只給圖表面板用（見上方
+        # defaults 註解），b9 實盤 trend_dir / is_first_pullback 逐位元不變。
+        require_density = bool(self.params.get("require_density_for_breakout", False))
         n = len(out)
         trend_dir = np.zeros(n)
         first_pullback = np.zeros(n, dtype=bool)
@@ -1340,15 +1345,17 @@ class MaConvergencePullbackStrategy(Strategy):
                         second_pullback[i] = True
                         armed2 = False
             else:
-                # 沒有趨勢期間：先累積「是否真的密集過」，密集突破必須先經歷密集，
-                # 否則只是排列剛好對齊+spread夠大（可能是已經在半路的強趨勢），不算數。
+                # 沒有趨勢期間：先累積「是否真的密集過」；require_density 開啟時，
+                # 密集突破必須先經歷密集才算數（否則只是排列剛好對齊+spread夠大，
+                # 可能是已經在半路的強趨勢）。關閉時（預設）維持舊行為，不檢查前提。
                 if dens[i]:
                     seen_density = True
-                if db[i] and seen_density:
+                density_ok = seen_density or not require_density
+                if db[i] and density_ok:
                     cur_dir, used, armed2 = 1, False, False
                     breakout[i] = True          # 方法一：密集突破當根
                     seen_density = False
-                elif de[i] and seen_density:
+                elif de[i] and density_ok:
                     cur_dir, used, armed2 = -1, False, False
                     breakout[i] = True
                     seen_density = False

@@ -215,9 +215,15 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                      limit: int = 300, source: str = "testnet") -> dict:
     """六線密集/發散圖表資料（2026-07-05，使用者要求還原 YouTube 雙均線系統）。
 
-    直接重用 MaConvergencePullbackStrategy.prepare()（單一事實來源）——圖上畫的
-    密集/發散判斷與 b9（LINKUSDT 觀察倉）實際下單依據的邏輯完全一致，不重寫
+    直接重用 MaConvergencePullbackStrategy.prepare()（單一事實來源）——不重寫
     一份平行的狀態機（否則圖表跟真實訊號兩邊各自維護、容易悄悄不同步）。
+
+    2026-07-06：圖表面板明確開啟 require_density_for_breakout=True，修正
+    is_breakout 誤把「已經在半路的強趨勢」標成密集突破的 bug（見
+    tests/test_ma_convergence_pullback.py::test_breakout_requires_prior_density_when_enabled）。
+    此開關預設關閉，b9（LINKUSDT 觀察倉）實際下單依據的 trend_dir / is_first_pullback
+    暫時不受影響、逐位元維持現行線上行為——圖表跟 b9 實盤在這個修正上刻意分岔，
+    等使用者確認要讓 b9 也吃這個修正後再回頭打開。
 
     回傳 lightweight-charts 格式：candles + ma20/ma60/ma120/ema20/ema60/ema120
     六條線 + ma6_signals（三型進場訊號：breakout 密集突破/pullback1 首次回踩/
@@ -227,7 +233,8 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
     from core.quant_researcher import build_strategy
 
     df = _fetch_ohlcv_df(symbol, interval, limit, source)
-    out = build_strategy("ma_convergence_pullback").prepare(df)
+    out = build_strategy("ma_convergence_pullback",
+                         require_density_for_breakout=True).prepare(df)
 
     def _ts(idx):
         return int(idx.timestamp())

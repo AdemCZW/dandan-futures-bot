@@ -190,12 +190,24 @@ def _pure_trend_no_consolidation_df(n=260):
                          "close": close, "volume": np.full(n, 1000.0)}, index=idx)
 
 
-def test_breakout_requires_prior_density_not_just_wide_spread():
-    """六線從未收斂過，直接跳進 spread>divergence_thresh 的排列 → 不算「密集突破」，
-    is_breakout 不該觸發（也不該啟動 trend_dir），因為根本沒有「糾結後發散」這件事。
-    （原本的實作只看當根排列+spread，沒檢查是否真的經歷過密集，會在真實幣種資料
-    上把「已經在半路的强趨勢」誤標成密集突破，訊號位置因此跟參考的六線系統對不上。）"""
+def test_breakout_default_still_fires_without_prior_density():
+    """回歸鎖：require_density_for_breakout 預設關閉時，行為與 b9 現行線上邏輯逐位元
+    不變（即使這是原本的 bug）——b9 的實際下單邏輯在使用者明確要求前不能被動到。"""
     s = build_strategy("ma_convergence_pullback")
+    assert s.params.get("require_density_for_breakout") is False
+    out = s.prepare(_pure_trend_no_consolidation_df()).dropna().reset_index(drop=True)
+    assert out["is_density"].sum() == 0
+    assert out["is_breakout"].sum() == 1, "預設關閉時維持舊行為（不檢查密集前提）"
+
+
+def test_breakout_requires_prior_density_when_enabled():
+    """開啟 require_density_for_breakout 後：六線從未收斂過，直接跳進
+    spread>divergence_thresh 的排列 → 不算「密集突破」，is_breakout 不該觸發
+    （也不該啟動 trend_dir），因為根本沒有「糾結後發散」這件事。
+    （原本的實作只看當根排列+spread，沒檢查是否真的經歷過密集，會在真實幣種資料
+    上把「已經在半路的强趨勢」誤標成密集突破，訊號位置因此跟參考的六線系統對不上。
+    此開關只給圖表面板用，b9 實盤暫不啟用——見 core.chart_data.ma6_overlay_data。）"""
+    s = build_strategy("ma_convergence_pullback", require_density_for_breakout=True)
     out = s.prepare(_pure_trend_no_consolidation_df()).dropna().reset_index(drop=True)
     assert out["is_density"].sum() == 0                # 前提：全程從未真正密集過
     assert out["is_breakout"].sum() == 0, "從未密集過，不應該有『密集突破』訊號"

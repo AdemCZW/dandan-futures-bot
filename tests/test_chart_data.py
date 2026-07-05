@@ -101,15 +101,19 @@ def test_ma6_signals_have_time_and_direction():
 
 def test_ma6_overlay_data_uses_same_strategy_as_live_bot():
     """驗證圖表用的是 MaConvergencePullbackStrategy 本尊算出來的欄位，不是另外重寫的邏輯
-    （避免圖表畫的密集/發散跟 b9 實際下單依據的訊號不一致）。"""
+    （避免圖表畫的密集/發散跟策略本身的訊號不一致）。
+
+    2026-07-06：圖表明確開啟 require_density_for_breakout=True（修正 is_breakout 誤判
+    bug），b9 實盤暫時維持預設關閉——兩者在這個參數上刻意分岔，故這裡的 expected
+    也要用同樣的參數建構，才是跟圖表對齊的「單一事實來源」比較基準。"""
     from core.chart_data import ma6_overlay_data
     from core.quant_researcher import build_strategy
     from run_optimize import make_synthetic
     df = make_synthetic(300)
-    expected = build_strategy("ma_convergence_pullback").prepare(df.copy())
+    expected = build_strategy("ma_convergence_pullback",
+                              require_density_for_breakout=True).prepare(df.copy())
     out = ma6_overlay_data(source="synthetic", limit=300)
     # pullback1 型訊號數量應與策略本身算出的 is_first_pullback True 數一致
-    # （b9 只下單 pullback1，這條保證圖上的首踩標記數 = b9 進場依據數）
     n_pb1 = sum(1 for s in out["ma6_signals"] if s["type"] == "pullback1")
     assert n_pb1 == int(expected["is_first_pullback"].sum())
 
@@ -132,12 +136,15 @@ def test_ma6_returns_density_zones():
 
 
 def test_ma6_signal_types_match_strategy_columns():
-    """圖表三型訊號數量 = 策略欄位 is_breakout/is_first_pullback/is_second_pullback 的 True 數。"""
+    """圖表三型訊號數量 = 策略欄位 is_breakout/is_first_pullback/is_second_pullback 的 True 數。
+
+    圖表用 require_density_for_breakout=True（見上一測試的說明），比較基準要用同樣參數。"""
     from core.chart_data import ma6_overlay_data
     from core.quant_researcher import build_strategy
     from run_optimize import make_synthetic
     df = make_synthetic(400)
-    prep = build_strategy("ma_convergence_pullback").prepare(df.copy())
+    prep = build_strategy("ma_convergence_pullback",
+                          require_density_for_breakout=True).prepare(df.copy())
     out = ma6_overlay_data(source="synthetic", limit=400)
     by_type = {}
     for s in out["ma6_signals"]:
