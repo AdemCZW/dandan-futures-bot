@@ -181,6 +181,27 @@ def test_breakout_fires_at_density_to_divergence_transition():
             assert out.loc[i - 1, "trend_dir"] == 0            # 前一根還在密集（0）
 
 
+def _pure_trend_no_consolidation_df(n=260):
+    """從第一根有效資料開始就是單邊急拉，六線從未真正密集過（is_density 全程 False）
+    ——用來驗證「密集→發散」的因果關係，而非只看排列瞬間對齊+spread夠大。"""
+    idx = pd.date_range("2026-01-01", periods=n, freq="4h")
+    close = 100 + np.cumsum(np.full(n, 0.8))
+    return pd.DataFrame({"open": close, "high": close + 0.6, "low": close - 0.6,
+                         "close": close, "volume": np.full(n, 1000.0)}, index=idx)
+
+
+def test_breakout_requires_prior_density_not_just_wide_spread():
+    """六線從未收斂過，直接跳進 spread>divergence_thresh 的排列 → 不算「密集突破」，
+    is_breakout 不該觸發（也不該啟動 trend_dir），因為根本沒有「糾結後發散」這件事。
+    （原本的實作只看當根排列+spread，沒檢查是否真的經歷過密集，會在真實幣種資料
+    上把「已經在半路的强趨勢」誤標成密集突破，訊號位置因此跟參考的六線系統對不上。）"""
+    s = build_strategy("ma_convergence_pullback")
+    out = s.prepare(_pure_trend_no_consolidation_df()).dropna().reset_index(drop=True)
+    assert out["is_density"].sum() == 0                # 前提：全程從未真正密集過
+    assert out["is_breakout"].sum() == 0, "從未密集過，不應該有『密集突破』訊號"
+    assert (out["trend_dir"] == 0).all(), "沒有合法的突破起點，趨勢狀態機不該啟動"
+
+
 def test_second_pullback_requires_first_pullback_earlier():
     """二次回踩只能出現在同段趨勢中、首次回踩之後（不可能先有二踩再有首踩）。"""
     s = build_strategy("ma_convergence_pullback")

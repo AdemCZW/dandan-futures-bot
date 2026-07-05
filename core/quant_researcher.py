@@ -1280,14 +1280,17 @@ class MaConvergencePullbackStrategy(Strategy):
         divergent_bull = bull_order & (out["spread"] > thresh)
         divergent_bear = bear_order & (out["spread"] > thresh)
 
-        # 六線密集（收斂盤整）：spread ≤ density_thresh。純圖表顯示用，向量化即可。
+        # 六線密集（收斂盤整）：spread ≤ density_thresh。
         out["is_density"] = out["spread"] <= float(self.params["density_thresh"])
 
         # 狀態機（單次正向掃描）：trend_dir 在同向排列持續期間維持 ±1，排列打破歸零；
         # is_first_pullback 在每個新趨勢區間內最多標記一次 True（首次觸及 20 均線不破）。
-        # is_breakout（方法一）：密集→發散的突破當根；is_second_pullback：首踩後的下一次
-        # 距離足夠的回踩。三者都是「純加法」——first_pullback / trend_dir 的計算邏輯
-        # 逐字不變（下方 used 分支原封不動），故 signal() 吃的欄位不變、b9 行為零改變。
+        # is_breakout（方法一）：密集→發散的突破當根，且必須先真的密集過（seen_density），
+        # 否則只是排列剛好對齊+spread夠大（可能是已經在半路的強趨勢），不算「糾結後發散」。
+        # 2026-07-06 修正：原本 is_breakout 沒檢查是否曾密集，會把真實幣種資料上「半路的
+        # 強趨勢」誤標成突破，連帶讓 trend_dir 起點跟著跑偏、is_first_pullback 位置對不上
+        # 使用者參照的影片系統。此修正會改變 trend_dir / is_first_pullback 的觸發時機
+        # （即 b9 實際下單依據），是刻意的行為變更，非純加法——部署前需重新回測驗證。
         n = len(out)
         trend_dir = np.zeros(n)
         first_pullback = np.zeros(n, dtype=bool)
@@ -1296,6 +1299,7 @@ class MaConvergencePullbackStrategy(Strategy):
         cur_dir = 0
         used = False
         armed2 = False              # 首踩後、price 已離開 MA20 夠遠 → 可偵測二次回踩
+        seen_density = False        # 目前這段「無趨勢」期間，六線是否真的密集過一次
         tol = float(self.params["pullback_tolerance"])
         rearm = float(self.params["rearm_gap"])
         close_v = out["close"].to_numpy()
@@ -1306,13 +1310,14 @@ class MaConvergencePullbackStrategy(Strategy):
         de = divergent_bear.to_numpy()
         bo = bull_order.to_numpy()
         be = bear_order.to_numpy()
+        dens = out["is_density"].to_numpy()
 
         for i in range(n):
             if np.isnan(ma20_v[i]):
                 continue
             if cur_dir == 1:
                 if not bo[i]:               # 多頭排列被打破 → 趨勢結束
-                    cur_dir, used, armed2 = 0, False, False
+                    cur_dir, used, armed2, seen_density = 0, False, False, False
                 elif not used and low_v[i] <= ma20_v[i] * (1 + tol) and close_v[i] > ma20_v[i] * (1 - tol):
                     first_pullback[i] = True
                     used = True
@@ -1324,7 +1329,7 @@ class MaConvergencePullbackStrategy(Strategy):
                         armed2 = False
             elif cur_dir == -1:
                 if not be[i]:
-                    cur_dir, used, armed2 = 0, False, False
+                    cur_dir, used, armed2, seen_density = 0, False, False, False
                 elif not used and high_v[i] >= ma20_v[i] * (1 - tol) and close_v[i] < ma20_v[i] * (1 + tol):
                     first_pullback[i] = True
                     used = True
@@ -1335,12 +1340,18 @@ class MaConvergencePullbackStrategy(Strategy):
                         second_pullback[i] = True
                         armed2 = False
             else:
-                if db[i]:
+                # 沒有趨勢期間：先累積「是否真的密集過」，密集突破必須先經歷密集，
+                # 否則只是排列剛好對齊+spread夠大（可能是已經在半路的強趨勢），不算數。
+                if dens[i]:
+                    seen_density = True
+                if db[i] and seen_density:
                     cur_dir, used, armed2 = 1, False, False
                     breakout[i] = True          # 方法一：密集突破當根
-                elif de[i]:
+                    seen_density = False
+                elif de[i] and seen_density:
                     cur_dir, used, armed2 = -1, False, False
                     breakout[i] = True
+                    seen_density = False
             trend_dir[i] = cur_dir
 
         out["trend_dir"] = trend_dir
