@@ -750,7 +750,10 @@ class SmcStructureStrategy(Strategy):
     defaults = {"pivot_left": 5, "pivot_right": 3, "atr_period": 14,
                 "require_fvg": False, "regime_confirm_bars": 1,
                 "ema_fast_period": 20, "ema_slow_period": 50,
-                "use_ema_filter": True}
+                "use_ema_filter": True,
+                # 多週期共振（2026-07-05）：開啟後 BOS 進場方向須與日線 MA 排列一致。
+                # 預設關 → 行為與已驗證的線上籃子逐位元一致。
+                "use_htf_filter": False, "htf_fast": 20, "htf_slow": 60}
     allow_short = True
     regime_pref = "trend"
 
@@ -761,6 +764,10 @@ class SmcStructureStrategy(Strategy):
         out["atr"] = se.atr(out, int(self.params["atr_period"]))
         out["ema_fast"] = se.ema(out["close"], int(self.params["ema_fast_period"]))
         out["ema_slow"] = se.ema(out["close"], int(self.params["ema_slow_period"]))
+        if bool(self.params.get("use_htf_filter", False)):
+            out["htf_trend"] = se.htf_trend(out, rule="1D",
+                                            fast=int(self.params["htf_fast"]),
+                                            slow=int(self.params["htf_slow"]))
         return self._prepare_regime(out)
 
     def signal(self, row: pd.Series, position: int) -> int:
@@ -786,9 +793,16 @@ class SmcStructureStrategy(Strategy):
         ema_bullish = (not use_ema) or (ema_fast is not None and ema_slow is not None and ema_fast > ema_slow)
         ema_bearish = (not use_ema) or (ema_fast is not None and ema_slow is not None and ema_fast < ema_slow)
 
-        if bos_bull and ema_bullish and (fvg_bull or not require_fvg):
+        # 多週期共振（只擋新進場；上方出場邏輯不經過這裡）
+        htf_ok_bull = htf_ok_bear = True
+        if bool(self.params.get("use_htf_filter", False)):
+            htf = _num(g("htf_trend"))
+            htf_ok_bull = (htf is not None and int(htf) == 1)
+            htf_ok_bear = (htf is not None and int(htf) == -1)
+
+        if bos_bull and ema_bullish and htf_ok_bull and (fvg_bull or not require_fvg):
             return 1
-        if bos_bear and ema_bearish and (fvg_bear or not require_fvg):
+        if bos_bear and ema_bearish and htf_ok_bear and (fvg_bear or not require_fvg):
             return -1
         return 0
 
@@ -1231,7 +1245,11 @@ class MaConvergencePullbackStrategy(Strategy):
                 "divergence_thresh": 0.03, "pullback_tolerance": 0.0,
                 # 密集/二次回踩（圖表顯示用；signal() 仍只吃首次回踩，b9 行為不變）：
                 "density_thresh": 0.015,     # 六線 spread ≤ 此值視為密集（收斂盤整）
-                "rearm_gap": 0.01}           # 首踩後 price 須離開 MA20 此比例才偵測二次回踩
+                "rearm_gap": 0.01,           # 首踩後 price 須離開 MA20 此比例才偵測二次回踩
+                # 多週期共振（2026-07-05，文獻：雙均線最常見的假訊號過濾器）：
+                # 開啟後進場方向須與日線 MA 排列一致（htf_trend=0 中性/暖機也擋，
+                # 嚴格共振語意）。預設關 → 行為與舊版逐位元一致。
+                "use_htf_filter": False, "htf_fast": 20, "htf_slow": 60}
     allow_short = True
     regime_pref = "any"          # 趨勢判斷已內建在 trend_dir，不疊加外層 regime 閘門
 
@@ -1245,6 +1263,11 @@ class MaConvergencePullbackStrategy(Strategy):
         out["ema60"] = se.ema(out["close"], m)
         out["ema120"] = se.ema(out["close"], sl)
         out["atr"] = se.atr(out, 14)
+        # 多週期共振：日線 MA 排列方向（shift(1) 只用已收完日線，見 se.htf_trend）
+        if bool(self.params.get("use_htf_filter", False)):
+            out["htf_trend"] = se.htf_trend(out, rule="1D",
+                                            fast=int(self.params["htf_fast"]),
+                                            slow=int(self.params["htf_slow"]))
 
         lines = out[["ma20", "ma60", "ma120", "ema20", "ema60", "ema120"]]
         out["spread"] = (lines.max(axis=1) - lines.min(axis=1)) / out["close"]
@@ -1343,6 +1366,12 @@ class MaConvergencePullbackStrategy(Strategy):
         first_pb = bool(g("is_first_pullback"))
         if not first_pb:
             return 0
+        # 多週期共振：進場方向須與日線趨勢一致（0=中性/暖機也擋，嚴格版）。
+        # 只擋新進場——上方出場邏輯不經過這裡，持倉管理不受 htf 影響。
+        if bool(self.params.get("use_htf_filter", False)):
+            htf = _num(g("htf_trend"))
+            if htf is None or int(htf) != int(trend_dir):
+                return 0
         if trend_dir == 1:
             return 1
         if trend_dir == -1:

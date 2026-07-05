@@ -1037,3 +1037,51 @@ def test_smc_levels_existing_columns_unchanged():
     # FVG 定義直接可重算驗證
     fvg_bull_expect = (df["high"].shift(2) < df["low"]).astype(float)
     assert (out["fvg_bull"].fillna(0) == fvg_bull_expect.fillna(0)).all()
+
+
+# ── 高週期趨勢過濾 htf_trend（2026-07-05，多週期共振）────────────────────────
+def _htf_df(n=400, drift=0.3):
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    closes = 100 + np.cumsum(np.full(n, drift))
+    return pd.DataFrame({"open": closes, "high": closes + 0.5, "low": closes - 0.5,
+                         "close": closes, "volume": np.full(n, 100.0)}, index=idx)
+
+
+def test_htf_trend_bull_in_clean_uptrend():
+    """乾淨上升趨勢：日線 MA20>MA60 → htf_trend 尾段應為 +1。"""
+    out = se.htf_trend(_htf_df(drift=0.3), rule="1D", fast=20, slow=60)
+    assert out.iloc[-1] == 1
+
+
+def test_htf_trend_bear_in_clean_downtrend():
+    out = se.htf_trend(_htf_df(drift=-0.3), rule="1D", fast=20, slow=60)
+    assert out.iloc[-1] == -1
+
+
+def test_htf_trend_causal_no_lookahead():
+    """因果性：截掉尾巴重算，重疊區間的值必須完全一致（日線只用已收完的根）。"""
+    df = _htf_df(400, drift=0.2)
+    full = se.htf_trend(df, rule="1D", fast=10, slow=30)
+    trunc = se.htf_trend(df.iloc[:-30], rule="1D", fast=10, slow=30)
+    overlap = trunc.index
+    assert (full.loc[overlap].fillna(0) == trunc.fillna(0)).all(), \
+        "截尾後重疊區間值改變 → 用到了未來資料"
+
+
+def test_htf_trend_uses_only_completed_daily_bars():
+    """今日只走到一半時，htf_trend 必須反映『昨日收完』的日線狀態——
+    把今天尚未收完的幾根 4h 大改，今天內的 htf_trend 不得改變。"""
+    df = _htf_df(400, drift=0.2)
+    df2 = df.copy()
+    df2.iloc[-3:, df2.columns.get_loc("close")] = 1.0   # 今天的未收完盤面天翻地覆
+    a = se.htf_trend(df, rule="1D", fast=10, slow=30)
+    b = se.htf_trend(df2, rule="1D", fast=10, slow=30)
+    assert a.iloc[-1] == b.iloc[-1], "當日未收完的變動影響了 htf_trend → 前視洩漏"
+
+
+def test_htf_trend_warmup_is_zero_or_nan_free_index():
+    """暖機期（日線根數不足）回 0（中性、放行由呼叫端決定），index 與輸入一致。"""
+    df = _htf_df(100, drift=0.2)     # 100 根 4h ≈ 16 天，遠不足 60 日 MA
+    out = se.htf_trend(df, rule="1D", fast=20, slow=60)
+    assert len(out) == len(df)
+    assert set(out.unique()).issubset({-1, 0, 1})

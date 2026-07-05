@@ -207,3 +207,54 @@ def test_b9_behavior_unchanged_first_pullback_and_trend_dir_stable():
             if td[seg_start] in (1, -1):
                 assert fp[seg_start:i].sum() <= 1
             seg_start = i
+
+
+# ── 多週期共振過濾（2026-07-05，use_htf_filter 預設關）─────────────────────────
+def test_htf_filter_off_by_default_no_column():
+    s = build_strategy("ma_convergence_pullback")
+    assert s.params.get("use_htf_filter") is False
+
+
+def test_htf_filter_blocks_entry_against_daily_trend():
+    """日線空頭（htf_trend=-1）時，4h 的做多首踩訊號要被擋掉。"""
+    s = build_strategy("ma_convergence_pullback", use_htf_filter=True)
+    r = _row(trend_dir=1, is_first_pullback=True)
+    r["htf_trend"] = -1
+    assert s.signal(r, 0) == 0
+
+
+def test_htf_filter_allows_entry_with_daily_trend():
+    s = build_strategy("ma_convergence_pullback", use_htf_filter=True)
+    r = _row(trend_dir=1, is_first_pullback=True)
+    r["htf_trend"] = 1
+    assert s.signal(r, 0) == 1
+
+
+def test_htf_filter_blocks_when_daily_neutral():
+    """日線中性/暖機（0）→ 共振不成立，不進場（嚴格版語意）。"""
+    s = build_strategy("ma_convergence_pullback", use_htf_filter=True)
+    r = _row(trend_dir=1, is_first_pullback=True)
+    r["htf_trend"] = 0
+    assert s.signal(r, 0) == 0
+
+
+def test_htf_filter_does_not_block_exit():
+    """過濾只擋新進場：持倉中趨勢破壞照樣出場，不受 htf 影響。"""
+    s = build_strategy("ma_convergence_pullback", use_htf_filter=True)
+    r = _row(trend_dir=0)
+    r["htf_trend"] = 1
+    assert s.signal(r, 1) == 0
+
+
+def test_htf_filter_prepare_adds_column_when_enabled():
+    s = build_strategy("ma_convergence_pullback", use_htf_filter=True)
+    out = s.prepare(_mk_df(300))
+    assert "htf_trend" in out.columns
+
+
+def test_htf_filter_off_signal_ignores_htf_column():
+    """開關關閉時，即使資料裡有 htf_trend 欄也不套用（回歸安全網）。"""
+    s = build_strategy("ma_convergence_pullback")
+    r = _row(trend_dir=1, is_first_pullback=True)
+    r["htf_trend"] = -1
+    assert s.signal(r, 0) == 1

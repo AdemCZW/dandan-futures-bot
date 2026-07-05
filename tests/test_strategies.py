@@ -1055,3 +1055,55 @@ def test_cvd_filter_blocks_short_on_bottom_divergence():
 def test_cvd_filter_missing_column_passes():
     s = build_strategy("fib_ema", use_cvd_filter=True)
     assert s._cvd_ok(pd.Series({"close": 100.0}), 1) is True     # 缺 cvd_div → 放行
+
+
+# ── smc_structure 多週期共振（2026-07-05，use_htf_filter 預設關）──────────────
+def _smc_row(bos_bull=0.0, bos_bear=0.0, fvg_bull=0.0, fvg_bear=0.0,
+             ema_fast=110.0, ema_slow=100.0, htf=None):
+    r = {"bos_bull": bos_bull, "bos_bear": bos_bear,
+         "fvg_bull": fvg_bull, "fvg_bear": fvg_bear,
+         "ema_fast": ema_fast, "ema_slow": ema_slow}
+    if htf is not None:
+        r["htf_trend"] = htf
+    return r
+
+
+def test_smc_htf_filter_default_off():
+    s = build_strategy("smc_structure")
+    assert s.params.get("use_htf_filter") is False
+    # 沒開時，即使資料有 htf_trend=-1，多頭 BOS 照樣進場（回歸安全網）
+    assert s.signal(_smc_row(bos_bull=1.0, htf=-1), 0) == 1
+
+
+def test_smc_htf_filter_blocks_long_when_daily_bear():
+    s = build_strategy("smc_structure", use_htf_filter=True)
+    assert s.signal(_smc_row(bos_bull=1.0, htf=-1), 0) == 0
+
+
+def test_smc_htf_filter_allows_long_when_daily_bull():
+    s = build_strategy("smc_structure", use_htf_filter=True)
+    assert s.signal(_smc_row(bos_bull=1.0, htf=1), 0) == 1
+
+
+def test_smc_htf_filter_blocks_short_when_daily_bull():
+    s = build_strategy("smc_structure", use_htf_filter=True)
+    assert s.signal(_smc_row(bos_bear=1.0, ema_fast=90.0, htf=1), 0) == 0
+
+
+def test_smc_htf_filter_does_not_block_exit():
+    """持多 + 反向 BOS → 平倉，不受 htf 影響（只擋新進場）。"""
+    s = build_strategy("smc_structure", use_htf_filter=True)
+    assert s.signal(_smc_row(bos_bear=1.0, htf=1), 1) == 0
+
+
+def test_smc_htf_prepare_adds_column_when_enabled():
+    import numpy as np
+    rng = np.random.RandomState(2)
+    n = 300
+    close = 100 + np.cumsum(rng.normal(0.05, 1.0, n))
+    idx = pd.date_range("2026-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                       "close": close, "volume": np.abs(rng.normal(1000, 200, n)) + 1}, index=idx)
+    s = build_strategy("smc_structure", use_htf_filter=True)
+    out = s.prepare(df)
+    assert "htf_trend" in out.columns

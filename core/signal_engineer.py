@@ -658,3 +658,26 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["zscore"] = zscore(out["close"], 50)
     out = fib_retracement(out, lookback=50)
     return out
+
+
+def htf_trend(df: pd.DataFrame, rule: str = "1D",
+              fast: int = 20, slow: int = 60) -> pd.Series:
+    """高週期趨勢方向（多週期共振用，2026-07-05）：+1 多頭 / -1 空頭 / 0 中性或暖機。
+
+    把 OHLCV 重採樣到高週期（預設日線），算 fast/slow MA 排列，再前向填回原 index。
+    防前視關鍵：resample 的當期 bar 還沒收完（今天的日線在今天任何 4h 根都是半成品），
+    一律 shift(1) 只用「已收完」的高週期 bar——所以今天盤中不管怎麼動，
+    今天內所有低週期根看到的 htf_trend 都固定是昨日收盤的狀態。
+
+    設計為策略層過濾器的資料來源：只在進場方向與高週期一致時放行
+    （文獻：多週期共振是雙均線系統最常見的假訊號過濾器）。
+    """
+    daily_close = df["close"].resample(rule).last().dropna()
+    ma_f = daily_close.rolling(fast, min_periods=fast).mean()
+    ma_s = daily_close.rolling(slow, min_periods=slow).mean()
+    trend_d = pd.Series(0, index=daily_close.index, dtype=float)
+    trend_d[ma_f > ma_s] = 1.0
+    trend_d[ma_f < ma_s] = -1.0
+    trend_d = trend_d.shift(1)                     # 只用已收完的高週期 bar（防前視）
+    out = trend_d.reindex(df.index, method="ffill").fillna(0.0)
+    return out.astype(int)
