@@ -52,3 +52,8 @@ close_request.flag
 
 # 執行期日誌（本地產物，不上版控）
 *.log
+
+# 每日 forward 追蹤器的執行紀錄（本機生成）
+research/live_audit/forward_log.jsonl
+research/live_audit/forward_cron.out
+research/live_audit/forward_cron.err
