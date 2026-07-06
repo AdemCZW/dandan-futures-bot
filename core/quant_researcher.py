@@ -1254,7 +1254,11 @@ class MaConvergencePullbackStrategy(Strategy):
                 # 預設關＝b9 現行線上邏輯逐位元不變；圖表面板（core.chart_data.
                 # ma6_overlay_data）明確開啟，只影響顯示，不動 b9 實際下單依據。
                 # 之後若要讓 b9 也吃這個修正，再由使用者決定開啟 + 重新回測。
-                "require_density_for_breakout": False}
+                "require_density_for_breakout": False,
+                # 2026-07-06：合併訊號進場（測試能否用增加樣本量改善 edge）。
+                # 預設全關＝b9 現行只吃 is_first_pullback，逐位元不變。開啟後
+                # is_breakout/is_second_pullback 也能觸發進場（一樣受 htf 過濾約束）。
+                "use_breakout_entry": False, "use_second_pullback_entry": False}
     allow_short = True
     regime_pref = "any"          # 趨勢判斷已內建在 trend_dir，不疊加外層 regime 閘門
 
@@ -1381,8 +1385,12 @@ class MaConvergencePullbackStrategy(Strategy):
                 return 0
             return position
 
-        first_pb = bool(g("is_first_pullback"))
-        if not first_pb:
+        entry_trigger = bool(g("is_first_pullback"))
+        if not entry_trigger and bool(self.params.get("use_breakout_entry", False)):
+            entry_trigger = bool(g("is_breakout"))
+        if not entry_trigger and bool(self.params.get("use_second_pullback_entry", False)):
+            entry_trigger = bool(g("is_second_pullback"))
+        if not entry_trigger:
             return 0
         # 多週期共振：進場方向須與日線趨勢一致（0=中性/暖機也擋，嚴格版）。
         # 只擋新進場——上方出場邏輯不經過這裡，持倉管理不受 htf 影響。

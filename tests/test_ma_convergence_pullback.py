@@ -25,9 +25,11 @@ def _mk_df(n=300, seed=5):
     }, index=idx)
 
 
-def _row(trend_dir=1, is_first_pullback=True, ma20=100.0, atr=2.0):
+def _row(trend_dir=1, is_first_pullback=True, ma20=100.0, atr=2.0,
+        is_breakout=False, is_second_pullback=False):
     return {"trend_dir": trend_dir, "is_first_pullback": is_first_pullback,
-            "ma20": ma20, "atr": atr}
+            "ma20": ma20, "atr": atr,
+            "is_breakout": is_breakout, "is_second_pullback": is_second_pullback}
 
 
 # ── 註冊表 ──────────────────────────────────────────────────────────────────
@@ -291,3 +293,60 @@ def test_htf_filter_off_signal_ignores_htf_column():
     r = _row(trend_dir=1, is_first_pullback=True)
     r["htf_trend"] = -1
     assert s.signal(r, 0) == 1
+
+
+# ── 合併訊號進場（2026-07-06，使用者要求提升樣本量測試能否改善edge）──────────
+# b9 現行只吃首次回踩（is_first_pullback），密集突破/二次回踩只是圖表顯示。
+# 開關預設關，逐位元對齊 b9 現行行為；開啟後可讓 breakout/二踩也觸發進場，
+# 增加樣本量，用同一套嚴格回測方法驗證這樣做是否真的改善 edge（而非只是
+# 讓交易變多但稀釋品質）。
+
+def test_combined_entry_flags_off_by_default():
+    s = build_strategy("ma_convergence_pullback")
+    assert s.params.get("use_breakout_entry") is False
+    assert s.params.get("use_second_pullback_entry") is False
+
+
+def test_breakout_alone_does_not_enter_by_default():
+    """預設關閉時，光靠 is_breakout（沒有 is_first_pullback）不該進場——b9 現行行為不變。"""
+    s = build_strategy("ma_convergence_pullback")
+    r = _row(trend_dir=1, is_first_pullback=False, is_breakout=True)
+    assert s.signal(r, 0) == 0
+
+
+def test_breakout_enters_when_use_breakout_entry_enabled():
+    s = build_strategy("ma_convergence_pullback", use_breakout_entry=True)
+    r = _row(trend_dir=1, is_first_pullback=False, is_breakout=True)
+    assert s.signal(r, 0) == 1
+
+
+def test_breakout_entry_symmetric_short():
+    s = build_strategy("ma_convergence_pullback", use_breakout_entry=True)
+    r = _row(trend_dir=-1, is_first_pullback=False, is_breakout=True)
+    assert s.signal(r, 0) == -1
+
+
+def test_second_pullback_alone_does_not_enter_by_default():
+    s = build_strategy("ma_convergence_pullback")
+    r = _row(trend_dir=1, is_first_pullback=False, is_second_pullback=True)
+    assert s.signal(r, 0) == 0
+
+
+def test_second_pullback_enters_when_enabled():
+    s = build_strategy("ma_convergence_pullback", use_second_pullback_entry=True)
+    r = _row(trend_dir=1, is_first_pullback=False, is_second_pullback=True)
+    assert s.signal(r, 0) == 1
+
+
+def test_second_pullback_entry_symmetric_short():
+    s = build_strategy("ma_convergence_pullback", use_second_pullback_entry=True)
+    r = _row(trend_dir=-1, is_first_pullback=False, is_second_pullback=True)
+    assert s.signal(r, 0) == -1
+
+
+def test_htf_filter_still_applies_to_breakout_entry():
+    """多週期共振開關對合併訊號一樣有效，不因為改用 breakout 進場就繞過去。"""
+    s = build_strategy("ma_convergence_pullback", use_breakout_entry=True, use_htf_filter=True)
+    r = _row(trend_dir=1, is_first_pullback=False, is_breakout=True)
+    r["htf_trend"] = -1
+    assert s.signal(r, 0) == 0
