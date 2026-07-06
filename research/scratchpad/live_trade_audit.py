@@ -33,6 +33,78 @@ BOTS = {
 }
 TAKER_FEE = 0.0004   # 實盤 PnL 記帳用的單邊 taker 費率（config.taker_fee_rate）
 
+# bot 容器公開端點（/{id}/trades 免金鑰、唯讀）。可用 env 覆蓋成本機/測試網址。
+BOT_BASE = os.getenv("AUDIT_BOT_BASE", "https://dandan-futures-bot-production.up.railway.app")
+
+
+# ── 可重跑化：從 bot 端點抓最新成交 + 機器可讀對照（供定期自動對照）──────────
+def bot_trades_url(base: str, bot_id: str, limit=200) -> str:
+    return f"{base.rstrip('/')}/{bot_id}/trades?limit={int(limit)}"
+
+
+def parse_trades_response(raw):
+    """bot /trades 回應（bytes/str/None）→ list[dict]；空/壞回應安全回 []。
+    端點可能回 list 或 {"trades":[...]} / {"rows":[...]}，一律正規化成 list。"""
+    if raw is None:
+        return []
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if isinstance(data, dict):
+        data = data.get("trades") or data.get("rows") or []
+    return data if isinstance(data, list) else []
+
+
+def fetch_live_trades(base: str, bots, out_dir: str, limit=200, opener=None) -> dict:
+    """對每台 bot GET /{id}/trades，寫入 {out_dir}/{id}_trades.json。回傳 {id: 筆數 or None}。
+
+    opener：注入的 URL 開啟器（預設 urllib.request.urlopen），方便離線測試。
+    抓取失敗（網路/端點錯）記 None 且不覆寫既有快照，避免用壞資料稽核。
+    """
+    import urllib.request
+    opener = opener or urllib.request.urlopen
+    os.makedirs(out_dir, exist_ok=True)
+    counts = {}
+    for bot_id in bots:
+        url = bot_trades_url(base, bot_id, limit)
+        try:
+            with opener(url, timeout=20) as r:
+                rows = parse_trades_response(r.read())
+        except Exception as e:                      # noqa: BLE001 — 抓取失敗不該中斷整批
+            print(f"  [warn] {bot_id} 抓取失敗：{e}")
+            counts[bot_id] = None
+            continue
+        with open(os.path.join(out_dir, f"{bot_id}_trades.json"), "w") as fh:
+            json.dump(rows, fh, ensure_ascii=False, indent=2)
+        counts[bot_id] = len(rows)
+    return counts
+
+
+def reconciliation_summary(all_round_trips, backtest_by_bot) -> dict:
+    """實盤回合 vs 回測進場的機器可讀對照（供定期 job diff）。
+
+    all_round_trips：[{"bot","pnl",...}]；backtest_by_bot：{bot: [entries...]}。
+    回傳 {bot: {live_trips, live_pnl, bt_entries}, "_total": {...}}。
+    """
+    summary = {}
+    bots = {rt["bot"] for rt in all_round_trips} | set(backtest_by_bot)
+    for bot in sorted(bots):
+        trips = [rt for rt in all_round_trips if rt["bot"] == bot]
+        summary[bot] = {
+            "live_trips": len(trips),
+            "live_pnl": round(sum(rt["pnl"] for rt in trips), 2),
+            "bt_entries": len(backtest_by_bot.get(bot, [])),
+        }
+    summary["_total"] = {
+        "live_trips": len(all_round_trips),
+        "live_pnl": round(sum(rt["pnl"] for rt in all_round_trips), 2),
+        "bt_entries": sum(len(v) for v in backtest_by_bot.values()),
+    }
+    return summary
+
 
 def parse_ts(s):
     s = str(s).strip()
@@ -174,6 +246,21 @@ def replay_backtest(symbol, start="2026-06-20"):
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="實盤交易稽核 + 回測對照（可重跑）")
+    ap.add_argument("--fetch", action="store_true",
+                    help=f"先從 bot 端點抓最新成交刷新快照（{BOT_BASE}），否則用現有快照")
+    ap.add_argument("--json", action="store_true",
+                    help="最後輸出機器可讀的實盤 vs 回測對照 JSON（供定期 job diff）")
+    ap.add_argument("--base", default=BOT_BASE, help="bot 端點基底網址")
+    args = ap.parse_args()
+
+    if args.fetch:
+        print(f"抓取最新成交（{args.base}）…")
+        counts = fetch_live_trades(args.base, list(BOTS), AUDIT_DIR)
+        for bid, n in counts.items():
+            print(f"  {bid}: {'抓取失敗（保留舊快照）' if n is None else f'{n} 筆'}")
+
     all_rt, all_anoms = [], []
     print("═" * 78)
     print("① ~ ④ 逐台稽核")
@@ -233,10 +320,12 @@ if __name__ == "__main__":
     print("\n" + "═" * 78)
     print("⑥ 回測重放對照（同時段 2026-06-20 起、同設定 smc/4h/rr3，回測會怎麼做）")
     print("═" * 78)
+    backtest_by_bot = {}
     for bot_id, symbol in BOTS.items():
         if symbol == "LINKUSDT":
             continue                     # b9 是雙均線，另案
         bt = replay_backtest(symbol)
+        backtest_by_bot[bot_id] = bt
         live_entries = [rt for rt in all_rt if rt["bot"] == bot_id]
         print(f"  {bot_id} {symbol:<9} 回測進場 {len(bt)} 次 {[t['ts'][:16] for t in bt]}"
               f" ｜ 實盤回合 {len(live_entries)} 次")
@@ -244,3 +333,10 @@ if __name__ == "__main__":
     print("\n  異常彙總：")
     for bot_id, an in all_anoms:
         print(f"    [{bot_id}] {an}")
+
+    # 機器可讀對照（--json）：供定期 job 存檔/diff，追蹤實盤是否偏離回測驗證的 edge
+    if args.json:
+        summary = reconciliation_summary(all_rt, backtest_by_bot)
+        print("\n" + "═" * 78)
+        print("RECONCILIATION_JSON")
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
