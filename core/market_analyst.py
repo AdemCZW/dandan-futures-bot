@@ -14,6 +14,19 @@ def make_client(api_key: str = "", api_secret: str = "", testnet: bool = True) -
     return Client(api_key, api_secret, testnet=testnet)
 
 
+def make_data_client(source: str = "mainnet") -> Client:
+    """行情資料專用 client（訊號/軟停損判斷用，不下單、不需金鑰）。
+
+    2026-07-06 實盤稽核 F1：測試網小幣行情會出現主網不存在的幽靈波動（ADA 實測
+    偏離主網 10.5%），而所有回測/驗證都用主網資料——訊號吃測試網等於對不存在的
+    行情做反應。預設 mainnet（公開 fapi.binance.com，與驗證資料同源）；
+    source="testnet" 可退回舊行為（env SIGNAL_DATA_SOURCE 控制）。
+    """
+    if source == "testnet":
+        return Client("", "", testnet=True)
+    return Client("", "")
+
+
 def fetch_klines(client: Client, symbol: str, interval: str, limit: int = 500,
                  futures: bool = False) -> pd.DataFrame:
     """抓最近 N 根 K 線，回傳乾淨的 DataFrame（欄位皆為 float）。

@@ -1287,3 +1287,85 @@ def test_f6_testnet_reset_clears_portfolio_equity(patched, tmp_path):
     t._write_sop(100.0, pd.Timestamp("2026-06-22 00:05"), row, {}, 0, None, None, [], False)
     eq, peak, dd = t._guard.portfolio_drawdown()
     assert peak < 10000.0                                    # 舊高峰已被清（不再殘留 2×5000）
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2026-07-06 實盤稽核修復 ①②（docs/strategy_research_log.md「實盤交易全面稽核」）
+# ① 訊號資料改吃主網公開 K 線（測試網小幣行情有主網不存在的幽靈波動，ADA 實測偏離 10.5%），
+#   下單執行仍留在測試網——decisions 在主網座標、fills 在測試網。
+# ② 部署後全新容器狀態檔消失 → restored_last_bar 改由 journal 推斷最後已行動的 K 棒，
+#   杜絕「同一根棒重複決策 → 重複進場」的 churn（b7 實測同棒進場 3 次 ×2 輪）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+def test_make_data_client_defaults_to_mainnet():
+    from core.market_analyst import make_data_client
+    c = make_data_client()
+    assert c.testnet is False
+
+
+def test_make_data_client_testnet_optout():
+    from core.market_analyst import make_data_client
+    c = make_data_client("testnet")
+    assert c.testnet is True
+
+
+def test_data_client_defaults_to_execution_client(patched):
+    t = _trader([0], FakeExecu())
+    assert t.data_client is t.client
+
+
+def test_on_bar_close_fetches_klines_with_data_client(patched, monkeypatch):
+    """訊號評估的 K 線必須走 data_client（主網），不是執行 client（測試網）。"""
+    seen = {}
+    def rec_fetch(client, *a, **k):
+        seen["client"] = client
+        return _flat_df()
+    monkeypatch.setattr(M, "fetch_klines", rec_fetch)
+    sentinel = object()
+    cfg = Config()
+    t = M.FuturesLiveTrader(cfg, None, ScriptStrat([0]), RiskOfficer(cfg), FakeExecu(),
+                            FakeJournal(), data_client=sentinel)
+    t.on_bar_close(pd.Timestamp("2026-07-04 12:00"))
+    assert seen["client"] is sentinel
+
+
+def test_restored_last_bar_journal_fallback_entry_bar(patched, monkeypatch):
+    """狀態檔遺失（redeploy）→ 由 journal 最新列推斷：entry 列 ts＝決策棒，直接採用。"""
+    rows = [{"ts": "2026-07-04 12:00:00", "side": "entry", "price": 1.0, "qty": 1.0, "pnl": 0.0}]
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: rows)
+    t = _trader([0], FakeExecu())
+    t.cfg.interval = "4h"
+    assert t.restored_last_bar() == pd.Timestamp("2026-07-04 12:00:00")
+
+
+def test_restored_last_bar_journal_midbar_exit_maps_to_closed_bar(patched, monkeypatch):
+    """盤中軟停損出場列 ts＝牆鐘時間（帶時區）→ 換算成「當下已收完的那根」＝floor−1棒。
+
+    b7 churn 的實際型態：12:00 棒決策進場、17:11 盤中停損出場、部署後重進。
+    17:11 當下已收完的棒是 12:00（16:00 棒還在走）→ 回 12:00，poll 迴圈才會跳過重決策。"""
+    rows = [{"ts": "2026-07-04T17:11:33+00:00", "side": "exit_sl", "price": 1.0, "qty": 1.0, "pnl": -1.0}]
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: rows)
+    t = _trader([0], FakeExecu())
+    t.cfg.interval = "4h"
+    assert t.restored_last_bar() == pd.Timestamp("2026-07-04 12:00:00")
+
+
+def test_restored_last_bar_no_state_no_journal_returns_none(patched):
+    # patched fixture 已把 read_trades_db stub 成回空 list
+    t = _trader([0], FakeExecu())
+    t.cfg.interval = "4h"
+    assert t.restored_last_bar() is None
+
+
+def test_restored_last_bar_state_file_wins_over_journal(patched, monkeypatch):
+    """state 檔存在且 symbol/interval 匹配 → 以 state 為準（含「決策過但沒交易」的棒）。"""
+    import json as _json
+    rows = [{"ts": "2026-07-05 08:00:00", "side": "entry", "price": 1.0, "qty": 1.0, "pnl": 0.0}]
+    monkeypatch.setattr("core.trade_journal.read_trades_db", lambda *a, **k: rows)
+    t = _trader([0], FakeExecu())
+    t.cfg.interval = "4h"
+    state = {"symbol": t.cfg.symbol, "interval": "4h",
+             "last_decision": {"ts": "2026-07-04 12:00:00"}}
+    with open(t.state_path, "w") as f:
+        _json.dump(state, f)
+    assert t.restored_last_bar() == pd.Timestamp("2026-07-04 12:00:00")

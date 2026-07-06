@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from config import Config
-from core.market_analyst import make_client, fetch_klines, detect_anomaly
+from core.market_analyst import make_client, make_data_client, fetch_klines, detect_anomaly
 from core.quant_researcher import build_strategy
 from core.risk_officer import RiskOfficer
 from core.futures_execution_engineer import FuturesExecutionEngineer
@@ -40,6 +40,12 @@ from core.directional_guard import DirectionalChannelGuard
 STATE_PATH = "bot_state_futures.json"
 CLOSE_REQUEST_PATH = "close_request.flag"   # 手動平倉旗標：HTTP 緒寫、主迴圈讀（避免跨緒下單競態）
 _CLOSE_EVENT = threading.Event()            # HTTP 緒 set() → 主迴圈從 wait() 立即醒來執行平倉
+
+
+def _interval_freq(interval: str) -> str:
+    """幣安 K 線週期字串 → pandas floor/Timedelta 頻率（"15m"→"15min"、"1d"→"1D"、"4h"→"4h"）。"""
+    unit = interval[-1].lower()
+    return interval[:-1] + {"m": "min", "h": "h", "d": "D"}.get(unit, unit)
 
 
 def _close_authorized(header_token: str | None, env_token: str | None) -> bool:
@@ -80,7 +86,8 @@ class FuturesLiveTrader:
                  exchange_stop_enabled: bool | None = None,
                  dcg_enabled: bool | None = None,
                  dcg_max_losses: int | None = None,
-                 dcg_cooldown_bars: int | None = None):
+                 dcg_cooldown_bars: int | None = None,
+                 data_client=None):
         # state_path 預設 None → 解析「當前」模組全域 STATE_PATH（而非定義時綁定），
         # 既保留單台部署相容（含既有測試的 monkeypatch.setattr(M, "STATE_PATH", …)），
         # 又讓多 bot 監督器能為每台傳入獨立檔路徑，避免共用一檔互相覆蓋。
@@ -90,6 +97,9 @@ class FuturesLiveTrader:
         # （例：只有 Bot2 要 DCG_ENABLED=1，不能讓他台也被開啟）。
         self.cfg, self.client, self.strat = cfg, client, strat
         self.risk, self.execu, self.journal = risk, execu, journal
+        # 行情資料 client（訊號/指標/軟停損判斷）：預設同執行 client（向後相容）；
+        # 部署時傳入主網公開 client → decisions 在主網座標、fills 在測試網（稽核 F1）。
+        self.data_client = data_client if data_client is not None else client
         self.dir = 0
         self.entry_price = self.sl = self.tp = 0.0
         self.qty = 0.0                      # 本地追蹤的持倉量（避免開倉後立刻讀帶號倉位的最終一致性問題）
@@ -204,7 +214,7 @@ class FuturesLiveTrader:
         """抓最近已收盤那根的 ATR（供 restore 重建停損用）；失敗則回 None 退回固定百分比。"""
         try:
             df = self.strat.prepare(
-                fetch_klines(self.client, self.cfg.symbol, self.cfg.interval,
+                fetch_klines(self.data_client, self.cfg.symbol, self.cfg.interval,
                              self._fetch_bars(), futures=True)).dropna()
             if len(df) >= 2 and "atr" in df.columns:
                 v = df["atr"].iloc[-2]
@@ -706,7 +716,7 @@ class FuturesLiveTrader:
     def on_bar_close(self, bar_time) -> None:
         cfg = self.cfg
         df = self.strat.prepare(
-            fetch_klines(self.client, cfg.symbol, cfg.interval,
+            fetch_klines(self.data_client, cfg.symbol, cfg.interval,
                          self._fetch_bars(), futures=True)).dropna()
         if len(df) < 2:                     # 指標暖機不足（如單調行情 swing 未確認）→ 本輪不決策
             print(f"[{bar_time}] 指標暖機不足（dropna 後僅 {len(df)} 根），本輪跳過")
@@ -933,21 +943,50 @@ class FuturesLiveTrader:
             pass
 
     def restored_last_bar(self):
-        """重啟續跑：讀 state 檔 last_decision.ts → 該根 K 棒「已決策過」。
+        """重啟續跑：這根 K 棒「已決策過」的最佳證據，poll 迴圈以此初始化 last_bar。
 
-        poll 迴圈以此初始化 last_bar，避免重啟/崩潰重建後對同一根 K 棒重複決策
-        （會重複進出、白繳手續費）。state 的 symbol/interval 與現行設定不符
-        （config 剛換過市場/週期）→ 回 None，視為全新起跑。
+        優先序：
+          1. state 檔 last_decision.ts（同容器重啟；最精確——含「決策過但沒交易」的棒）。
+             symbol/interval 與現行設定不符（config 剛換過市場/週期）→ 不採用。
+          2. journal 最新一筆成交推斷（2026-07-06 稽核 F2：Railway redeploy 是全新
+             容器、state 檔消失，若直接視為全新起跑會對「已決策過的當前棒」再決策
+             一次 → 空手且訊號仍在就重複進場。b7 實測同棒進場 3 次 ×2 輪）。
+        都沒有 → None（全新起跑，決策當前棒）。
         """
         try:
             with open(self.state_path) as f:
                 st = json.load(f)
-            if (st.get("symbol") != self.cfg.symbol
-                    or st.get("interval") != self.cfg.interval):
+            if (st.get("symbol") == self.cfg.symbol
+                    and st.get("interval") == self.cfg.interval):
+                ts = (st.get("last_decision") or {}).get("ts")
+                if ts:
+                    return pd.Timestamp(ts)
+        except Exception:                       # noqa: BLE001 — 缺檔/壞檔 → 走 journal 推斷
+            pass
+        return self._last_bar_from_journal()
+
+    def _last_bar_from_journal(self):
+        """由 journal（持久 DB，redeploy 不消失）推斷最後已行動的 K 棒。
+
+        entry / on_bar_close 記帳列的 ts＝決策棒 open_time（正好落在棒界）→ 直接採用；
+        盤中軟停損/對帳出場列的 ts＝牆鐘時間（棒中）→ 換算成「當下已收完的那根」
+        ＝floor − 1 根（該筆行動源自那根棒的決策脈絡）。只涵蓋「有交易」的棒——
+        「決策過但沒動作」的棒重複決策是冪等的（同資料同結論），無害。
+        """
+        try:
+            from core.trade_journal import read_trades_db
+            rows = read_trades_db(limit=1, mode=getattr(self.journal, "mode", None),
+                                  strategy=self.cfg.strategy, symbol=self.cfg.symbol,
+                                  db_path=getattr(self.journal, "db_path", "trades.db"))
+            if not rows:
                 return None
-            ts = (st.get("last_decision") or {}).get("ts")
-            return pd.Timestamp(ts) if ts else None
-        except Exception:                       # noqa: BLE001 — 缺檔/壞檔 → 全新起跑
+            ts = pd.Timestamp(str(rows[0]["ts"]))
+            if ts.tzinfo is not None:
+                ts = ts.tz_convert("UTC").tz_localize(None)
+            freq = _interval_freq(self.cfg.interval)
+            bar = ts.floor(freq)
+            return bar if ts == bar else bar - pd.Timedelta(freq)
+        except Exception:                       # noqa: BLE001 — DB 不可用 → 全新起跑
             return None
 
     def _heartbeat(self, price: float | None = None) -> None:
@@ -1175,6 +1214,8 @@ def main():
 
     try:
         client = make_client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+        # 訊號資料 client：預設主網公開 K 線（與回測/驗證同源），下單仍走測試網 client。
+        data_client = make_data_client(os.getenv("SIGNAL_DATA_SOURCE", "mainnet"))
         execu = FuturesExecutionEngineer(client, cfg.symbol, leverage=cfg.futures_leverage)
 
         # --budget：從真實餘額動態算出 max_position_pct，把每筆倉位釘在指定 USDT 上限
@@ -1191,7 +1232,8 @@ def main():
                                    cb_max_losses=args.cb_max_losses,
                                    cb_pause_hours=args.cb_pause_hours,
                                    ml_model_path=ml_path,
-                                   ml_threshold=float(os.getenv("ML_THRESHOLD", "0.55")))
+                                   ml_threshold=float(os.getenv("ML_THRESHOLD", "0.55")),
+                                   data_client=data_client)
 
         budget_msg = f" | 預算上限 {args.budget:.0f}U/筆（max_pos={cfg.max_position_pct:.1%}）" if args.budget else ""
         print(f"[啟動] 合約測試網模擬盤（多/空）| {cfg.symbol} {cfg.interval} | "
@@ -1218,7 +1260,7 @@ def main():
                     pass
                 print("[手動平倉] 收到結算請求", trader.manual_close())
 
-            df = fetch_klines(client, cfg.symbol, cfg.interval, 3, futures=True)
+            df = fetch_klines(data_client, cfg.symbol, cfg.interval, 3, futures=True)
             bar_time = df.index[-2]
             live_price = float(df["close"].iloc[-1])
             reason = trader.check_soft_stops(live_price)   # 每輪軟停損（掛單失效後備）

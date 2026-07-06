@@ -399,7 +399,7 @@ def build_trader(worker):
     state 檔（worker.state_path）。金鑰缺失或初始化失敗 → raise，由 supervise 退避重試。
     """
     from config import Config
-    from core.market_analyst import make_client
+    from core.market_analyst import make_client, make_data_client
     from core.quant_researcher import build_strategy
     from core.risk_officer import RiskOfficer
     from core.futures_execution_engineer import FuturesExecutionEngineer
@@ -422,6 +422,8 @@ def build_trader(worker):
         raise RuntimeError(f"[{worker.id}] 缺合約測試網金鑰（BINANCE_FUTURES_TESTNET_*）")
 
     client = make_client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+    # 訊號資料 client：預設主網公開 K 線（與回測/驗證同源，稽核 F1），下單仍走測試網。
+    data_client = make_data_client(os.getenv("SIGNAL_DATA_SOURCE", "mainnet"))
     execu = FuturesExecutionEngineer(client, cfg.symbol, leverage=cfg.futures_leverage)
     balance = execu.balance(cfg.quote_asset)
     budget = conf.get("budget")
@@ -444,11 +446,14 @@ def build_trader(worker):
         exchange_stop_enabled=conf.get("exchange_stop"),
         dcg_enabled=conf.get("dcg_enabled"),
         dcg_max_losses=conf.get("dcg_max_losses"),
-        dcg_cooldown_bars=conf.get("dcg_cooldown_bars"))
+        dcg_cooldown_bars=conf.get("dcg_cooldown_bars"),
+        data_client=data_client)
     trader.restore()
     _log(worker.id, f"啟動 {cfg.symbol} {cfg.interval} {cfg.strategy} "
                     f"槓桿{cfg.futures_leverage}x | 餘額 {balance:.2f}")
-    return trader, client, cfg
+    # poll 迴圈的 client 只拿來抓 K 線（bar_time/live_price）→ 回傳 data_client，
+    # 讓軟停損判斷與訊號同在主網座標；下單全走 trader 持有的測試網 execu。
+    return trader, data_client, cfg
 
 
 class Supervisor:
