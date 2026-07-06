@@ -691,11 +691,15 @@ class FuturesLiveTrader:
             print(f"[{bar_time}] 風控通過但訂單不合法：{msg}")
             return
         if direction == 1:
-            self.execu.open_long(decision.quantity)
+            resp = self.execu.open_long(decision.quantity)
             side = "entry"
         else:
-            self.execu.open_short(decision.quantity)
+            resp = self.execu.open_short(decision.quantity)
             side = "entry_short"
+        # F3：進場價以交易所實際成交均價為真相（journal/SL/TP/pnl 一致），
+        # 拿不到（testnet 偶發空回應）才退回訊號棒收盤價，維持舊行為。
+        fill = self.execu.fill_price(resp)
+        price = fill if fill is not None else price
         self.dir = direction
         self.qty = decision.quantity                # 用本地下單量，不在開倉後立刻讀帶號倉位
         self.entry_price = price

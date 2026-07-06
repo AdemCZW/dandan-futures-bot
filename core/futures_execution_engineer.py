@@ -135,6 +135,31 @@ class FuturesExecutionEngineer:
         """
         return self.client.futures_get_order(symbol=self.symbol, orderId=order_id)
 
+    @staticmethod
+    def fill_price(order_resp) -> float | None:
+        """F3：從市價單回應解析實際成交均價（記帳真相，取代訊號棒收盤價）。
+
+        MARKET 單回應通常帶 avgPrice；testnet 偶發 avgPrice="0" 時退回
+        cumQuote / executedQty 算 VWAP。都拿不到（空回應/未成交）→ None，
+        由呼叫端 fallback 到訊號價，維持舊行為不中斷。
+        """
+        if not order_resp:
+            return None
+        try:
+            ap = float(order_resp.get("avgPrice") or 0)
+        except (TypeError, ValueError):
+            ap = 0.0
+        if ap > 0:
+            return ap
+        try:
+            cq = float(order_resp.get("cumQuote") or 0)
+            eq = float(order_resp.get("executedQty") or 0)
+        except (TypeError, ValueError):
+            return None
+        if cq > 0 and eq > 0:
+            return cq / eq
+        return None
+
     def position_amt(self) -> float:
         """帶號持倉量：+多 / -空 / 0。"""
         info = self.client.futures_position_information(symbol=self.symbol)

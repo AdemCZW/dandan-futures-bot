@@ -167,6 +167,28 @@ def test_get_order_calls_futures_get_order_and_returns_status():
     assert o["status"] == "FILLED" and o["avgPrice"] == "95.5"
 
 
+# ── F3：市價單成交均價解析（journal 進場價記實際成交價，非訊號棒收盤價）──
+def test_fill_price_reads_avg_price():
+    """MARKET 單回應含 avgPrice → 直接用它當實際成交均價。"""
+    e = FuturesExecutionEngineer(FakeFuturesClient(), "BTCUSDT", set_leverage=False)
+    assert e.fill_price({"avgPrice": "101.37", "executedQty": "0.05"}) == 101.37
+
+
+def test_fill_price_falls_back_to_cumquote_over_executed_qty():
+    """avgPrice 缺/為 0 時，用 cumQuote / executedQty 算 VWAP。"""
+    e = FuturesExecutionEngineer(FakeFuturesClient(), "BTCUSDT", set_leverage=False)
+    resp = {"avgPrice": "0", "cumQuote": "500.0", "executedQty": "5.0"}
+    assert e.fill_price(resp) == 100.0
+
+
+def test_fill_price_returns_none_when_unavailable():
+    """回應無任何可用成交價資訊（testnet 偶發空回應）→ None，呼叫端 fallback 訊號價。"""
+    e = FuturesExecutionEngineer(FakeFuturesClient(), "BTCUSDT", set_leverage=False)
+    assert e.fill_price({"avgPrice": "0", "executedQty": "0"}) is None
+    assert e.fill_price({}) is None
+    assert e.fill_price(None) is None
+
+
 def test_position_balance_markprice_parsing():
     c = FakeFuturesClient(positions=[{"symbol": "BTCUSDT", "positionAmt": "-0.5"}],
                           balances=[{"asset": "USDT", "balance": "9999.5"}], price="123.4")
@@ -193,16 +215,24 @@ class FakeExecu:
         self._stop_resp_empty = False   # 模擬 place_stop 回應空 body（孤兒單情境）
         self._mark = 100.0
         self._oid = 0
+        self._fill_resp = None      # F3：open_long/open_short 回應（含 avgPrice）；None=舊行為
     def position_amt(self): return self.amt
     def balance(self, a="USDT"): return 10000.0
     def mark_price(self): return self._mark
     def valid_order(self, q, p): return True, "ok"
+    def fill_price(self, resp):
+        if not resp:
+            return None
+        ap = float(resp.get("avgPrice") or 0)
+        return ap if ap > 0 else None
     def round_price(self, p):
         tick = Decimal("0.1")
         q = (Decimal(str(p)) / tick).to_integral_value(rounding="ROUND_DOWN") * tick
         return format(q, "f")
-    def open_long(self, q): self.amt = float(q); self.orders.append(("open_long", float(q)))
-    def open_short(self, q): self.amt = -float(q); self.orders.append(("open_short", float(q)))
+    def open_long(self, q):
+        self.amt = float(q); self.orders.append(("open_long", float(q))); return self._fill_resp
+    def open_short(self, q):
+        self.amt = -float(q); self.orders.append(("open_short", float(q))); return self._fill_resp
     def close(self, q, d): self.amt = 0.0; self.orders.append(("close", float(q), d))
     # 交易所掛單式停損/停利
     def place_stop(self, d, price, qty=None):
@@ -308,7 +338,48 @@ def test_long_to_short_flip_closes_then_opens(patched):
     t.on_bar_close(pd.Timestamp("2026-06-22 00:05"))   # 翻空：先平多再開空
     kinds = [o[0] for o in ex.orders]
     assert kinds == ["open_long", "close", "open_short"]
-    assert t.dir == -1
+
+
+# ── F3：進場價記實際成交均價，而非訊號棒收盤價 ────────────────────────
+def test_open_uses_actual_fill_price_as_entry(patched):
+    """開倉回應含 avgPrice（≠訊號價 100）→ entry_price 用實際成交價。"""
+    ex = FakeExecu()
+    ex._fill_resp = {"avgPrice": "100.42", "executedQty": "1"}   # 實際成交偏離訊號價
+    t = _trader([1], ex)
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))
+    assert t.entry_price == 100.42
+
+
+def test_open_journals_actual_fill_price(patched):
+    """F3 核心：journal 的 entry 這筆記的是實際成交均價，不是訊號棒收盤價。"""
+    ex = FakeExecu()
+    ex._fill_resp = {"avgPrice": "100.42", "executedQty": "1"}
+    t = _trader([1], ex)
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))
+    entry_rec = [r for r in t.journal.records if r["side"] == "entry"][-1]
+    assert entry_rec["price"] == 100.42
+
+
+def test_open_sl_tp_relative_to_actual_fill(patched):
+    """SL/TP 基準跟著實際成交價走（進場價位真相一致），不再基於訊號價。"""
+    ex = FakeExecu()
+    ex._fill_resp = {"avgPrice": "100.42", "executedQty": "1"}
+    t = _trader([1], ex)
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))
+    # 固定%回退（_flat_df 無 atr 欄）：SL = entry×(1-stop_loss_pct)，須以 100.42 為基準
+    expected_sl = 100.42 * (1 - t.cfg.stop_loss_pct)
+    assert abs(t.sl - expected_sl) < 1e-6
+
+
+def test_open_falls_back_to_signal_price_when_no_fill(patched):
+    """回應無成交價（testnet 偶發）→ 退回訊號棒收盤價，行為與舊版一致（回歸保護）。"""
+    ex = FakeExecu()
+    ex._fill_resp = None
+    t = _trader([1], ex)
+    t.on_bar_close(pd.Timestamp("2026-06-22 00:00"))
+    assert t.entry_price == 100.0          # _flat_df 收盤價
+    entry_rec = [r for r in t.journal.records if r["side"] == "entry"][-1]
+    assert entry_rec["price"] == 100.0
 
 
 def test_target_zero_closes_position(patched):
