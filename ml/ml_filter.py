@@ -38,9 +38,41 @@ FEATURE_COLS = [
 ]
 
 
+def funding_features(events: pd.DatetimeIndex, funding: pd.Series,
+                     z_window: int = 90) -> pd.DataFrame:
+    """從資金費率歷史擷取特徵（2026-07-06，衍生品專屬資料，非價格衍生特徵）。
+
+    funding：index=fundingTime（幣安每 8 小時結算一次），value=fundingRate。
+    z_window 以「結算次數」為單位（不是K棒根數）；預設 90 次 ≈ 30 天。
+
+    用 merge_asof(direction="backward") 對齊：每個 event 只拿「當下已經結算」
+    的最近一筆費率，事件之後才結算的值不會被看到（causal，不前視）。
+
+    回傳欄位：
+      funding_rate     事件當下最近一次已結算費率
+      funding_rate_ma  近 z_window 次結算費率的滾動均值（判斷持續正/負體制）
+      funding_rate_z   費率相對其自身近期分佈的 z-score（極端擁擠度）
+    """
+    fr = funding.sort_index()
+    roll = fr.rolling(z_window, min_periods=max(2, z_window // 3))
+    feat = pd.DataFrame({
+        "funding_rate": fr,
+        "funding_rate_ma": roll.mean(),
+        "funding_rate_z": (fr - roll.mean()) / (roll.std() + 1e-12),
+    })
+
+    ev = pd.DataFrame({"t": pd.DatetimeIndex(events)}).sort_values("t")
+    ft = feat.reset_index().rename(columns={feat.index.name or "index": "t2"}).sort_values("t2")
+    merged = pd.merge_asof(ev, ft, left_on="t", right_on="t2", direction="backward")
+    out = merged.set_index("t")[["funding_rate", "funding_rate_ma", "funding_rate_z"]]
+    out.index.name = None
+    return out.reindex(pd.DatetimeIndex(events))
+
+
 def extract_features(prepared: pd.DataFrame,
                      events: pd.DatetimeIndex,
-                     vol_z_window: int = 20) -> pd.DataFrame:
+                     vol_z_window: int = 20,
+                     funding: pd.Series | None = None) -> pd.DataFrame:
     """從 prepared DataFrame 的 events 時間點擷取特徵。
 
     策略專屬欄位（fib_score / ema_t_dist / stoch_k / stoch_d / fib_ch_pos）缺失時
@@ -127,6 +159,14 @@ def extract_features(prepared: pd.DataFrame,
 
     df = pd.DataFrame(rows, index=events)[FEATURE_COLS]
     df = df.fillna(df.median())
+
+    # 資金費率特徵（選填，2026-07-06）：不傳 funding 時完全不加欄位，現有呼叫點
+    # （run_train_filter.py 等）逐位元不變。有傳時 merge 進來，缺值同樣 fillna(median)。
+    if funding is not None:
+        ff = funding_features(events, funding)
+        ff = ff.fillna(ff.median())
+        df = pd.concat([df, ff], axis=1)
+
     return df
 
 

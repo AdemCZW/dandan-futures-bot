@@ -387,3 +387,87 @@ class TestSmcStructuralFeatures:
                                  "close": closes, "volume": np.full(n, 10.0)}, index=idx)
         X = extract_features(prepared, prepared.index[10:15])
         assert len(X) == 5                        # 不拋例外、行數正確
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 資金費率特徵（2026-07-06，使用者要求探索衍生品專屬資料——非價格衍生特徵，
+# 跟先前證實無預測力的技術指標特徵（AUC 0.557）是不同的資訊來源家族）。
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestFundingFeatures:
+    def _funding_series(self, n=40, start="2024-01-01"):
+        """模擬幣安 fundingRate 歷史：每 8 小時一筆，index=fundingTime。"""
+        idx = pd.date_range(start, periods=n, freq="8h")
+        rng = np.random.default_rng(1)
+        return pd.Series(rng.normal(0.0001, 0.0003, n), index=idx, name="fundingRate")
+
+    def test_returns_expected_columns(self):
+        from ml.ml_filter import funding_features
+        funding = self._funding_series()
+        events = pd.DatetimeIndex(["2024-01-03 04:00", "2024-01-05 12:00"])
+        out = funding_features(events, funding)
+        for col in ("funding_rate", "funding_rate_ma", "funding_rate_z"):
+            assert col in out.columns
+
+    def test_uses_only_settlement_at_or_before_event_causal(self):
+        """事件時間點的特徵只能反映「已經結算」的費率，不能偷看之後才結算的值。"""
+        from ml.ml_filter import funding_features
+        idx = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 08:00", "2024-01-01 16:00"])
+        funding = pd.Series([0.0001, 0.0001, 0.0001], index=idx)   # 前兩筆平穩
+        # 事件夾在第2筆(08:00)結算後、第3筆(16:00)結算前
+        event = pd.DatetimeIndex(["2024-01-01 12:00"])
+        out_before = funding_features(event, funding)
+        # 把「事件之後才結算」的第3筆改成極端值，事件當下的特徵不該變
+        funding2 = funding.copy()
+        funding2.iloc[2] = 5.0                       # 之後才結算的暴衝
+        out_after = funding_features(event, funding2)
+        assert out_before["funding_rate"].iloc[0] == out_after["funding_rate"].iloc[0]
+        assert out_before["funding_rate"].iloc[0] == pytest.approx(0.0001)
+
+    def test_event_before_first_settlement_is_nan(self):
+        from ml.ml_filter import funding_features
+        funding = self._funding_series(start="2024-06-01")
+        event = pd.DatetimeIndex(["2024-01-01 00:00"])   # 早於資金費率歷史起點
+        out = funding_features(event, funding)
+        assert out["funding_rate"].isna().all()
+
+    def test_funding_rate_z_reflects_extremity(self):
+        """費率明顯偏離近期均值時，z 分數應有明顯量級（正負號跟偏離方向一致）。"""
+        from ml.ml_filter import funding_features
+        idx = pd.date_range("2024-01-01", periods=30, freq="8h")
+        rates = np.full(30, 0.0001)
+        rates[-1] = 0.01           # 最後一筆是異常正極值
+        funding = pd.Series(rates, index=idx)
+        event = pd.DatetimeIndex([idx[-1] + pd.Timedelta(hours=1)])
+        out = funding_features(event, funding, z_window=30)
+        assert out["funding_rate_z"].iloc[0] > 2.0   # 明顯正偏離
+
+
+class TestExtractFeaturesWithFunding:
+    def test_extract_features_accepts_optional_funding(self):
+        """extract_features 加 funding 選填參數：有給時特徵欄位包含資金費率衍生特徵。"""
+        from ml.ml_filter import extract_features, FEATURE_COLS
+        rng = np.random.default_rng(2)
+        n = 60
+        closes = 100 + np.cumsum(rng.normal(0, 1, n))
+        idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+        prepared = pd.DataFrame({"open": closes, "high": closes + 1, "low": closes - 1,
+                                 "close": closes, "volume": np.full(n, 10.0)}, index=idx)
+        funding_idx = pd.date_range("2023-12-01", periods=200, freq="8h")
+        funding = pd.Series(rng.normal(0.0001, 0.0002, 200), index=funding_idx)
+        events = prepared.index[10:15]
+        X = extract_features(prepared, events, funding=funding)
+        for col in ("funding_rate", "funding_rate_ma", "funding_rate_z"):
+            assert col in X.columns
+
+    def test_extract_features_without_funding_backward_compatible(self):
+        """不傳 funding（現有全部呼叫點）→ 行為逐位元不變，沒有資金費率欄位。"""
+        from ml.ml_filter import extract_features
+        rng = np.random.default_rng(2)
+        n = 60
+        closes = 100 + np.cumsum(rng.normal(0, 1, n))
+        idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+        prepared = pd.DataFrame({"open": closes, "high": closes + 1, "low": closes - 1,
+                                 "close": closes, "volume": np.full(n, 10.0)}, index=idx)
+        X = extract_features(prepared, prepared.index[10:15])
+        assert "funding_rate" not in X.columns
