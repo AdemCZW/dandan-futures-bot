@@ -1005,7 +1005,7 @@ def test_strategies_registry_has_nineteen_keys():
         "vwap_band_reversion", "heikin_ashi_momo", "macd_scalp",
         "bb_squeeze_breakout", "rsi2_connors", "smc_structure", "fib_channel",
         "trend_pullback", "fib_ema", "vol_momentum", "ema_fib_vol",
-        "ma_convergence_pullback",
+        "ma_convergence_pullback", "chart_pattern_breakout", "regression_channel",
     }
 
 

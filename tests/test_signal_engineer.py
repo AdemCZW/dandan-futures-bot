@@ -1085,3 +1085,54 @@ def test_htf_trend_warmup_is_zero_or_nan_free_index():
     out = se.htf_trend(df, rule="1D", fast=20, slow=60)
     assert len(out) == len(df)
     assert set(out.unique()).issubset({-1, 0, 1})
+
+
+# ── trendline_pair（2026-07-06，古典圖表形態：三角形/楔形收斂判斷用的上下趨勢線）──
+def _pattern_df(n=100, seed=3):
+    rng = np.random.default_rng(seed)
+    closes = 100 + np.cumsum(rng.normal(0, 1.0, n))
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    return pd.DataFrame({
+        "open": closes, "high": closes + np.abs(rng.normal(0, 0.6, n)) + 0.1,
+        "low": closes - np.abs(rng.normal(0, 0.6, n)) - 0.1,
+        "close": closes, "volume": np.full(n, 100.0)}, index=idx)
+
+
+def test_trendline_pair_adds_columns():
+    out = se.trendline_pair(_pattern_df(), pivot_left=5, pivot_right=5)
+    for col in ("res_line", "sup_line", "res_slope", "sup_slope",
+                "res_p1", "res_p2", "sup_p1", "sup_p2"):
+        assert col in out.columns, f"缺欄位 {col}"
+
+
+def test_trendline_pair_res_pivot_not_used_before_right_lag():
+    """res_p1 不該在樞紐右側延遲根數確認之前就被採用（因果性，不提前看到未來）。"""
+    prices = [100, 101, 102, 103, 110, 103, 102, 101, 100, 99, 98, 97, 96, 95,
+              96, 97, 98, 99, 100, 101]
+    idx = pd.date_range("2024-01-01", periods=len(prices), freq="1h")
+    df = pd.DataFrame({"open": prices, "high": [p + 0.5 for p in prices],
+                       "low": [p - 0.5 for p in prices], "close": prices,
+                       "volume": [100.0] * len(prices)}, index=idx)
+    out = se.trendline_pair(df, pivot_left=2, pivot_right=3)
+    # 峰值在 idx=4，pivot_right=3 → 要到 idx=7 才確認，確認前 res_p1 不該等於 4
+    early = out["res_p1"].iloc[:7]
+    assert not (early == 4).any(), "樞紐在確認延遲根數之前就被使用了 → 前視洩漏"
+
+
+def test_trendline_pair_is_causal_no_repaint():
+    """因果/非重繪：截斷尾端重算，前綴的 res_line/sup_line 完全不變。"""
+    df = _pattern_df(120)
+    full = se.trendline_pair(df, pivot_left=5, pivot_right=5)
+    for k in (60, 90, 110):
+        prefix = se.trendline_pair(df.iloc[:k], pivot_left=5, pivot_right=5)
+        for col in ("res_line", "sup_line"):
+            a, b = full[col].iloc[:k], prefix[col]
+            assert a.isna().equals(b.isna())
+            np.testing.assert_allclose(a.dropna().values, b.dropna().values)
+
+
+def test_trendline_pair_too_short_series_all_nan():
+    """樞紐不足（資料太短）時整條線是 NaN，優雅退化不報錯。"""
+    out = se.trendline_pair(_pattern_df(10), pivot_left=5, pivot_right=5)
+    assert out["res_line"].isna().all()
+    assert out["sup_line"].isna().all()

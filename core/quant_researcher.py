@@ -1397,6 +1397,173 @@ class MaConvergencePullbackStrategy(Strategy):
         return 0
 
 
+class ChartPatternBreakoutStrategy(Strategy):
+    """古典圖表形態（三角形/楔形收斂後突破），2026-07-06。
+
+    使用者要求測試 TradingView「Chart Patterns Screener」這類形態辨識指標背後
+    的核心概念是否有 edge：用 signal_engineer.trendline_pair() 算出的上下兩條
+    已確認樞紐趨勢線（跟均線密集/發散完全不同的訊號來源——真實樞紐點連線，
+    不是六線價差），夾角收斂到 convergence_ratio 以下時，收盤價突破其中一側
+    → 進場；跌回被突破的線內 → 視為結構失敗、出場。跟 ma_convergence_pullback
+    同精神（收斂後發散才算數），但這裡的「收斂」是幾何樞紐趨勢線夾角，不是
+    六線價差——完全獨立的訊號家族，用來驗證古典圖表形態這條路子是否也一樣
+    卡在訊號密度問題，還是真的是不同類別的 edge。
+    """
+    name = "chart_pattern_breakout"
+    defaults = {"pivot_left": 5, "pivot_right": 5, "convergence_ratio": 0.8}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = se.trendline_pair(df.copy(), pivot_left=int(self.params["pivot_left"]),
+                                pivot_right=int(self.params["pivot_right"]))
+        out["atr"] = se.atr(out, 14)
+
+        n = len(out)
+        res_line = out["res_line"].to_numpy()
+        sup_line = out["sup_line"].to_numpy()
+        res_slope = out["res_slope"].to_numpy()
+        sup_slope = out["sup_slope"].to_numpy()
+        res_p1 = out["res_p1"].to_numpy()
+        sup_p1 = out["sup_p1"].to_numpy()
+        close = out["close"].to_numpy()
+
+        ratio = float(self.params["convergence_ratio"])
+        breakout = np.zeros(n, dtype=bool)
+        breakout_dir = np.zeros(n)
+        used = False
+        anchor_key = None
+
+        for i in range(n):
+            if np.isnan(res_line[i]) or np.isnan(sup_line[i]):
+                continue
+            key = (res_p1[i], sup_p1[i])
+            if key != anchor_key:
+                anchor_key = key
+                used = False
+
+            gap_now = res_line[i] - sup_line[i]
+            start_idx = int(max(res_p1[i], sup_p1[i]))
+            # 用當根的斜率把兩條線外推回 start_idx，避免直接查歷史欄位值
+            # （那可能是用不同樞紐組合算出來的，見 trendline_pair 註解）。
+            res_at_start = res_line[i] - res_slope[i] * (i - start_idx)
+            sup_at_start = sup_line[i] - sup_slope[i] * (i - start_idx)
+            gap_start = res_at_start - sup_at_start
+            converging = 0 < gap_now < gap_start * ratio
+
+            if converging and not used:
+                if close[i] > res_line[i]:
+                    breakout[i] = True
+                    breakout_dir[i] = 1
+                    used = True
+                elif close[i] < sup_line[i]:
+                    breakout[i] = True
+                    breakout_dir[i] = -1
+                    used = True
+
+        out["is_pattern_breakout"] = breakout
+        out["pattern_breakout_dir"] = breakout_dir
+        return out
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        res_line = _num(g("res_line"))
+        sup_line = _num(g("sup_line"))
+        close = _num(g("close"))
+
+        if position == 1:
+            if res_line is not None and close is not None and close < res_line:
+                return 0        # 跌回被突破的阻力線內 → 結構失敗，出場
+            return 1
+        if position == -1:
+            if sup_line is not None and close is not None and close > sup_line:
+                return 0        # 漲回被突破的支撐線內 → 結構失敗，出場
+            return -1
+
+        is_bo = bool(g("is_pattern_breakout"))
+        if not is_bo:
+            return 0
+        d = _num(g("pattern_breakout_dir"))
+        if d == 1:
+            return 1
+        if d == -1:
+            return -1
+        return 0
+
+
+class RegressionChannelStrategy(Strategy):
+    """滾動線性迴歸通道均值回歸，2026-07-06。
+
+    使用者要求測試 TradingView「Polynomial/Linear Regression Volume Profile」
+    這類指標背後的核心概念：用統計迴歸配適的通道（而非 fib_channel 的樞紐點
+    錨定通道）當作進出場依據。對每根 K 棒取過去 window 根收盤價做 OLS 線性
+    迴歸，配適線在最後一根的值當「中心線」，殘差標準差 × band_mult 當通道
+    寬度。收盤價觸及下軌 → 做多賭均值回歸；觸及上軌 → 做空。回到中心線視為
+    結構性停利出場；停損交給既有風控層 ATR 機制（跟其他策略一致，方便公平
+    比較進場邏輯本身的差異）。
+    """
+    name = "regression_channel"
+    defaults = {"window": 100, "band_mult": 2.0}
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        window = int(self.params["window"])
+        mult = float(self.params["band_mult"])
+        close = out["close"].to_numpy()
+        n = len(out)
+
+        center = np.full(n, np.nan)
+        upper = np.full(n, np.nan)
+        lower = np.full(n, np.nan)
+        slope = np.full(n, np.nan)
+
+        if n >= window:
+            t = np.arange(window, dtype=float)
+            t_mean = t.mean()
+            t_var = float(((t - t_mean) ** 2).sum())
+
+            for i in range(window - 1, n):
+                y = close[i - window + 1: i + 1]
+                y_mean = y.mean()
+                b = float(((t - t_mean) * (y - y_mean)).sum() / t_var)
+                a = y_mean - b * t_mean
+                fitted = a + b * t
+                resid_std = float(np.std(y - fitted))
+                center[i] = fitted[-1]
+                slope[i] = b
+                upper[i] = fitted[-1] + mult * resid_std
+                lower[i] = fitted[-1] - mult * resid_std
+
+        out["reg_center"] = center
+        out["reg_upper"] = upper
+        out["reg_lower"] = lower
+        out["reg_slope"] = slope
+        out["atr"] = se.atr(out, 14)
+        return out
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        center = _num(g("reg_center"))
+        upper = _num(g("reg_upper"))
+        lower = _num(g("reg_lower"))
+        close = _num(g("close"))
+        if center is None or upper is None or lower is None or close is None:
+            return position
+
+        if position == 1:
+            return 0 if close >= center else 1
+        if position == -1:
+            return 0 if close <= center else -1
+
+        if close <= lower:
+            return 1
+        if close >= upper:
+            return -1
+        return 0
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -1417,6 +1584,8 @@ STRATEGIES = {
     VolMomentumStrategy.name: VolMomentumStrategy,
     EmaFibVolStrategy.name: EmaFibVolStrategy,
     MaConvergencePullbackStrategy.name: MaConvergencePullbackStrategy,
+    ChartPatternBreakoutStrategy.name: ChartPatternBreakoutStrategy,
+    RegressionChannelStrategy.name: RegressionChannelStrategy,
 }
 
 

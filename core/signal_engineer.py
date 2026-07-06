@@ -612,6 +612,61 @@ def fib_channel_single(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int =
     }
 
 
+def trendline_pair(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5) -> pd.DataFrame:
+    """古典圖表形態（三角形/楔形）用的上下兩條趨勢線（causal，逐根重算，不看方向偏好）。
+
+    跟 fib_channel_levels 不同：那個只依 EMA 趨勢方向算「單側」通道（順勢通道策略用）；
+    這裡「上緣/下緣」兩條線同時、各自獨立地算——三角形/楔形形態判斷需要同時看兩側
+    夾角是否收斂，缺一不可。上緣＝最近兩個已確認 swing high 連線延伸；下緣＝最近
+    兩個已確認 swing low 連線延伸（皆用 _confirmed_pivots，右側延遲確認、不 repaint）。
+
+    回傳欄位：
+      res_line/sup_line   當根的線值（樞紐不足時 NaN）
+      res_slope/sup_slope 該線每根的斜率——供外部要在別的 bar 上重新外推這條線時用，
+                           避免直接查歷史欄位值（那可能是用不同樞紐組合算出來的）
+      res_p1/res_p2/sup_p1/sup_p2  構成該線的兩個樞紐 bar 位置索引（NaN=尚無足夠樞紐）
+    """
+    out = df.copy()
+    n = len(df)
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+
+    cols = ("res_line", "sup_line", "res_slope", "sup_slope",
+            "res_p1", "res_p2", "sup_p1", "sup_p2")
+    for col in cols:
+        out[col] = np.nan
+
+    swing_highs = _confirmed_pivots(highs, pivot_left, pivot_right, "high")
+    swing_lows = _confirmed_pivots(lows, pivot_left, pivot_right, "low")
+
+    idx = {c: out.columns.get_loc(c) for c in cols}
+
+    for i in range(n):
+        res_conf = [(j, v) for j, v in swing_highs if j + pivot_right <= i]
+        if len(res_conf) >= 2:
+            p1_j, p1_v = res_conf[-2]
+            p2_j, p2_v = res_conf[-1]
+            if p2_j > p1_j:
+                slope = (p2_v - p1_v) / (p2_j - p1_j)
+                out.iloc[i, idx["res_line"]] = p1_v + slope * (i - p1_j)
+                out.iloc[i, idx["res_slope"]] = slope
+                out.iloc[i, idx["res_p1"]] = p1_j
+                out.iloc[i, idx["res_p2"]] = p2_j
+
+        sup_conf = [(j, v) for j, v in swing_lows if j + pivot_right <= i]
+        if len(sup_conf) >= 2:
+            p1_j, p1_v = sup_conf[-2]
+            p2_j, p2_v = sup_conf[-1]
+            if p2_j > p1_j:
+                slope = (p2_v - p1_v) / (p2_j - p1_j)
+                out.iloc[i, idx["sup_line"]] = p1_v + slope * (i - p1_j)
+                out.iloc[i, idx["sup_slope"]] = slope
+                out.iloc[i, idx["sup_p1"]] = p1_j
+                out.iloc[i, idx["sup_p2"]] = p2_j
+
+    return out
+
+
 _FIB_FAST_DEFAULT = (8, 13, 21)
 _FIB_SLOW_DEFAULT = (34, 55, 89)
 
