@@ -21,6 +21,17 @@ from datetime import datetime, timezone
 _COLUMNS = ["logged_at", "ts", "run_id", "mode", "symbol",
             "strategy", "side", "price", "qty", "pnl", "equity"]
 
+# F4：接管/孤兒倉位 backfill 產生的平倉（restore 後交易所已平、本地補記）。
+# 這類 pnl 是用當下 mark 價估的、非真實策略出場，計入儀表板勝率/期望會污染乾淨樣本，
+# 故乾淨統計一律排除；倉位確實已平，狀態機仍須據此收倉。
+RECONCILED_EXIT_SIDES = frozenset({"exit_reconciled"})
+
+
+def is_reconciled_exit(side) -> bool:
+    """該 side 是否為接管/孤兒 backfill 的平倉（乾淨勝率統計要排除）。"""
+    return str(side) in RECONCILED_EXIT_SIDES
+
+
 _DATABASE_URL = os.getenv("DATABASE_URL")
 
 

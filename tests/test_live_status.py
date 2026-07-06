@@ -116,6 +116,51 @@ def test_bot_live_status_exposes_new_stats(monkeypatch):
         assert key in out, f"bot_live_status 缺 {key}"
 
 
+# ── F4：接管/孤兒 reconciled 紀錄不污染乾淨勝率/期望 ────────────────────
+def test_trade_stats_excludes_reconciled_from_clean_stats():
+    """exit_reconciled 是接管孤兒倉位的 backfill（pnl 是 mark 價估計、非真實出場），
+    不計入乾淨勝率/期望；只有真正的策略出場才算數。"""
+    rows = [  # newest-first
+        {"side": "exit_reconciled", "price": 90, "qty": 1, "pnl": -8, "ts": "2026-07-02 04:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-02 00:00:00"},
+        {"side": "exit_tp", "price": 110, "qty": 1, "pnl": 10, "ts": "2026-07-01 04:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-01 00:00:00"},
+    ]
+    s = trade_stats(rows)
+    assert s["long_trades"] == 1 and s["long_wins"] == 1 and s["long_pnl"] == 10
+    assert s["expectancy"] == 10.0        # -8 的接管估計不稀釋期望
+
+
+def test_reconciled_exit_still_resets_position_state():
+    """接管 backfill 讓倉位確實平掉——後續 entry_short→exit_sl 要正確歸為 short，
+    不可因為跳過 reconciled 而讓狀態機以為 long 倉還開著。"""
+    rows = [  # newest-first
+        {"side": "exit_sl", "price": 95, "qty": 1, "pnl": -5, "ts": "2026-07-02 08:00:00"},
+        {"side": "entry_short", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-02 06:00:00"},
+        {"side": "exit_reconciled", "price": 90, "qty": 1, "pnl": -8, "ts": "2026-07-01 04:00:00"},
+        {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-01 00:00:00"},
+    ]
+    s = trade_stats(rows)
+    assert s["long_trades"] == 0                       # 那筆 long 被接管收掉、不計
+    assert s["short_trades"] == 1 and s["short_wins"] == 0 and s["short_pnl"] == -5
+
+
+def test_bot_live_status_excludes_reconciled_from_winrate(monkeypatch):
+    """儀表板 total_trades/win_trades/realized_pnl 排除接管紀錄，另揭露 reconciled_trades。"""
+    def fake_read(limit=50, strategy=None, symbol=None, db_path=None, **kw):
+        return [
+            {"side": "exit_reconciled", "price": 90, "qty": 1, "pnl": -8, "ts": "2026-07-02 04:00:00"},
+            {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-02 00:00:00"},
+            {"side": "exit_tp", "price": 110, "qty": 1, "pnl": 10, "ts": "2026-07-01 04:00:00"},
+            {"side": "entry", "price": 100, "qty": 1, "pnl": 0, "ts": "2026-07-01 00:00:00"},
+        ]
+    monkeypatch.setattr("core.live_status.read_trades_db", fake_read)
+    out = bot_live_status({"mode": "futures", "cash": 5000.0}, "s", "BTCUSDT", "4h")
+    assert out["total_trades"] == 1 and out["win_trades"] == 1   # 只算乾淨那筆
+    assert out["realized_pnl"] == 10                             # 排除接管估計 pnl
+    assert out["reconciled_trades"] == 1                         # 接管筆數透明揭露
+
+
 def test_trade_stats_survives_mixed_tz_aware_and_naive_timestamps():
     """實際 DB 混雜帶時區（新碼寫入）與不帶時區（舊碼）的 ts —— aware−naive 相減會拋
     TypeError，曾把整台 /live 打壞（b7 現場事故 2026-07-05）。必須正規化後安全計算。"""

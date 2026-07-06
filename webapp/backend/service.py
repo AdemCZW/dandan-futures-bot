@@ -11,7 +11,7 @@ import os
 import sqlite3
 import time
 
-from core.trade_journal import read_trades_db
+from core.trade_journal import read_trades_db, is_reconciled_exit
 from config import Config
 from core.quant_researcher import STRATEGIES, build_strategy
 from core.risk_officer import RiskOfficer
@@ -309,6 +309,8 @@ def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
             cur_dir = 1
         elif side == "entry_short":
             cur_dir = -1
+        elif is_reconciled_exit(side):
+            cur_dir = 0                 # F4：接管/孤兒 backfill 收倉但估計 pnl 不進乾淨統計
         elif side == "scale_out" or side.startswith("exit"):
             if pnl is not None and pnl != 0:
                 try:
@@ -490,7 +492,8 @@ def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
             stats_payload = stats_cached[1]
         else:
             all_hist = _fetch_railway_trades(limit=_LIVE_STATS_TRADES_LIMIT, mode=trades_mode, base_url=ru)
-            closed = [t for t in all_hist if t.get("pnl") and t["pnl"] != 0]
+            closed = [t for t in all_hist
+                      if t.get("pnl") and t["pnl"] != 0 and not is_reconciled_exit(t.get("side"))]
             s = trade_stats(all_hist)      # 最大回撤% / 每筆夏普 / 多空拆分
             stats_payload = {
                 "realized_pnl": round(sum(t["pnl"] for t in closed), 2),
@@ -514,7 +517,8 @@ def live_status(state_path: str = None, railway_url: str | None = None) -> dict:
             stats_payload = stats_cached[1]
         else:
             all_hist = read_trades(limit=_LIVE_STATS_TRADES_LIMIT, mode=trades_mode, db_path="trades.db")
-            closed = [t for t in all_hist if t.get("pnl") and t["pnl"] != 0]
+            closed = [t for t in all_hist
+                      if t.get("pnl") and t["pnl"] != 0 and not is_reconciled_exit(t.get("side"))]
             s = trade_stats(all_hist)
             stats_payload = {
                 "realized_pnl": round(sum(t["pnl"] for t in closed), 2),

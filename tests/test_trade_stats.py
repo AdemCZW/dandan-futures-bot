@@ -100,6 +100,27 @@ class TestLongShortSplit:
         assert s["max_drawdown_pct"] is not None   # 孤兒 -3 仍進回撤計算
 
 
+class TestReconciledExcluded:
+    def test_reconciled_exit_not_counted_in_split(self):
+        # exit_reconciled（接管孤兒 backfill）估計 pnl 不計入乾淨勝率/多空拆分
+        chrono = [
+            _row("entry", 0.0), _row("exit_tp", 10.0),       # 乾淨 long win
+            _row("entry", 0.0), _row("exit_reconciled", -8.0),  # 接管 → 不計
+        ]
+        s = trade_stats(feed(chrono))
+        assert s["long_trades"] == 1 and s["long_wins"] == 1 and s["long_pnl"] == 10.0
+
+    def test_reconciled_resets_position_for_next_trade(self):
+        # 接管收倉後，後續 entry_short→exit_sl 要正確歸為 short
+        chrono = [
+            _row("entry", 0.0), _row("exit_reconciled", -8.0),
+            _row("entry_short", 0.0), _row("exit_sl", -5.0),
+        ]
+        s = trade_stats(feed(chrono))
+        assert s["long_trades"] == 0
+        assert s["short_trades"] == 1 and s["short_pnl"] == -5.0
+
+
 class TestDrawdown:
     def test_monotonic_up_zero_drawdown(self):
         chrono = [_row("entry", 0.0), _row("exit_tp", 10.0),

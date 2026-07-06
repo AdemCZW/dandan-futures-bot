@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
-from core.trade_journal import read_trades_db
+from core.trade_journal import read_trades_db, is_reconciled_exit
 
 
 def _fin(x):
@@ -53,6 +53,11 @@ def trade_stats(all_hist: list[dict], init_capital: float = 5000.0) -> dict:
         elif side == "entry_short":
             cur_dir = -1
             entry_ts = _ts(t)
+        elif is_reconciled_exit(side):
+            # F4：接管/孤兒 backfill 的估計 pnl 不進乾淨統計（勝率/期望/回撤/持倉時長），
+            # 但倉位確實已平 → 狀態機收倉，後續交易方向才不會被誤歸。
+            cur_dir = 0
+            entry_ts = None
         elif side == "scale_out" or side.startswith("exit"):
             if pnl is not None and pnl != 0:
                 try:
@@ -170,7 +175,10 @@ def bot_live_status(state: dict, strategy: str, symbol: str, interval: str,
     # 該台自己的紀錄（strategy+symbol 過濾 = 每台隔離）
     recent   = read_trades_db(limit=30,   strategy=strategy, symbol=symbol, db_path=db_path)
     all_hist = read_trades_db(limit=2000, strategy=strategy, symbol=symbol, db_path=db_path)
-    closed = [t for t in all_hist if t.get("pnl") and t["pnl"] != 0]
+    # F4：排除接管/孤兒 backfill（exit_reconciled）——估計 pnl 非真實出場，污染乾淨勝率。
+    closed = [t for t in all_hist
+              if t.get("pnl") and t["pnl"] != 0 and not is_reconciled_exit(t.get("side"))]
+    reconciled_trades = sum(1 for t in all_hist if is_reconciled_exit(t.get("side")))
     realized_pnl = round(sum(t["pnl"] for t in closed), 2)
     total_trades = len(closed)
     win_trades   = sum(1 for t in closed if t["pnl"] > 0)
@@ -189,6 +197,7 @@ def bot_live_status(state: dict, strategy: str, symbol: str, interval: str,
         "realized_pnl": realized_pnl,
         "total_trades": total_trades,
         "win_trades": win_trades,
+        "reconciled_trades": reconciled_trades,
         "max_drawdown_pct": stats["max_drawdown_pct"],
         "sharpe": stats["sharpe"],
         "expectancy": stats["expectancy"],
