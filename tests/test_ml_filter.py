@@ -471,3 +471,63 @@ class TestExtractFeaturesWithFunding:
                                  "close": closes, "volume": np.full(n, 10.0)}, index=idx)
         X = extract_features(prepared, prepared.index[10:15])
         assert "funding_rate" not in X.columns
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 橫斷面排名特徵（2026-07-07）：某幣在籃子裡的相對位置。
+# 跟已測過三次無效的「單幣看自己」特徵（技術指標/資金費率/SMC結構）正交，
+# 且對齊唯一被證實的 edge（橫斷面動量）。全部只用 ≤t 資料，因果、前綴不變。
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestCrossSectionalFeatures:
+    def _panel(self, n=120, seed=0):
+        """3 幣寬表收盤（columns=symbols, index=時間）。"""
+        idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+        rng = np.random.default_rng(seed)
+        data = {}
+        for i, s in enumerate(["AAA", "BBB", "CCC"]):
+            rets = rng.normal(0.0002, 0.01, n)
+            data[s] = 100 * np.exp(np.cumsum(rets))
+        return pd.DataFrame(data, index=idx)
+
+    def test_returns_expected_columns_indexed_by_events(self):
+        from ml.ml_filter import cross_sectional_features
+        panel = self._panel()
+        events = panel.index[80:85]
+        out = cross_sectional_features(panel, "AAA", events)
+        for col in ("cs_mom_rank", "cs_vol_rank", "cs_mom_z", "cs_corr_basket"):
+            assert col in out.columns
+        assert list(out.index) == list(events)
+
+    def test_mom_rank_top_for_strongest_coin(self):
+        """在某時點報酬明顯最高的幣，其橫斷面動量排名應為最高（pct rank≈1.0）。"""
+        from ml.ml_filter import cross_sectional_features
+        idx = pd.date_range("2024-01-01", periods=20, freq="4h")
+        # AAA 一路走高、BBB 持平、CCC 走低 → 近6根報酬 AAA 最高
+        panel = pd.DataFrame({
+            "AAA": np.linspace(100, 130, 20),
+            "BBB": np.full(20, 100.0),
+            "CCC": np.linspace(100, 80, 20),
+        }, index=idx)
+        ev = pd.DatetimeIndex([idx[-1]])
+        rank_aaa = cross_sectional_features(panel, "AAA", ev, mom_window=6)["cs_mom_rank"].iloc[0]
+        rank_ccc = cross_sectional_features(panel, "CCC", ev, mom_window=6)["cs_mom_rank"].iloc[0]
+        assert rank_aaa == pytest.approx(1.0)      # 最強 → 排名頂
+        assert rank_ccc < rank_aaa                 # 最弱 → 排名低
+
+    def test_prefix_invariant_no_lookahead(self):
+        """截尾未來資料，事件當下的橫斷面特徵不得改變（因果、前綴不變）。"""
+        from ml.ml_filter import cross_sectional_features
+        panel = self._panel(n=120, seed=3)
+        events = panel.index[60:63]
+        full = cross_sectional_features(panel, "BBB", events)
+        truncated = cross_sectional_features(panel.iloc[:70], "BBB", events)
+        pd.testing.assert_frame_equal(full, truncated)
+
+    def test_event_in_warmup_is_nan(self):
+        """暖機期（不足以算滾動窗）的事件 → NaN，交給下游 fillna(median) 降級。"""
+        from ml.ml_filter import cross_sectional_features
+        panel = self._panel()
+        ev = pd.DatetimeIndex([panel.index[0]])      # 第一根，無法算 trailing 報酬
+        out = cross_sectional_features(panel, "AAA", ev, mom_window=6)
+        assert out["cs_mom_rank"].isna().all()

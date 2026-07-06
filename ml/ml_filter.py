@@ -69,6 +69,53 @@ def funding_features(events: pd.DatetimeIndex, funding: pd.Series,
     return out.reindex(pd.DatetimeIndex(events))
 
 
+def cross_sectional_features(panel_close: pd.DataFrame,
+                             symbol: str,
+                             events: pd.DatetimeIndex,
+                             mom_window: int = 6,
+                             vol_window: int = 20,
+                             corr_window: int = 30) -> pd.DataFrame:
+    """橫斷面排名特徵（2026-07-07）：某幣在籃子裡的相對位置。
+
+    跟已測過三次無效的「單幣看自己」特徵（技術指標 / 資金費率 / SMC 結構）**正交**——
+    這裡問的是「這個幣此刻在 8 幣籃子裡是領漲還是落後」，對齊唯一被證實的 edge
+    （橫斷面動量：加密時序動量要分散多資產才穩，領漲/落後帶資訊）。
+
+    panel_close：寬表 columns=各幣, index=時間（8 幣收盤，已對齊到同一時間軸）。
+    symbol：要取哪一幣的特徵。events：該幣的進場訊號時間點。
+
+    欄位（全部只用 ≤t 的資料 → 因果、前綴不變）：
+      cs_mom_rank    近 mom_window 根報酬在籃子的百分位排名 0~1（1=最強）
+      cs_vol_rank    報酬滾動波動度在籃子的百分位排名 0~1（1=最波動）
+      cs_mom_z       近 mom_window 根報酬相對同儕的橫斷面 z-score（多極端）
+      cs_corr_basket 與籃子等權報酬的滾動相關（corr_window），低相關=獨立行情
+
+    暖機期（不足以算 trailing 窗）的時點為 NaN，交由 extract 端 fillna(median) 降級。
+    """
+    px = panel_close.sort_index()
+    # 近 N 根報酬（trailing，pct_change 只看過去）；橫斷面在「單一時點」跨幣比較
+    mom = px.pct_change(mom_window)
+    mom_rank = mom.rank(axis=1, pct=True)                       # 每個時點跨幣百分位
+    mom_mean = mom.mean(axis=1)
+    mom_std = mom.std(axis=1)
+    mom_z = mom.sub(mom_mean, axis=0).div(mom_std.replace(0, np.nan), axis=0)
+
+    ret1 = px.pct_change()
+    vol = ret1.rolling(vol_window, min_periods=max(2, vol_window // 2)).std()
+    vol_rank = vol.rank(axis=1, pct=True)
+
+    basket_ret = ret1.mean(axis=1)                             # 等權籃子報酬
+    corr = ret1[symbol].rolling(corr_window, min_periods=max(3, corr_window // 2)).corr(basket_ret)
+
+    feat = pd.DataFrame({
+        "cs_mom_rank":    mom_rank[symbol],
+        "cs_vol_rank":    vol_rank[symbol],
+        "cs_mom_z":       mom_z[symbol],
+        "cs_corr_basket": corr,
+    })
+    return feat.reindex(pd.DatetimeIndex(events))
+
+
 def extract_features(prepared: pd.DataFrame,
                      events: pd.DatetimeIndex,
                      vol_z_window: int = 20,
