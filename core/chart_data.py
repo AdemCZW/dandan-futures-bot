@@ -192,7 +192,7 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
     df["dc_upper"] = don["dc_upper"]
     df["dc_lower"] = don["dc_lower"]
     fib_cols   = list(se.FIB_CHANNEL_RATIOS.values())
-    fib_single = se.fib_regression_channel(df, lookback=120)
+    fib_single = se.fib_regression_channel(df, lookback=60)
 
     def _ts(idx):
         return int(idx.timestamp())
@@ -304,7 +304,7 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
     # 中間比率 0.236/0.382/0.5/0.618/0.786 為結構層級，>1 為延伸目標）。
     fib_cols = list(se.FIB_CHANNEL_RATIOS.values())
     fib_series = {col: [] for col in fib_cols}
-    fib_single = se.fib_regression_channel(df, lookback=120)
+    fib_single = se.fib_regression_channel(df, lookback=60)
     _fc = None
     fib_dir = 0
     if fib_single is not None:
