@@ -192,7 +192,7 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
     df["dc_upper"] = don["dc_upper"]
     df["dc_lower"] = don["dc_lower"]
     fib_cols   = list(se.FIB_CHANNEL_RATIOS.values())
-    fib_single = se.fib_channel_single(df, pivot_left=5, pivot_right=5)
+    fib_single = se.fib_regression_channel(df, lookback=120)
 
     def _ts(idx):
         return int(idx.timestamp())
@@ -299,12 +299,12 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 ("is_first_pullback", "pullback1"),
                 ("is_second_pullback", "pullback2"))
 
-    # 斐波那契「單一乾淨通道」（與 K線圖表頁 klines_data 用同一份 fib_channel_single，
+    # 斐波那契「單一乾淨通道」（與 K線圖表頁 klines_data 用同一份 fib_regression_channel，
     # 零軸 fib_ch_0＝趨勢原點：上升→支撐、下降→壓力；一軸 fib_ch_100 為對側目標；
     # 中間比率 0.236/0.382/0.5/0.618/0.786 為結構層級，>1 為延伸目標）。
     fib_cols = list(se.FIB_CHANNEL_RATIOS.values())
     fib_series = {col: [] for col in fib_cols}
-    fib_single = se.fib_channel_single(df, pivot_left=5, pivot_right=5)
+    fib_single = se.fib_regression_channel(df, lookback=120)
     _fc = None
     fib_dir = 0
     if fib_single is not None:

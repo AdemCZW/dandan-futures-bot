@@ -612,6 +612,50 @@ def fib_channel_single(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int =
     }
 
 
+def fib_regression_channel(df: pd.DataFrame, lookback: int = 120, k: float = 2.0) -> dict | None:
+    """迴歸擬合斐波那契通道（2026-07-09）——比 fib_channel_single 準的畫法。
+
+    fib_channel_single 用「最近兩個同型樞紐點」定斜率，只要抓到兩個位置怪異的
+    點，斜率就會被帶歪（實測 BTC 上 slope 高達 178/根、價格離零軸 9~22 個通道寬），
+    而且寬度取「最大距離」被單一尖刺撐爆。本函式改用：
+      1. 斜率＝對最近 lookback 根收盤價做最小平方線性迴歸（穩健、不被兩個怪點帶歪）。
+      2. 寬度＝k × 殘差標準差 × 2（0軸到1軸的總寬），殘差 std 對單一尖刺不敏感。
+
+    零軸語意與 fib_channel_single 一致：上升(dir=+1)零軸在下緣(支撐)、下降(dir=-1)
+    零軸在上緣(壓力)。回傳格式相同（dir/anchor_idx/anchor_price/slope/width），
+    可直接餵進 chart_data 的既有渲染。資料不足 lookback → None。
+
+    causal：只用最近 lookback 根「已收完」的資料，無前視。
+    """
+    n = len(df)
+    if n < lookback:
+        return None
+    seg = df["close"].to_numpy()[-lookback:]
+    t = np.arange(lookback, dtype=float)
+    slope, intercept = np.polyfit(t, seg, 1)          # close ≈ intercept + slope*t
+    resid = seg - (intercept + slope * t)
+    # 寬度用 MAD（中位數絕對離差）× 1.4826 當抗離群值的 std 估計——單一尖刺幾乎不動
+    # 中位數，避免 fib_channel_single「一根影線撐爆通道」的老問題（純 std 仍會被撐大）。
+    mad = float(np.median(np.abs(resid - np.median(resid))))
+    half_width = k * 1.4826 * mad
+    width = 2.0 * half_width
+    if width <= 0:
+        return None
+    d = 1 if slope >= 0 else -1
+    # 零軸：上升→下緣(支撐)＝擬合中線 − 半寬；下降→上緣(壓力)＝擬合中線 + 半寬。
+    # anchor 放在迴歸窗起點（全 df 索引 n-lookback，窗內 t=0），anchor_price＝該處零軸。
+    anchor_idx = n - lookback
+    center_at_anchor = intercept                       # t=0 的擬合值
+    anchor_price = center_at_anchor - d * half_width
+    return {
+        "dir": int(d),
+        "anchor_idx": int(anchor_idx),
+        "anchor_price": float(anchor_price),
+        "slope": float(slope),
+        "width": float(width),
+    }
+
+
 def trendline_pair(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5) -> pd.DataFrame:
     """古典圖表形態（三角形/楔形）用的上下兩條趨勢線（causal，逐根重算，不看方向偏好）。
 

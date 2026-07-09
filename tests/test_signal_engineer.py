@@ -1136,3 +1136,59 @@ def test_trendline_pair_too_short_series_all_nan():
     out = se.trendline_pair(_pattern_df(10), pivot_left=5, pivot_right=5)
     assert out["res_line"].isna().all()
     assert out["sup_line"].isna().all()
+
+
+# ── fib_regression_channel（2026-07-09，迴歸擬合斜率+殘差寬度，解決2樞紐斜率被怪點帶歪）──
+def test_fib_regression_channel_returns_compatible_dict():
+    """回傳格式與 fib_channel_single 相容（dir/anchor_idx/anchor_price/slope/width），
+    才能直接餵進既有 chart_data 渲染，不改前端。"""
+    rng = np.random.RandomState(0)
+    n = 200
+    close = 100 + np.cumsum(rng.normal(0, 1.0, n))
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    ch = se.fib_regression_channel(df, lookback=120)
+    for k in ("dir", "anchor_idx", "anchor_price", "slope", "width"):
+        assert k in ch
+    assert ch["dir"] in (-1, 1)
+    assert ch["width"] > 0
+
+
+def test_fib_regression_channel_slope_matches_linear_trend():
+    """純線性上升趨勢 → 斜率為正、方向=+1（迴歸抓得到真實斜率）。"""
+    n = 150
+    close = 100 + np.arange(n) * 2.0            # 每根 +2 的乾淨上升
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    ch = se.fib_regression_channel(df, lookback=100)
+    assert ch["dir"] == 1
+    assert ch["slope"] == pytest.approx(2.0, abs=0.05)
+
+
+def test_fib_regression_channel_robust_to_single_spike():
+    """單一根尖刺不該把通道寬度撐爆（這正是 fib_channel_single max 寬度的致命傷）。"""
+    n = 150
+    close = 100 + np.zeros(n)                    # 完全平盤
+    close += np.sin(np.arange(n) * 0.3) * 2      # 小幅波動
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 0.5, "low": close - 0.5,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    w_normal = se.fib_regression_channel(df, lookback=120)["width"]
+    # 注入一根極端尖刺
+    df2 = df.copy()
+    df2.iloc[75, df2.columns.get_loc("high")] = 500.0
+    df2.iloc[75, df2.columns.get_loc("close")] = 500.0
+    w_spiked = se.fib_regression_channel(df2, lookback=120)["width"]
+    # 殘差寬度會被一根尖刺影響，但不該爆炸性放大（<5倍）；max 寬度會放大~50倍
+    assert w_spiked < w_normal * 5, f"單一尖刺把寬度從 {w_normal:.1f} 撐到 {w_spiked:.1f}（過度敏感）"
+
+
+def test_fib_regression_channel_too_short_returns_none():
+    n = 20
+    close = 100 + np.arange(n)
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    assert se.fib_regression_channel(df, lookback=120) is None
