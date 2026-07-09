@@ -1572,6 +1572,69 @@ class RegressionChannelStrategy(Strategy):
         return 0
 
 
+class FibZeroAxisRejectStrategy(Strategy):
+    """零軸拒絕交易法（2026-07-09，復刻使用者提供的分析師「自然交易理論」看盤法）。
+
+    分析師觀點：迴歸斐波那契通道的「零軸」（下降通道=上緣壓力／上升通道=下緣支撐）
+    有高機率成為反向點。當價格觸及零軸、且多頭量能衰減（動能枯竭、無放量續強突破）
+    → 順通道方向進場（下降做空／上升做多）；價格走到通道內部目標（靠近一軸）獲利，
+    價格反向突破零軸（通道結構破壞）則停損。
+
+    ⚠️ 分析師宣稱零軸/一軸有 80-90% 反轉勝率——這是他的說法、未經驗證。本策略只是
+    忠實把「機械規則」實作出來供嚴格回測檢驗，不代表那個勝率是真的（見
+    docs/strategy_research_log.md 這一整輪對網路策略的實測，幾乎全部無 edge）。
+
+    pos 語意（se.fib_regression_levels）：0=零軸(進場側)、1=一軸(對側目標)；多空
+    在 pos 空間對稱——都是 pos 往 1 走獲利、pos 轉負(反向突破零軸)停損。
+    """
+    name = "fib_zero_reject"
+    defaults = {"lookback": 60, "reg_k": 2.0,
+                "zero_zone": 0.15,       # pos ≤ 此值視為「觸零軸」
+                "target_pos": 0.5,       # pos ≥ 此值視為到達內部目標（獲利了結）
+                "break_buffer": 0.15,    # pos < −此值視為反向突破零軸（通道破壞、停損）
+                "vol_window": 20,        # 量能均值視窗
+                "use_volume_gate": True} # 是否要求量能衰減才進場（分析師核心條件）
+    allow_short = True
+    regime_pref = "any"
+
+    def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
+        out = se.fib_regression_levels(df.copy(), lookback=int(self.params["lookback"]),
+                                       k=float(self.params["reg_k"]))
+        out["atr"] = se.atr(out, 14)
+        # 量能衰減：當根成交量 < 近 vol_window 根均量 → 多頭動能枯竭（分析師的「量縮」）。
+        vw = int(self.params["vol_window"])
+        vol_avg = out["volume"].rolling(vw, min_periods=max(2, vw // 2)).mean()
+        out["vol_decay"] = (out["volume"] < vol_avg).astype(float)
+        return out
+
+    def signal(self, row, position: int) -> int:
+        g = (lambda k: row.get(k) if hasattr(row, "get") else row[k])
+        pos = _num(g("fib_rc_pos"))
+        d = _num(g("fib_rc_dir"))
+        target = float(self.params["target_pos"])
+        brk = float(self.params["break_buffer"])
+
+        if position != 0:
+            if pos is None:
+                return position                      # 暖機 → 維持現狀
+            if pos >= target:                        # 到達內部目標 → 獲利了結
+                return 0
+            if pos < -brk:                           # 反向突破零軸 → 通道破壞、停損
+                return 0
+            return position
+
+        if pos is None or d is None or d == 0:
+            return 0
+        if pos > float(self.params["zero_zone"]):    # 不在零軸 → 不進場
+            return 0
+        # 量能衰減閘門（分析師核心條件）：無量縮＝可能放量突破，不算「拒絕」，不進場
+        if bool(self.params.get("use_volume_gate", True)):
+            vd = _num(g("vol_decay"))
+            if vd is None or vd <= 0:
+                return 0
+        return int(d)                                # 順通道方向：下降做空、上升做多
+
+
 STRATEGIES = {
     EMACrossStrategy.name: EMACrossStrategy,
     ZScoreRevertStrategy.name: ZScoreRevertStrategy,
@@ -1594,6 +1657,7 @@ STRATEGIES = {
     MaConvergencePullbackStrategy.name: MaConvergencePullbackStrategy,
     ChartPatternBreakoutStrategy.name: ChartPatternBreakoutStrategy,
     RegressionChannelStrategy.name: RegressionChannelStrategy,
+    FibZeroAxisRejectStrategy.name: FibZeroAxisRejectStrategy,
 }
 
 

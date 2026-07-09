@@ -1192,3 +1192,49 @@ def test_fib_regression_channel_too_short_returns_none():
     df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
                        "close": close, "volume": np.full(n, 100.0)}, index=idx)
     assert se.fib_regression_channel(df, lookback=120) is None
+
+
+# ── fib_regression_levels（2026-07-09，逐根迴歸通道位置，供零軸拒絕策略用）──
+def _rc_df(closes):
+    p = np.asarray(closes, dtype=float)
+    idx = pd.date_range("2024-01-01", periods=len(p), freq="4h")
+    return pd.DataFrame({"open": p, "high": p + 0.5, "low": p - 0.5,
+                         "close": p, "volume": np.full(len(p), 100.0)}, index=idx)
+
+
+def test_fib_regression_levels_adds_columns():
+    df = _rc_df(100 + np.cumsum(np.random.RandomState(0).normal(0, 1, 200)))
+    out = se.fib_regression_levels(df, lookback=60)
+    for col in ("fib_rc_pos", "fib_rc_dir"):
+        assert col in out.columns
+
+
+def test_fib_regression_levels_pos_zero_at_zero_axis():
+    """收盤正好落在零軸上時 fib_rc_pos≈0；落在一軸上時≈1（下降通道零軸在上緣）。
+
+    造一段乾淨下降 → 迴歸零軸在上緣(壓力)。價格貼著上緣時 pos 接近 0。"""
+    n = 120
+    close = 200 - np.arange(n) * 0.5          # 乾淨下降，slope<0 → dir=-1
+    df = _rc_df(close)
+    out = se.fib_regression_levels(df, lookback=60).dropna(subset=["fib_rc_pos"])
+    # 乾淨直線 → 殘差幾乎 0 → 通道極窄，價格幾乎貼著中線，pos 在 0~1 之間有定義
+    assert out["fib_rc_pos"].between(-0.5, 1.5).mean() > 0.8
+    assert (out["fib_rc_dir"] == -1).all()
+
+
+def test_fib_regression_levels_is_causal_no_lookahead():
+    """因果：截斷尾端重算，前綴 fib_rc_pos 不變（每根只用自己往前 lookback 根）。"""
+    df = _rc_df(100 + np.cumsum(np.random.RandomState(3).normal(0, 1, 180)))
+    full = se.fib_regression_levels(df, lookback=60)
+    for k in (100, 140, 170):
+        prefix = se.fib_regression_levels(df.iloc[:k], lookback=60)
+        a, b = full["fib_rc_pos"].iloc[:k], prefix["fib_rc_pos"]
+        assert a.isna().equals(b.isna())
+        np.testing.assert_allclose(a.dropna().values, b.dropna().values, rtol=1e-9)
+
+
+def test_fib_regression_levels_warmup_nan_before_lookback():
+    df = _rc_df(100 + np.arange(80))
+    out = se.fib_regression_levels(df, lookback=60)
+    assert out["fib_rc_pos"].iloc[:59].isna().all()      # 前 lookback-1 根不足→NaN
+    assert out["fib_rc_pos"].iloc[59:].notna().any()

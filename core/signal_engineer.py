@@ -656,6 +656,42 @@ def fib_regression_channel(df: pd.DataFrame, lookback: int = 120, k: float = 2.0
     }
 
 
+def fib_regression_levels(df: pd.DataFrame, lookback: int = 60, k: float = 2.0) -> pd.DataFrame:
+    """逐根迴歸通道位置（2026-07-09，供零軸拒絕策略/圖表訊號用）。
+
+    每根 K 棒對「最近 lookback 根收盤價」做最小平方線性迴歸（跟 fib_regression_channel
+    同方法，但逐根算），輸出當根收盤在通道內的相對位置：
+      fib_rc_pos  0＝零軸（進場側：上升→下緣支撐、下降→上緣壓力），1＝一軸（對側）。
+      fib_rc_dir  +1 上升 / −1 下降（迴歸斜率符號）。
+
+    寬度用 MAD×1.4826（抗離群值），跟 fib_regression_channel 一致。
+    完全 causal：第 i 根只用 [i-lookback+1, i] 的收盤價，無前視。暖機期(不足 lookback)為 NaN。
+    """
+    out = df.copy()
+    n = len(out)
+    closes = out["close"].to_numpy()
+    pos = np.full(n, np.nan)
+    direc = np.full(n, np.nan)
+    t = np.arange(lookback, dtype=float)
+    for i in range(lookback - 1, n):
+        seg = closes[i - lookback + 1: i + 1]
+        slope, intercept = np.polyfit(t, seg, 1)
+        resid = seg - (intercept + slope * t)
+        mad = float(np.median(np.abs(resid - np.median(resid))))
+        half_width = k * 1.4826 * mad
+        if half_width <= 0:
+            continue
+        d = 1 if slope >= 0 else -1
+        center_now = intercept + slope * (lookback - 1)     # 當根(窗內最後一根)的擬合值
+        zero_now = center_now - d * half_width              # 零軸在當根的值
+        # pos：從零軸往一軸方向量測，除以總寬（2×half_width）
+        pos[i] = (closes[i] - zero_now) * d / (2.0 * half_width)
+        direc[i] = d
+    out["fib_rc_pos"] = pos
+    out["fib_rc_dir"] = direc
+    return out
+
+
 def trendline_pair(df: pd.DataFrame, pivot_left: int = 5, pivot_right: int = 5) -> pd.DataFrame:
     """古典圖表形態（三角形/楔形）用的上下兩條趨勢線（causal，逐根重算，不看方向偏好）。
 
