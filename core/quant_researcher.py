@@ -1590,10 +1590,15 @@ class FibZeroAxisRejectStrategy(Strategy):
     name = "fib_zero_reject"
     defaults = {"lookback": 60, "reg_k": 2.0,
                 "zero_zone": 0.15,       # pos ≤ 此值視為「觸零軸」
+                "entry_zone": 0.25,      # 第二根確認時，當根 pos 仍須 ≤ 此值（還在零軸附近）
                 "target_pos": 0.5,       # pos ≥ 此值視為到達內部目標（獲利了結）
                 "break_buffer": 0.15,    # pos < −此值視為反向突破零軸（通道破壞、停損）
                 "vol_window": 20,        # 量能均值視窗
-                "use_volume_gate": True} # 是否要求量能衰減才進場（分析師核心條件）
+                "use_volume_gate": True, # 是否要求量能衰減才進場（分析師核心條件）
+                # 2026-07-09 使用者指正：分析師是「撞零軸後看第二根 4h K 棒」才決定進場——
+                # 第一根撞零軸(測試)，第二根若沒放量突破零軸(續強失敗)才算拒絕、才進場。
+                # 預設關＝維持舊「觸即進」行為（既有測試/回測相容）；開啟＝更忠實復刻。
+                "use_second_candle_confirm": False}
     allow_short = True
     regime_pref = "any"
 
@@ -1605,6 +1610,29 @@ class FibZeroAxisRejectStrategy(Strategy):
         vw = int(self.params["vol_window"])
         vol_avg = out["volume"].rolling(vw, min_periods=max(2, vw // 2)).mean()
         out["vol_decay"] = (out["volume"] < vol_avg).astype(float)
+
+        # 第二根四小時確認：前一根撞零軸(pos_{i-1}≤zero_zone)，當根未放量突破零軸
+        # （非「pos_i<−break 且量能放大」）且仍在零軸附近(pos_i≤entry_zone、未破)、
+        # 同通道方向 → zero_reject_dir[i]=通道方向。這是分析師的「等第二根確認拒絕」。
+        n = len(out)
+        pos = out["fib_rc_pos"].to_numpy()
+        direc = out["fib_rc_dir"].to_numpy()
+        vol = out["volume"].to_numpy()
+        zz = float(self.params["zero_zone"]); ez = float(self.params["entry_zone"])
+        brk = float(self.params["break_buffer"])
+        zr = np.zeros(n)
+        for i in range(1, n):
+            if np.isnan(pos[i]) or np.isnan(pos[i - 1]) or np.isnan(direc[i]):
+                continue
+            prev_at_zero = pos[i - 1] <= zz
+            same_dir = direc[i] == direc[i - 1]
+            still_near = (-brk) <= pos[i] <= ez               # 還在零軸附近、未反向突破
+            vol_expand = vol[i] > vol[i - 1]
+            broke_out = pos[i] < -brk                          # 反向突破零軸（往對壓力方向）
+            is_breakout = broke_out and vol_expand            # 放量突破 → 不是拒絕
+            if prev_at_zero and same_dir and still_near and not is_breakout:
+                zr[i] = direc[i]
+        out["zero_reject_dir"] = zr
         return out
 
     def signal(self, row, position: int) -> int:
@@ -1623,11 +1651,22 @@ class FibZeroAxisRejectStrategy(Strategy):
                 return 0
             return position
 
+        # 第二根確認：進場依 prepare 算好的 zero_reject_dir（已含「未突破」判斷）
+        if bool(self.params.get("use_second_candle_confirm", False)):
+            zr = _num(g("zero_reject_dir"))
+            if zr is None or zr == 0:
+                return 0
+            if bool(self.params.get("use_volume_gate", True)):   # 疊加量縮閘門（可選）
+                vd = _num(g("vol_decay"))
+                if vd is None or vd <= 0:
+                    return 0
+            return int(zr)
+
+        # 舊行為（觸即進）：觸零軸 + 量能衰減 → 順通道方向進場
         if pos is None or d is None or d == 0:
             return 0
         if pos > float(self.params["zero_zone"]):    # 不在零軸 → 不進場
             return 0
-        # 量能衰減閘門（分析師核心條件）：無量縮＝可能放量突破，不算「拒絕」，不進場
         if bool(self.params.get("use_volume_gate", True)):
             vd = _num(g("vol_decay"))
             if vd is None or vd <= 0:

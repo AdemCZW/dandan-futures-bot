@@ -26,9 +26,15 @@ def _mk_df(n=200, seed=7):
     }, index=idx)
 
 
-def _row(fib_rc_pos=0.05, fib_rc_dir=-1, vol_decay=True, atr=2.0):
+def _row(fib_rc_pos=0.05, fib_rc_dir=-1, vol_decay=True, atr=2.0,
+        zero_reject_dir=None):
+    # zero_reject_dir 預設跟隨「觸零軸+量能衰減即進場」的舊行為，讓既有測試不變；
+    # 第二根確認開啟時，改由 prepare 算出的欄位決定。
+    if zero_reject_dir is None:
+        zero_reject_dir = fib_rc_dir if (fib_rc_pos is not None and fib_rc_pos <= 0.15
+                                         and vol_decay) else 0
     return {"fib_rc_pos": fib_rc_pos, "fib_rc_dir": fib_rc_dir,
-            "vol_decay": vol_decay, "atr": atr}
+            "vol_decay": vol_decay, "atr": atr, "zero_reject_dir": zero_reject_dir}
 
 
 def test_registered_and_buildable():
@@ -40,8 +46,38 @@ def test_registered_and_buildable():
 def test_prepare_adds_columns():
     s = build_strategy("fib_zero_reject")
     out = s.prepare(_mk_df())
-    for col in ("fib_rc_pos", "fib_rc_dir", "vol_decay", "atr"):
+    for col in ("fib_rc_pos", "fib_rc_dir", "vol_decay", "atr", "zero_reject_dir"):
         assert col in out.columns
+
+
+# ── 第二根四小時確認（2026-07-09，使用者指正：分析師是看第二根 K 棒才決定進場）──
+def test_second_candle_confirm_off_by_default_uses_immediate_touch():
+    """預設關第二根確認 → 維持「觸零軸+量能衰減即進場」的舊行為（既有測試不變）。"""
+    s = build_strategy("fib_zero_reject")
+    assert s.params.get("use_second_candle_confirm") is False
+
+
+def test_second_candle_confirm_enters_when_no_breakout():
+    """開啟第二根確認：前一根撞零軸、當根沒有放量突破 → zero_reject_dir=通道方向 → 進場。"""
+    s = build_strategy("fib_zero_reject", use_second_candle_confirm=True)
+    r = _row(fib_rc_pos=0.05, fib_rc_dir=-1, zero_reject_dir=-1)
+    assert s.signal(r, 0) == -1
+
+
+def test_second_candle_confirm_skips_when_breakout():
+    """開啟第二根確認：第二根放量突破零軸（zero_reject_dir=0）→ 不進場（不是拒絕）。"""
+    s = build_strategy("fib_zero_reject", use_second_candle_confirm=True)
+    r = _row(fib_rc_pos=0.05, fib_rc_dir=-1, zero_reject_dir=0)
+    assert s.signal(r, 0) == 0
+
+
+def test_prepare_second_candle_confirm_detects_rejection():
+    """prepare 用震盪資料算 zero_reject_dir：價格反覆觸及通道零軸 → 應在某些根標出
+    零軸拒絕訊號（不全 0）。用隨機walk（會自然觸及通道邊界，跟真實幣種一樣）。"""
+    df = _mk_df(400, seed=11)
+    s = build_strategy("fib_zero_reject", use_second_candle_confirm=True, lookback=60)
+    out = s.prepare(df)
+    assert (out["zero_reject_dir"] != 0).any(), "第二根確認應在某些根標出零軸拒絕訊號"
 
 
 def test_short_at_zero_axis_in_down_channel_with_volume_decay():

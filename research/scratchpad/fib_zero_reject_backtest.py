@@ -65,12 +65,13 @@ if __name__ == "__main__":
     print("（分析師宣稱零軸/一軸 80-90% 反轉勝率——這裡用真實資料檢驗）\n")
     print(f"{'配置':<40}{'筆數':>6}{'勝率':>8}{'期望':>9}{'信賴下界':>10}{'PF':>7}")
 
-    report("零軸拒絕(預設,含量能閘門)", pooled())
+    report("零軸拒絕(預設,觸即進+量能閘門)", pooled())
     report("零軸拒絕(關量能閘門)", pooled({"use_volume_gate": False}))
-    report("零軸拒絕(+rr3出場)", pooled(cfg_ov={"tp_R_mult": 3.0}))
-    report("零軸拒絕(嚴格零軸zone=0.08)", pooled({"zero_zone": 0.08}))
-    report("零軸拒絕(短窗lookback=40)", pooled({"lookback": 40}))
-    report("零軸拒絕(目標放遠target=0.7)", pooled({"target_pos": 0.7}))
+    print("--- 第二根四小時確認（使用者指正的核心：等第二根不突破才進場）---")
+    report("零軸拒絕(第二根確認+量能)", pooled({"use_second_candle_confirm": True}))
+    report("零軸拒絕(第二根確認,關量能)", pooled({"use_second_candle_confirm": True, "use_volume_gate": False}))
+    report("零軸拒絕(第二根+rr3)", pooled({"use_second_candle_confirm": True}, {"tp_R_mult": 3.0}))
+    report("零軸拒絕(第二根+短窗40)", pooled({"use_second_candle_confirm": True, "lookback": 40}))
 
     print("\n對照（本session已驗證基準）：")
     print(f"{'smc_structure/4h+rr3(現行8幣籃子)':<40}{'':>6}{'35.5%':>8}{4.993:>9.3f}{1.665:>10.3f}")
