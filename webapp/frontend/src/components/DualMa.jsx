@@ -33,6 +33,18 @@ const LINES = [
   { key: 'ema120', label: 'EMA120', ckey: 'faint', width: 1, style: 2 },
 ]
 
+// 斐波那契通道線（零軸/一軸粗實線＝關鍵壓力/支撐；中間比率細虛線＝結構層級/回調目標）。
+// 對應後端 core.chart_data.ma6_overlay_data 的 fib_channel。style: 0 實線 / 3 點線。
+const FIB_LINES = [
+  { key: 'fib_ch_0',   label: '零軸',  ckey: 'warn',  width: 2, style: 0 },
+  { key: 'fib_ch_100', label: '一軸',  ckey: 'warn',  width: 2, style: 0 },
+  { key: 'fib_ch_236', label: '0.236', ckey: 'faint', width: 1, style: 3 },
+  { key: 'fib_ch_382', label: '0.382', ckey: 'faint', width: 1, style: 3 },
+  { key: 'fib_ch_5',   label: '0.5',   ckey: 'faint', width: 1, style: 3 },
+  { key: 'fib_ch_618', label: '0.618', ckey: 'faint', width: 1, style: 3 },
+  { key: 'fib_ch_786', label: '0.786', ckey: 'faint', width: 1, style: 3 },
+]
+
 export default function DualMa() {
   const theme = useTheme()
   const containerRef = useRef(null)
@@ -50,6 +62,8 @@ export default function DualMa() {
   const [prevPrice, setPrevPrice] = useState(null)
   const [lastTs, setLastTs] = useState(null)
   const [wsReady, setWsReady] = useState(false)
+  const [showFib, setShowFib] = useState(true)
+  const [fibDir, setFibDir] = useState(0)
 
   useEffect(() => {
     const el = containerRef.current
@@ -76,12 +90,22 @@ export default function DualMa() {
       s.setData([])
       seriesRef.current[key] = s
     })
+    // 斐波那契通道線（一律建立 series，是否顯示由 showFib 控制餵不餵資料）
+    FIB_LINES.forEach(({ key, ckey, width, style }) => {
+      const s = chart.addSeries(LineSeries, {
+        color: c[ckey], lineWidth: width, lineStyle: style,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+      })
+      s.setData([])
+      seriesRef.current[key] = s
+    })
     chartRef.current = chart
 
     const d = dataRef.current
     if (d?.candles?.length) {
       seriesRef.current.candles.setData(d.candles)
       LINES.forEach(({ key }) => seriesRef.current[key]?.setData(d[key] ?? []))
+      FIB_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(showFib ? (d.fib_channel?.[key] ?? []) : []))
       markersRef.current.setMarkers(buildAllMarkers(d, c))
       const n = d.candles.length
       requestAnimationFrame(() => {
@@ -104,6 +128,8 @@ export default function DualMa() {
         dataRef.current = d
         seriesRef.current.candles?.setData(d.candles ?? [])
         LINES.forEach(({ key }) => seriesRef.current[key]?.setData(d[key] ?? []))
+        FIB_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(showFib ? (d.fib_channel?.[key] ?? []) : []))
+        setFibDir(d.fib_dir ?? 0)
         const c = getChartColors()
         markersRef.current?.setMarkers(buildAllMarkers(d, c))
         setCounts(countByTypeAndDir(d.ma6_signals ?? []))
@@ -118,6 +144,13 @@ export default function DualMa() {
       })
       .catch(e => { setErrMsg(e.message); setLoading(false) })
   }, [symbol, tf])
+
+  // 斐波那契通道顯示切換：開→餵資料、關→清空，不重抓 API。
+  useEffect(() => {
+    const d = dataRef.current
+    if (!d) return
+    FIB_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(showFib ? (d.fib_channel?.[key] ?? []) : []))
+  }, [showFib])
 
   // ── 即時報價：輪詢幣安公開合約 K 線，更新最後一根 K 棒（跟 Chart.jsx 同機制）──
   useEffect(() => {
@@ -220,6 +253,8 @@ export default function DualMa() {
         {TFS.map(t => (
           <button key={t} onClick={() => setTf(t)} style={chip(tf === t)}>{t}</button>
         ))}
+        <div style={{ width: 1, height: 16, background: 'var(--line-strong)', margin: '0 2px' }} />
+        <button onClick={() => setShowFib(v => !v)} style={chip(showFib)}>斐波那契通道</button>
         {loading && <span style={{ fontSize: 11, color: 'var(--faint)' }}>載入中…</span>}
       </div>
 
@@ -236,6 +271,23 @@ export default function DualMa() {
           </span>
         ))}
       </div>
+
+      {showFib && (
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center',
+                      fontSize: 11, fontFamily: 'var(--font-display)', color: 'var(--muted)' }}>
+          <span style={{ color: 'var(--warn)', fontWeight: 600 }}>
+            斐波那契通道{fibDir === -1 ? '（下降）' : fibDir === 1 ? '（上升）' : ''}：
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 14, height: 2, background: cDom.warn, display: 'inline-block' }} />
+            零軸／一軸（關鍵{fibDir === -1 ? '壓力' : fibDir === 1 ? '支撐' : '位'}，反彈/反轉高機率點）
+          </span>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 14, height: 0, borderTop: `1px dotted ${cDom.faint}`, display: 'inline-block' }} />
+            0.236／0.382…（結構層級/回調目標）
+          </span>
+        </div>
+      )}
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', fontSize: 11, fontFamily: 'var(--font-display)' }}>
         <span style={{ color: 'var(--accent)' }}>◆ 密集突破 {counts.breakout.total}

@@ -276,6 +276,7 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
     b9 實際只下單首次回踩（pullback1）；breakout/pullback2 為圖上顯示供評估。
     """
     from core.quant_researcher import build_strategy
+    from core import signal_engineer as se
 
     df = _fetch_ohlcv_df(symbol, interval, limit, source)
     out = build_strategy("ma_convergence_pullback",
@@ -298,7 +299,20 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 ("is_first_pullback", "pullback1"),
                 ("is_second_pullback", "pullback2"))
 
-    for idx, row in out.iterrows():
+    # 斐波那契「單一乾淨通道」（與 K線圖表頁 klines_data 用同一份 fib_channel_single，
+    # 零軸 fib_ch_0＝趨勢原點：上升→支撐、下降→壓力；一軸 fib_ch_100 為對側目標；
+    # 中間比率 0.236/0.382/0.5/0.618/0.786 為結構層級，>1 為延伸目標）。
+    fib_cols = list(se.FIB_CHANNEL_RATIOS.values())
+    fib_series = {col: [] for col in fib_cols}
+    fib_single = se.fib_channel_single(df, pivot_left=5, pivot_right=5)
+    _fc = None
+    fib_dir = 0
+    if fib_single is not None:
+        _fc = (fib_single["anchor_idx"], fib_single["anchor_price"],
+               fib_single["slope"], fib_single["width"], fib_single["dir"])
+        fib_dir = int(fib_single["dir"])
+
+    for pos, (idx, row) in enumerate(out.iterrows()):
         t = _ts(idx)
         o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
         if None in (o, h, lo, c):
@@ -314,5 +328,11 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 break
         if bool(row.get("is_density", False)):
             density.append({"time": t, "value": c})
+        if _fc is not None:
+            a_idx, a_px, slope, width, sdir = _fc
+            base = a_px + slope * (pos - a_idx)          # 0 線在當根（直線拉滿）
+            for r, col in se.FIB_CHANNEL_RATIOS.items():
+                fib_series[col].append({"time": t, "value": base + sdir * r * width})
 
-    return {"candles": candles, **lines, "ma6_signals": signals, "density": density}
+    return {"candles": candles, **lines, "ma6_signals": signals, "density": density,
+            "fib_channel": fib_series, "fib_dir": fib_dir}

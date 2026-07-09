@@ -154,6 +154,34 @@ def test_ma6_signal_types_match_strategy_columns():
     assert by_type.get("pullback2", 0) == int(prep["is_second_pullback"].sum())
 
 
+# ── 雙均線頁面加斐波那契通道（2026-07-08，使用者要求還原「零軸/一軸/0.236/0.382」下降通道）──
+def test_ma6_overlay_includes_fib_channel():
+    """ma6 圖表資料附帶斐波那契通道各線（零軸 fib_ch_0、一軸 fib_ch_100 + 中間比率）。
+    與 K線圖表頁（klines_data）用同一份 se.fib_channel_single，不重寫平行邏輯。"""
+    from core.chart_data import ma6_overlay_data
+    from core import signal_engineer as se
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    assert "fib_channel" in out
+    fib = out["fib_channel"]
+    # 至少有零軸與一軸兩條關鍵線
+    assert "fib_ch_0" in fib and "fib_ch_100" in fib
+    # 全套比率線都在
+    for col in se.FIB_CHANNEL_RATIOS.values():
+        assert col in fib, f"缺斐波那契線 {col}"
+    # 每條線是 {time, value} 序列（有資料時）
+    if fib["fib_ch_0"]:
+        pt = fib["fib_ch_0"][0]
+        assert "time" in pt and "value" in pt
+
+
+def test_ma6_fib_channel_carries_direction():
+    """通道方向資訊（+1上升/-1下降）要帶出來，前端才能標「零軸=壓力還是支撐」。"""
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    assert "fib_dir" in out
+    assert out["fib_dir"] in (-1, 0, 1)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # _fetch_ohlcv_df 快取 + 429/418 退避（2026-07-06）：real fetch（source="testnet"，
 # 其實是打 fapi.binance.com 公開合約 API）原本每次呼叫都重新打 Binance、完全沒有
