@@ -175,7 +175,7 @@ export default function DualMa() {
     if (!chartRef.current) return
     setLoading(true)
     setErrMsg(null)
-    api.ma6(symbol, tf, 300)
+    api.ma6(symbol, tf, 1000)   // 顯示根數：4h×1000≈166天(可往左捲看更久歷史；後端另加暖機)
       .then(d => {
         if (d.error) throw new Error(d.error)
         dataRef.current = d
