@@ -6,10 +6,8 @@ import { getChartColors, useTheme } from '../lib/theme.js'
 import { createBackoffState, fetchBinancePublic } from '../lib/binancePoll'
 
 // 雙均線系統版面（2026-07-05，還原 YouTube 分析的六線密集/發散系統）。
-// MA20/60/120 + EMA20/60/120 六線同框；六線緊密糾結＝密集（盤整），
-// 排列一致地向外展開＝發散（趨勢確立）。訊號標記＝b9 觀察倉實際依據的
-// 「發散確立後首次回踩20均線不破」進場點（core.chart_data.ma6_overlay_data，
-// 與 MaConvergencePullbackStrategy 同一份邏輯，圖表跟真實下單依據不會兜不起來）。
+// 2026-07-12 整頁重設計：四個獨立圖層（均線／斜通道／通道內層／水平回撤），
+// 每條線在圖上直接標名＋價位，預設只開關鍵線，解決「線太多很亂」的問題。
 
 const SYMBOLS = ['LINKUSDT', 'BTCUSDT', 'ETHUSDT']
 const TFS = ['15m', '1h', '4h']
@@ -23,7 +21,7 @@ const mapKline = (k) => ({
   low: parseFloat(k[3]), close: parseFloat(k[4]),
 })
 
-// MA 系（實線，藍紫色系）+ EMA 系（虛線，暖色系）；20 期最粗（回踩訊號的判斷線）。
+// ── 圖層一：均線六線（MA 實線藍紫系 / EMA 虛線暖色系；20 期最粗＝回踩判斷線）──
 const LINES = [
   { key: 'ma20',  label: 'MA20',  ckey: 'accent', width: 2, style: 0 },
   { key: 'ma60',  label: 'MA60',  ckey: 'bot3',   width: 1, style: 0 },
@@ -33,17 +31,28 @@ const LINES = [
   { key: 'ema120', label: 'EMA120', ckey: 'faint', width: 1, style: 2 },
 ]
 
-// 斐波那契通道線（零軸/一軸粗實線＝關鍵壓力/支撐；中間比率細虛線＝結構層級/回調目標）。
-// 對應後端 core.chart_data.ma6_overlay_data 的 fib_channel。style: 0 實線 / 3 點線。
-const FIB_LINES = [
-  { key: 'fib_ch_0',   label: '零軸',  ckey: 'warn',  width: 2, style: 0 },
-  { key: 'fib_ch_100', label: '一軸',  ckey: 'warn',  width: 2, style: 0 },
+// ── 圖層二：斜通道關鍵線（迴歸60根）。零軸/一軸標名在價格軸上（title），
+//    金色粗實線；內部比率獨立成圖層三（預設關，要看結構層級再打開）──
+const FIB_KEY_LINES = [
+  { key: 'fib_ch_0',   label: '通道零軸', ckey: 'warn', width: 2, style: 0, title: '通道零軸' },
+  { key: 'fib_ch_100', label: '通道一軸', ckey: 'warn', width: 2, style: 0, title: '通道一軸' },
+]
+const FIB_INNER_LINES = [
   { key: 'fib_ch_236', label: '0.236', ckey: 'faint', width: 1, style: 3 },
   { key: 'fib_ch_382', label: '0.382', ckey: 'faint', width: 1, style: 3 },
   { key: 'fib_ch_5',   label: '0.5',   ckey: 'faint', width: 1, style: 3 },
   { key: 'fib_ch_618', label: '0.618', ckey: 'faint', width: 1, style: 3 },
   { key: 'fib_ch_786', label: '0.786', ckey: 'faint', width: 1, style: 3 },
 ]
+
+// ── 圖層四：水平回撤層（擺動高低點錨定，畫成 priceLine，每條線自帶文字標籤）──
+// 0/1（行情起點/終點）實線較粗，中間比率虛線；顏色用綠色系跟金色通道區隔。
+const RETR_KEY = new Set([0, 1])
+const retrLabel = (ratio, dir) => {
+  if (ratio === 0) return dir === -1 ? '回撤0＝波段高點' : '回撤0＝波段低點'
+  if (ratio === 1) return dir === -1 ? '回撤1＝波段低點' : '回撤1＝波段高點'
+  return `回撤 ${ratio}`
+}
 
 export default function DualMa() {
   const theme = useTheme()
@@ -52,6 +61,7 @@ export default function DualMa() {
   const seriesRef = useRef({})
   const markersRef = useRef(null)
   const dataRef = useRef(null)
+  const retrLinesRef = useRef([])
 
   const [symbol, setSymbol] = useState('LINKUSDT')
   const [tf, setTf] = useState('4h')
@@ -62,8 +72,42 @@ export default function DualMa() {
   const [prevPrice, setPrevPrice] = useState(null)
   const [lastTs, setLastTs] = useState(null)
   const [wsReady, setWsReady] = useState(false)
+  // 四個獨立圖層開關：預設開均線＋通道關鍵線＋回撤；通道內層預設關（減亂）。
+  const [showMa, setShowMa] = useState(true)
   const [showFib, setShowFib] = useState(true)
+  const [showFibInner, setShowFibInner] = useState(false)
+  const [showRetr, setShowRetr] = useState(true)
   const [fibDir, setFibDir] = useState(0)
+  const [retrDir, setRetrDir] = useState(0)
+
+  // 依開關餵資料（不重抓 API）：均線 / 通道關鍵線 / 通道內層。
+  const applyLineLayers = (d, { ma = showMa, fib = showFib, inner = showFibInner } = {}) => {
+    LINES.forEach(({ key }) => seriesRef.current[key]?.setData(ma ? (d[key] ?? []) : []))
+    FIB_KEY_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(fib ? (d.fib_channel?.[key] ?? []) : []))
+    FIB_INNER_LINES.forEach(({ key }) => seriesRef.current[key]?.setData((fib && inner) ? (d.fib_channel?.[key] ?? []) : []))
+  }
+
+  // 水平回撤層：畫成 candle series 上的 priceLine（線上自帶文字標籤＋價格軸標籤）。
+  const applyRetrLayer = (d, visible = showRetr) => {
+    const candles = seriesRef.current.candles
+    if (!candles) return
+    retrLinesRef.current.forEach(pl => { try { candles.removePriceLine(pl) } catch { /* series 已重建 */ } })
+    retrLinesRef.current = []
+    const retr = d?.fib_retracement
+    if (!visible || !retr?.levels?.length) return
+    const c = getChartColors()
+    retr.levels.forEach(({ ratio, price }) => {
+      const isKey = RETR_KEY.has(ratio)
+      retrLinesRef.current.push(candles.createPriceLine({
+        price,
+        color: isKey ? c.pos : `${c.pos}88`,
+        lineWidth: isKey ? 2 : 1,
+        lineStyle: isKey ? 0 : 2,
+        axisLabelVisible: true,
+        title: retrLabel(ratio, retr.dir),
+      }))
+    })
+  }
 
   useEffect(() => {
     const el = containerRef.current
@@ -90,8 +134,16 @@ export default function DualMa() {
       s.setData([])
       seriesRef.current[key] = s
     })
-    // 斐波那契通道線（一律建立 series，是否顯示由 showFib 控制餵不餵資料）
-    FIB_LINES.forEach(({ key, ckey, width, style }) => {
+    // 通道關鍵線：價格軸上顯示線名＋當前價（title + lastValueVisible）
+    FIB_KEY_LINES.forEach(({ key, ckey, width, style, title }) => {
+      const s = chart.addSeries(LineSeries, {
+        color: c[ckey], lineWidth: width, lineStyle: style, title,
+        priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+      })
+      s.setData([])
+      seriesRef.current[key] = s
+    })
+    FIB_INNER_LINES.forEach(({ key, ckey, width, style }) => {
       const s = chart.addSeries(LineSeries, {
         color: c[ckey], lineWidth: width, lineStyle: style,
         priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
@@ -100,12 +152,13 @@ export default function DualMa() {
       seriesRef.current[key] = s
     })
     chartRef.current = chart
+    retrLinesRef.current = []          // candle series 重建 → 舊 priceLine 已消滅
 
     const d = dataRef.current
     if (d?.candles?.length) {
       seriesRef.current.candles.setData(d.candles)
-      LINES.forEach(({ key }) => seriesRef.current[key]?.setData(d[key] ?? []))
-      FIB_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(showFib ? (d.fib_channel?.[key] ?? []) : []))
+      applyLineLayers(d)
+      applyRetrLayer(d)
       markersRef.current.setMarkers(buildAllMarkers(d, c))
       const n = d.candles.length
       requestAnimationFrame(() => {
@@ -115,7 +168,7 @@ export default function DualMa() {
 
     const ro = new ResizeObserver(([e]) => chart.applyOptions({ width: e.contentRect.width }))
     ro.observe(el)
-    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = {} }
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = {}; retrLinesRef.current = [] }
   }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -127,9 +180,10 @@ export default function DualMa() {
         if (d.error) throw new Error(d.error)
         dataRef.current = d
         seriesRef.current.candles?.setData(d.candles ?? [])
-        LINES.forEach(({ key }) => seriesRef.current[key]?.setData(d[key] ?? []))
-        FIB_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(showFib ? (d.fib_channel?.[key] ?? []) : []))
+        applyLineLayers(d)
+        applyRetrLayer(d)
         setFibDir(d.fib_dir ?? 0)
+        setRetrDir(d.fib_retracement?.dir ?? 0)
         const c = getChartColors()
         markersRef.current?.setMarkers(buildAllMarkers(d, c))
         setCounts(countByTypeAndDir(d.ma6_signals ?? []))
@@ -143,14 +197,11 @@ export default function DualMa() {
         setLoading(false)
       })
       .catch(e => { setErrMsg(e.message); setLoading(false) })
-  }, [symbol, tf])
+  }, [symbol, tf]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 斐波那契通道顯示切換：開→餵資料、關→清空，不重抓 API。
-  useEffect(() => {
-    const d = dataRef.current
-    if (!d) return
-    FIB_LINES.forEach(({ key }) => seriesRef.current[key]?.setData(showFib ? (d.fib_channel?.[key] ?? []) : []))
-  }, [showFib])
+  // 圖層開關：開→餵資料、關→清空，不重抓 API。
+  useEffect(() => { if (dataRef.current) applyLineLayers(dataRef.current) }, [showMa, showFib, showFibInner]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (dataRef.current) applyRetrLayer(dataRef.current) }, [showRetr]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 即時報價：輪詢幣安公開合約 K 線，更新最後一根 K 棒（跟 Chart.jsx 同機制）──
   useEffect(() => {
@@ -192,12 +243,12 @@ export default function DualMa() {
     return () => { alive = false; clearInterval(t) }
   }, [symbol, tf])
 
-  const chip = (active) => ({
+  const chip = (active, color = 'var(--accent)') => ({
     padding: '3px 10px', borderRadius: 'var(--radius-pill)', border: 'none', cursor: 'pointer',
     fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-display)',
-    background: active ? 'var(--accent-soft)' : 'transparent',
-    color: active ? 'var(--accent)' : 'var(--faint)',
-    outline: active ? '1px solid var(--accent)' : '1px solid var(--line)',
+    background: active ? 'color-mix(in srgb, ' + color + ' 14%, transparent)' : 'transparent',
+    color: active ? color : 'var(--faint)',
+    outline: active ? `1px solid ${color}` : '1px solid var(--line)',
   })
 
   const cDom = getChartColors()
@@ -205,16 +256,31 @@ export default function DualMa() {
   const priceUp = livePrice != null && prevPrice != null && livePrice >= prevPrice
   const priceClr = livePrice == null ? 'var(--muted)' : priceUp ? 'var(--pos)' : 'var(--neg)'
 
+  const legendSection = { display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', fontSize: 11, fontFamily: 'var(--font-display)', color: 'var(--muted)' }
+  const legendTag = (txt, color) => (
+    <span style={{ color, fontWeight: 700, minWidth: 64 }}>{txt}</span>
+  )
+  const swatch = (color, dashed = false, thick = false) => (
+    <span style={{
+      width: 16, display: 'inline-block',
+      height: dashed ? 0 : (thick ? 3 : 2),
+      borderTop: dashed ? `2px dashed ${color}` : 'none',
+      background: dashed ? 'transparent' : color,
+    }} />
+  )
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <Plain>
-        雙均線系統版面(還原 YouTube 分析的六線密集/發散系統)：MA20/60/120(實線)+
-        EMA20/60/120(虛線)。六線糾結＝<b>密集</b>(盤整)、灰點標示；六線依序展開＝<b>發散</b>(趨勢確立)。
-        圖上三種進場訊號：<b style={{ color: 'var(--accent)' }}>藍◆密集突破</b>(方法一，密集區一表態就進)、
-        <b style={{ color: 'var(--warn)' }}>黃▲首踩</b>(方法二，發散後第一次回踩20均線不破)、
-        <b style={{ color: 'var(--bot3, #b58ce0)' }}>紫▲二踩</b>(第二次回踩)。
-        b9 觀察倉<b>實際只下單「首踩」</b>；突破與二踩為圖上顯示供你評估，尚未接進實盤。
-        箭頭<b>向上(▲)＝做多、向下(▼)＝做空</b>，圖上標記文字也會標「多／空」。
+        雙均線系統版面：K 線＋四個可獨立開關的圖層。<b>均線</b>＝六線密集/發散系統
+        (MA 實線、EMA 虛線；六線糾結＝密集/盤整、依序展開＝發散/趨勢確立)。
+        <b style={{ color: 'var(--warn)' }}>通道(斜)</b>＝迴歸擬合最近60根的斐波那契通道，
+        零軸＝行情原點側(下降通道在上緣=壓力／上升在下緣=支撐)、一軸＝對側目標；「內層」開關可加顯 0.236~0.786 結構層級。
+        <b style={{ color: 'var(--pos)' }}>回撤(水平)</b>＝最近180根擺動高低點錨定的斐波那契回撤，
+        0 錨在行情起點(下跌段=高點/上漲段=低點)，跟分析師 TradingView 畫法一致，每條線都直接標名。
+        圖上三種進場訊號：<b style={{ color: 'var(--accent)' }}>藍◆密集突破</b>、
+        <b style={{ color: 'var(--warn)' }}>黃▲首踩</b>(b9 實際下單依據)、
+        <b style={{ color: 'var(--bot3, #b58ce0)' }}>紫▲二踩</b>；▲＝做多、▼＝做空。
       </Plain>
 
       {/* ── 即時報價（幣安公開合約，跟 K 線圖表分頁同資料源）── */}
@@ -245,6 +311,7 @@ export default function DualMa() {
         </div>
       </div>
 
+      {/* ── 控制列：幣種 / 週期 ── */}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         {SYMBOLS.map(s => (
           <button key={s} onClick={() => setSymbol(s)} style={chip(symbol === s)}>{s.replace('USDT', '')}</button>
@@ -253,52 +320,79 @@ export default function DualMa() {
         {TFS.map(t => (
           <button key={t} onClick={() => setTf(t)} style={chip(tf === t)}>{t}</button>
         ))}
-        <div style={{ width: 1, height: 16, background: 'var(--line-strong)', margin: '0 2px' }} />
-        <button onClick={() => setShowFib(v => !v)} style={chip(showFib)}>斐波那契通道</button>
         {loading && <span style={{ fontSize: 11, color: 'var(--faint)' }}>載入中…</span>}
       </div>
 
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-        {LINES.map(({ key, label, ckey }) => (
-          <span key={key} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, fontFamily: 'var(--font-display)', color: 'var(--muted)' }}>
-            <span style={{
-              width: 14, display: 'inline-block',
-              height: key.startsWith('ema') ? 0 : 2,
-              borderTop: key.startsWith('ema') ? `2px dashed ${cDom[ckey]}` : 'none',
-              background: key.startsWith('ema') ? 'transparent' : cDom[ckey],
-            }} />
-            {label}
-          </span>
-        ))}
+      {/* ── 圖層開關列（顏色對應圖上線色）── */}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: 'var(--faint)', fontFamily: 'var(--font-display)', marginRight: 2 }}>圖層：</span>
+        <button onClick={() => setShowMa(v => !v)} style={chip(showMa, 'var(--accent)')}>均線6線</button>
+        <button onClick={() => setShowFib(v => !v)} style={chip(showFib, 'var(--warn)')}>
+          通道(斜){fibDir === -1 ? '↓' : fibDir === 1 ? '↑' : ''}
+        </button>
+        <button onClick={() => setShowFibInner(v => !v)} disabled={!showFib}
+                style={{ ...chip(showFib && showFibInner, 'var(--warn)'), opacity: showFib ? 1 : 0.4 }}>
+          ＋內層0.236~0.786
+        </button>
+        <button onClick={() => setShowRetr(v => !v)} style={chip(showRetr, 'var(--pos)')}>
+          回撤(水平){retrDir === -1 ? '↓' : retrDir === 1 ? '↑' : ''}
+        </button>
       </div>
 
-      {showFib && (
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center',
-                      fontSize: 11, fontFamily: 'var(--font-display)', color: 'var(--muted)' }}>
-          <span style={{ color: 'var(--warn)', fontWeight: 600 }}>
-            斐波那契通道{fibDir === -1 ? '（下降）' : fibDir === 1 ? '（上升）' : ''}：
+      {/* ── 分組圖例：每條線的顏色/線型/含義 ── */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 10px',
+                    border: '1px solid var(--line)', borderRadius: 'var(--radius)', background: 'var(--surface)' }}>
+        {showMa && (
+          <div style={legendSection}>
+            {legendTag('均線', 'var(--accent)')}
+            {LINES.map(({ key, label, ckey }) => (
+              <span key={key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                {swatch(cDom[ckey], key.startsWith('ema'))}{label}
+              </span>
+            ))}
+          </div>
+        )}
+        {showFib && (
+          <div style={legendSection}>
+            {legendTag(`通道(斜)${fibDir === -1 ? '·下降' : fibDir === 1 ? '·上升' : ''}`, 'var(--warn)')}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(cDom.warn, false, true)}零軸（{fibDir === -1 ? '上緣壓力' : '下緣支撐'}，價格軸有標名）
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(cDom.warn, false, true)}一軸（對側目標）
+            </span>
+            {showFibInner && (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 16, height: 0, borderTop: `1px dotted ${cDom.faint}`, display: 'inline-block' }} />
+                內層 0.236／0.382／0.5／0.618／0.786（結構層級）
+              </span>
+            )}
+          </div>
+        )}
+        {showRetr && (
+          <div style={legendSection}>
+            {legendTag(`回撤(水平)${retrDir === -1 ? '·下跌段' : retrDir === 1 ? '·上漲段' : ''}`, 'var(--pos)')}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(cDom.pos, false, true)}0／1＝波段{retrDir === -1 ? '高點／低點' : '低點／高點'}（錨點）
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(`${cDom.pos}88`, true)}0.236~0.786（回撤層級，每條線上直接標名）
+            </span>
+          </div>
+        )}
+        <div style={{ ...legendSection }}>
+          {legendTag('訊號', 'var(--muted)')}
+          <span style={{ color: 'var(--accent)' }}>◆ 密集突破 {counts.breakout.total}
+            <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(▲{counts.breakout.long}/▼{counts.breakout.short})</span>
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 14, height: 2, background: cDom.warn, display: 'inline-block' }} />
-            零軸／一軸（關鍵{fibDir === -1 ? '壓力' : fibDir === 1 ? '支撐' : '位'}，反彈/反轉高機率點）
+          <span style={{ color: 'var(--warn)' }}>▲ 首踩·b9實單 {counts.pullback1.total}
+            <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(▲{counts.pullback1.long}/▼{counts.pullback1.short})</span>
           </span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 14, height: 0, borderTop: `1px dotted ${cDom.faint}`, display: 'inline-block' }} />
-            0.236／0.382…（結構層級/回調目標）
+          <span style={{ color: cDom.bot3 }}>▲ 二踩 {counts.pullback2.total}
+            <span style={{ color: 'var(--muted)', fontWeight: 400 }}>(▲{counts.pullback2.long}/▼{counts.pullback2.short})</span>
           </span>
+          <span style={{ color: 'var(--faint)' }}>● 密集區起點</span>
         </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center', fontSize: 11, fontFamily: 'var(--font-display)' }}>
-        <span style={{ color: 'var(--accent)' }}>◆ 密集突破 {counts.breakout.total}
-          <span style={{ color: 'var(--muted)', fontWeight: 400 }}> (▲多{counts.breakout.long}／▼空{counts.breakout.short})</span>
-        </span>
-        <span style={{ color: 'var(--warn)' }}>▲ 首踩(b9實單) {counts.pullback1.total}
-          <span style={{ color: 'var(--muted)', fontWeight: 400 }}> (▲多{counts.pullback1.long}／▼空{counts.pullback1.short})</span>
-        </span>
-        <span style={{ color: cDom.bot3 }}>▲ 二踩 {counts.pullback2.total}
-          <span style={{ color: 'var(--muted)', fontWeight: 400 }}> (▲多{counts.pullback2.long}／▼空{counts.pullback2.short})</span>
-        </span>
       </div>
 
       <div ref={containerRef} style={{
@@ -320,7 +414,7 @@ const SIG_STYLE = {
 
 const BLANK_DIR = () => ({ total: 0, long: 0, short: 0 })
 
-// 依訊號型別 + 多空方向統計筆數（供上方統計列顯示，不用擠在圖上小標籤裡辨認方向）。
+// 依訊號型別 + 多空方向統計筆數（供圖例統計列顯示，不用擠在圖上小標籤裡辨認方向）。
 function countByTypeAndDir(signals) {
   const out = { breakout: BLANK_DIR(), pullback1: BLANK_DIR(), pullback2: BLANK_DIR() }
   signals.forEach(s => {

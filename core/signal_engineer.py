@@ -656,6 +656,44 @@ def fib_regression_channel(df: pd.DataFrame, lookback: int = 120, k: float = 2.0
     }
 
 
+FIB_RETRACEMENT_RATIOS = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+
+
+def fib_swing_retracement(df: pd.DataFrame, lookback: int = 180) -> dict | None:
+    """擺動高低點錨定的「水平」斐波那契回撤層（2026-07-12，對齊分析師 TradingView 畫法）。
+
+    跟 fib_regression_channel（斜的通道）是兩個東西：這裡找最近 lookback 根內的
+    擺動最高點(含影線 high)與最低點(含影線 low)，把 0 錨在「行情起點」——
+    高點先出現(下跌段)→ 0=高點、層級由高往下量（分析師圖：0=67276、1=57747）；
+    低點先出現(上漲段)→ 0=低點、層級由低往上量。
+
+    回傳 {dir, levels: {ratio: price}, high_time, low_time}；dir=-1 下跌段/+1 上漲段。
+    資料不足 lookback → None。causal：只用最近 lookback 根已收完的資料。
+    """
+    n = len(df)
+    if n < lookback:
+        return None
+    seg = df.iloc[-lookback:]
+    hi_pos = int(np.argmax(seg["high"].to_numpy()))
+    lo_pos = int(np.argmin(seg["low"].to_numpy()))
+    hi = float(seg["high"].iloc[hi_pos])
+    lo = float(seg["low"].iloc[lo_pos])
+    span = hi - lo
+    if span <= 0:
+        return None
+    d = -1 if hi_pos <= lo_pos else 1            # 高點先出現 → 下跌段
+    if d == -1:
+        levels = {r: hi - r * span for r in FIB_RETRACEMENT_RATIOS}
+    else:
+        levels = {r: lo + r * span for r in FIB_RETRACEMENT_RATIOS}
+    return {
+        "dir": int(d),
+        "levels": levels,
+        "high_time": seg.index[hi_pos],
+        "low_time": seg.index[lo_pos],
+    }
+
+
 def fib_regression_levels(df: pd.DataFrame, lookback: int = 60, k: float = 2.0) -> pd.DataFrame:
     """逐根迴歸通道位置（2026-07-09，供零軸拒絕策略/圖表訊號用）。
 

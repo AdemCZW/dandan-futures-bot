@@ -6,6 +6,11 @@ const BASE = import.meta.env.VITE_API ?? ''
 export const BOT_BASE = import.meta.env.VITE_BOT_URL
   ?? 'https://dandan-futures-bot-production.up.railway.app'
 
+// 本機開發（未設 VITE_BOT_URL）：bot 容器可能未開/已關，圖表資料改走本機後端
+// /api/*（同一份 core.chart_data，vite proxy 到 :8000）。GitHub Pages 建置（有設
+// VITE_BOT_URL）維持直連 bot 容器 /ma6 等，行為不變。
+const HAS_BOT = !!import.meta.env.VITE_BOT_URL
+
 // 平倉直連 token（僅 GitHub Pages 建置時由 GH Actions secret 注入）。
 // 空字串 → closeBot 退回走 dashboard 代理（本機開發模式，dashboard 持 token 轉發）。
 // 使用者已確認接受風險：testnet 虛擬倉，token 可隨時在 Railway 換掉作廢。
@@ -63,14 +68,17 @@ export const api = {
   closeBot: (id) => CLOSE_TOKEN
     ? postAbs(`${BOT_BASE}/${id}/close`, { 'X-Close-Token': CLOSE_TOKEN })
     : post(`/api/close/${id}`, {}),
-  // K 線 + 費波那契通道 + 交易標記：bot 容器直連（省 dashboard 資源，資料同源更準）
-  klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
-    getAbs(`${BOT_BASE}/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  // K 線 + 費波那契通道 + 交易標記：有 bot（GH Pages）直連容器；本機開發走後端 /api/*
+  klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) => HAS_BOT
+    ? getAbs(`${BOT_BASE}/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`)
+    : get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
   // 六線密集/發散（雙均線系統版面）：MA20/60/120 + EMA20/60/120 + 首次回踩訊號
-  ma6: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
-    getAbs(`${BOT_BASE}/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`),
-  tradeMarkers: (symbol = 'BTCUSDT', bucketHours = 6) =>
-    getAbs(`${BOT_BASE}/markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
+  ma6: (symbol = 'BTCUSDT', tf = '4h', limit = 300) => HAS_BOT
+    ? getAbs(`${BOT_BASE}/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`)
+    : get(`/api/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  tradeMarkers: (symbol = 'BTCUSDT', bucketHours = 6) => HAS_BOT
+    ? getAbs(`${BOT_BASE}/markers?symbol=${symbol}&bucket_hours=${bucketHours}`)
+    : get(`/api/trade-markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
   price: (symbol = 'BTCUSDT') => get(`/api/price?symbol=${symbol}`),
 }
 

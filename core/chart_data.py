@@ -334,5 +334,14 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
             for r, col in se.FIB_CHANNEL_RATIOS.items():
                 fib_series[col].append({"time": t, "value": base + sdir * r * width})
 
+    # 水平斐波那契回撤層（2026-07-12，對齊分析師 TradingView 畫法）：擺動高低點錨定，
+    # 0=行情起點（下跌段=高點/上漲段=低點），與斜的迴歸通道是兩個獨立圖層。
+    retr = se.fib_swing_retracement(df, lookback=min(180, len(df)))
+    fib_retr = {"dir": 0, "levels": []}
+    if retr is not None:
+        fib_retr = {"dir": int(retr["dir"]),
+                    "levels": [{"ratio": float(r), "price": float(p)}
+                               for r, p in retr["levels"].items()]}
+
     return {"candles": candles, **lines, "ma6_signals": signals, "density": density,
-            "fib_channel": fib_series, "fib_dir": fib_dir}
+            "fib_channel": fib_series, "fib_dir": fib_dir, "fib_retracement": fib_retr}

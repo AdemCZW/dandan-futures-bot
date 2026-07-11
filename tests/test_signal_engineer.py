@@ -1238,3 +1238,70 @@ def test_fib_regression_levels_warmup_nan_before_lookback():
     out = se.fib_regression_levels(df, lookback=60)
     assert out["fib_rc_pos"].iloc[:59].isna().all()      # 前 lookback-1 根不足→NaN
     assert out["fib_rc_pos"].iloc[59:].notna().any()
+
+
+# ── fib_swing_retracement：擺動高低點錨定的「水平」回撤層（2026-07-12，對齊分析師畫法）──
+def _retr_df(close, high=None, low=None):
+    n = len(close)
+    close = np.asarray(close, dtype=float)
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    return pd.DataFrame({
+        "open": close,
+        "high": close + 0.5 if high is None else np.asarray(high, dtype=float),
+        "low": close - 0.5 if low is None else np.asarray(low, dtype=float),
+        "close": close, "volume": np.full(n, 100.0),
+    }, index=idx)
+
+
+def test_fib_swing_retr_down_move_anchors_zero_at_high():
+    """先高後低（下跌段）→ 0 錨在擺動高點、1 在低點，層級由高往下量
+    （對齊分析師 TradingView 畫法：0=67276 高、0.236=65037、1=57747 低）。"""
+    n = 120
+    close = np.concatenate([np.linspace(100, 200, 30),     # 衝到高點 200
+                            np.linspace(200, 80, 60),      # 跌到低點 80
+                            np.linspace(80, 120, 30)])     # 反彈中
+    df = _retr_df(close)
+    r = se.fib_swing_retracement(df, lookback=120)
+    assert r["dir"] == -1                                   # 高點在前 → 下跌段
+    assert abs(r["levels"][0.0] - 200.5) < 1.0              # 0 = 擺動高（含影線）
+    assert abs(r["levels"][1.0] - 79.5) < 1.0               # 1 = 擺動低（含影線）
+    span = r["levels"][0.0] - r["levels"][1.0]
+    assert abs(r["levels"][0.382] - (r["levels"][0.0] - 0.382 * span)) < 1e-6
+
+
+def test_fib_swing_retr_up_move_anchors_zero_at_low():
+    """先低後高（上漲段）→ 0 錨在擺動低點、層級由低往上量。"""
+    n = 120
+    close = np.concatenate([np.linspace(120, 80, 30),      # 跌到低點 80
+                            np.linspace(80, 200, 60),      # 漲到高點 200
+                            np.linspace(200, 170, 30)])    # 回撤中
+    df = _retr_df(close)
+    r = se.fib_swing_retracement(df, lookback=120)
+    assert r["dir"] == 1
+    assert abs(r["levels"][0.0] - 79.5) < 1.0
+    assert abs(r["levels"][1.0] - 200.5) < 1.0
+    span = r["levels"][1.0] - r["levels"][0.0]
+    assert abs(r["levels"][0.382] - (r["levels"][0.0] + 0.382 * span)) < 1e-6
+
+
+def test_fib_swing_retr_standard_ratios_present():
+    df = _retr_df(np.concatenate([np.linspace(100, 200, 60), np.linspace(200, 100, 60)]))
+    r = se.fib_swing_retracement(df, lookback=120)
+    for ratio in (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0):
+        assert ratio in r["levels"]
+
+
+def test_fib_swing_retr_too_short_returns_none():
+    df = _retr_df(np.linspace(100, 120, 20))
+    assert se.fib_swing_retracement(df, lookback=120) is None
+
+
+def test_fib_swing_retr_causal_uses_only_lookback_window():
+    """lookback 窗外的更高高點不影響錨定（只看最近 lookback 根）。"""
+    n = 200
+    close = np.concatenate([np.full(50, 500.0),             # 遠古超高價（窗外）
+                            np.linspace(100, 150, 90),
+                            np.linspace(150, 110, 60)])
+    df = _retr_df(close)
+    r = se.fib_swing_retracement(df, lookback=120)                 # 只看最後 120 根
+    assert r["levels"][0.0] < 300                            # 沒被 500 污染

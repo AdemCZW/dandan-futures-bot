@@ -323,3 +323,18 @@ def test_fetch_ohlcv_df_raises_clearly_when_rate_limited_with_no_cache(monkeypat
     with pytest.raises(Exception):
         chart_data._fetch_ohlcv_df("LINKUSDT", "4h", 5, "testnet")
     assert calls["n"] == 1, "封鎖中不該再打 Binance"
+
+
+def test_ma6_overlay_includes_fib_retracement():
+    """ma6 圖表資料附帶「水平」斐波那契回撤層（2026-07-12，對齊分析師 TradingView 畫法）：
+    fib_retracement = {dir, levels:[{ratio, price}...]}，0/0.236/0.382/0.5/0.618/0.786/1 七層。"""
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    assert "fib_retracement" in out
+    r = out["fib_retracement"]
+    assert r["dir"] in (-1, 0, 1)
+    ratios = [lv["ratio"] for lv in r["levels"]]
+    for want in (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0):
+        assert want in ratios, f"缺回撤層 {want}"
+    for lv in r["levels"]:
+        assert isinstance(lv["price"], float)
