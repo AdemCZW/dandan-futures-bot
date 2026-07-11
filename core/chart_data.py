@@ -26,6 +26,7 @@ _KLINE_CACHE: dict = {}            # (symbol, interval, limit) -> (fetched_at, d
 _KLINE_CACHE_TTL = 30.0            # 秒
 _BINANCE_BACKOFF = {"blocked_until": 0.0}
 _BACKOFF_DEFAULT_S = {429: 60.0, 418: 300.0}   # 418 代表已經觸發封鎖，預設值故意比 429 長
+_MA_WARMUP = 150                   # ma6 圖表多抓的暖機根數（>MA120，讓回傳每根都算得出長均線）
 
 
 def parse_ts_unix(ts: str) -> int | None:
@@ -278,9 +279,16 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
     from core.quant_researcher import build_strategy
     from core import signal_engineer as se
 
-    df = _fetch_ohlcv_df(symbol, interval, limit, source)
+    # 多抓 _MA_WARMUP 根暖機：MA120/EMA120 等長週期指標需要前置歷史才算得出來。
+    # 只抓 limit 根的話，最左邊 ~120 根的 MA120 會是 NaN（畫不出線），往左捲就跟
+    # 交易所（無限歷史、每根都有 MA120）看起來不一樣。作法＝抓 limit+暖機、算完
+    # 指標後只回傳最後 limit 根（暖機根在視窗外丟掉），這樣回傳的每根都完全暖機。
+    fetch_n = limit + _MA_WARMUP
+    df = _fetch_ohlcv_df(symbol, interval, fetch_n, source)
     out = build_strategy("ma_convergence_pullback",
                          require_density_for_breakout=True).prepare(df)
+    # 裁切點：只顯示最後 limit 根（不足 limit+暖機 時全留）。
+    cutoff_ts = int(out.index[-limit].timestamp()) if len(out) > limit else None
 
     def _ts(idx):
         return int(idx.timestamp())
@@ -314,6 +322,8 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
 
     for pos, (idx, row) in enumerate(out.iterrows()):
         t = _ts(idx)
+        if cutoff_ts is not None and t < cutoff_ts:
+            continue                                     # 暖機根：只用來算指標，不回傳
         o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
         if None in (o, h, lo, c):
             continue

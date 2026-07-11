@@ -87,8 +87,9 @@ def test_ma6_overlay_data_returns_six_lines_and_signals():
     for key in ("candles", "ma20", "ma60", "ma120", "ema20", "ema60", "ema120", "ma6_signals"):
         assert key in out, f"缺欄位 {key}"
     assert len(out["candles"]) > 0
-    # 六線在暖機（前120根）應該是空/短，暖機後應該有值
-    assert len(out["ma120"]) < len(out["candles"])   # 120期 rolling 暖機期沒有值，天然比蠟燭少
+    # 2026-07-12：後端多抓暖機根（見 _MA_WARMUP），MA120 的暖機在視窗外算好，
+    # 回傳的每一根 K 棒都要有 MA120（往左捲不斷線、跟交易所一致）。
+    assert len(out["ma120"]) == len(out["candles"])
 
 
 def test_ma6_signals_have_time_and_direction():
@@ -106,16 +107,19 @@ def test_ma6_overlay_data_uses_same_strategy_as_live_bot():
     2026-07-06：圖表明確開啟 require_density_for_breakout=True（修正 is_breakout 誤判
     bug），b9 實盤暫時維持預設關閉——兩者在這個參數上刻意分岔，故這裡的 expected
     也要用同樣的參數建構，才是跟圖表對齊的「單一事實來源」比較基準。"""
-    from core.chart_data import ma6_overlay_data
+    from core.chart_data import ma6_overlay_data, _MA_WARMUP
     from core.quant_researcher import build_strategy
     from run_optimize import make_synthetic
-    df = make_synthetic(300)
+    # 圖表多抓 _MA_WARMUP 根暖機（算完長均線後裁掉），比較基準要用同一份暖機延長序列，
+    # 再只比對顯示視窗（cutoff 之後）——這才是「圖表＝策略本尊、只是多給暖機歷史」的不變式。
+    df = make_synthetic(300 + _MA_WARMUP)
     expected = build_strategy("ma_convergence_pullback",
                               require_density_for_breakout=True).prepare(df.copy())
+    win = expected.iloc[-300:]
     out = ma6_overlay_data(source="synthetic", limit=300)
-    # pullback1 型訊號數量應與策略本身算出的 is_first_pullback True 數一致
+    # pullback1 型訊號數量應與策略本身在顯示視窗內算出的 is_first_pullback True 數一致
     n_pb1 = sum(1 for s in out["ma6_signals"] if s["type"] == "pullback1")
-    assert n_pb1 == int(expected["is_first_pullback"].sum())
+    assert n_pb1 == int(win["is_first_pullback"].sum())
 
 
 # ── 三種訊號分型 + 密集區（2026-07-05）：方法一密集突破 / 首次回踩 / 二次回踩 ──
@@ -139,19 +143,21 @@ def test_ma6_signal_types_match_strategy_columns():
     """圖表三型訊號數量 = 策略欄位 is_breakout/is_first_pullback/is_second_pullback 的 True 數。
 
     圖表用 require_density_for_breakout=True（見上一測試的說明），比較基準要用同樣參數。"""
-    from core.chart_data import ma6_overlay_data
+    from core.chart_data import ma6_overlay_data, _MA_WARMUP
     from core.quant_researcher import build_strategy
     from run_optimize import make_synthetic
-    df = make_synthetic(400)
+    # 同上：暖機延長序列 + 只比顯示視窗（暖機根不進回傳、也不該算進訊號數）。
+    df = make_synthetic(400 + _MA_WARMUP)
     prep = build_strategy("ma_convergence_pullback",
                           require_density_for_breakout=True).prepare(df.copy())
+    win = prep.iloc[-400:]
     out = ma6_overlay_data(source="synthetic", limit=400)
     by_type = {}
     for s in out["ma6_signals"]:
         by_type[s["type"]] = by_type.get(s["type"], 0) + 1
-    assert by_type.get("breakout", 0) == int(prep["is_breakout"].sum())
-    assert by_type.get("pullback1", 0) == int(prep["is_first_pullback"].sum())
-    assert by_type.get("pullback2", 0) == int(prep["is_second_pullback"].sum())
+    assert by_type.get("breakout", 0) == int(win["is_breakout"].sum())
+    assert by_type.get("pullback1", 0) == int(win["is_first_pullback"].sum())
+    assert by_type.get("pullback2", 0) == int(win["is_second_pullback"].sum())
 
 
 # ── 雙均線頁面加斐波那契通道（2026-07-08，使用者要求還原「零軸/一軸/0.236/0.382」下降通道）──
@@ -338,3 +344,15 @@ def test_ma6_overlay_includes_fib_retracement():
         assert want in ratios, f"缺回撤層 {want}"
     for lv in r["levels"]:
         assert isinstance(lv["price"], float)
+
+
+def test_ma6_overlay_no_ma120_warmup_gap():
+    """MA120 在回傳的每一根都要有值（2026-07-12）：後端多抓暖機根、算完 MA 再裁掉暖機，
+    這樣往左捲每根都有 MA120，跟交易所（無限歷史）一致，不會左緣斷線看起來不一樣。"""
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    # 回傳約 limit 根（暖機根在視窗外、不塞回傳）
+    assert 290 <= len(out["candles"]) <= 300
+    times = {c["time"] for c in out["candles"]}
+    ma120_times = {p["time"] for p in out["ma120"]}
+    assert times == ma120_times, "有 K 棒缺 MA120，暖機不足會跟交易所不一樣"
