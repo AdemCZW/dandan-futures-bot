@@ -285,8 +285,11 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
     # 指標後只回傳最後 limit 根（暖機根在視窗外丟掉），這樣回傳的每根都完全暖機。
     fetch_n = limit + _MA_WARMUP
     df = _fetch_ohlcv_df(symbol, interval, fetch_n, source)
-    out = build_strategy("ma_convergence_pullback",
-                         require_density_for_breakout=True).prepare(df)
+    strat = build_strategy("ma_convergence_pullback",
+                           require_density_for_breakout=True)
+    out = strat.prepare(df)
+    density_thresh = float(strat.params["density_thresh"])
+    divergence_thresh = float(strat.params["divergence_thresh"])
     # 裁切點：只顯示最後 limit 根（不足 limit+暖機 時全留）。
     cutoff_ts = int(out.index[-limit].timestamp()) if len(out) > limit else None
 
@@ -301,7 +304,7 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
             return None
 
     lines = {k: [] for k in ("ma20", "ma60", "ma120", "ema20", "ema60", "ema120")}
-    candles, signals, density = [], [], []
+    candles, signals, density, spread = [], [], [], []
     # 欄位 → 訊號型別（依序判斷；一根最多歸一型，突破優先）
     sig_cols = (("is_breakout", "breakout"),
                 ("is_first_pullback", "pullback1"),
@@ -338,6 +341,9 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 break
         if bool(row.get("is_density", False)):
             density.append({"time": t, "value": c})
+        # 六線發散度（入場訊號子圖）：spread=(六線max−min)/close，收斂(密集)→發散(趨勢)
+        if (sv := _f(row.get("spread"))) is not None:
+            spread.append({"time": t, "value": sv})
         if _fc is not None:
             a_idx, a_px, slope, width, sdir = _fc
             base = a_px + slope * (pos - a_idx)          # 0 線在當根（直線拉滿）
@@ -354,4 +360,6 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                                for r, p in retr["levels"].items()]}
 
     return {"candles": candles, **lines, "ma6_signals": signals, "density": density,
-            "fib_channel": fib_series, "fib_dir": fib_dir, "fib_retracement": fib_retr}
+            "fib_channel": fib_series, "fib_dir": fib_dir, "fib_retracement": fib_retr,
+            "spread": spread, "spread_density_thresh": density_thresh,
+            "spread_divergence_thresh": divergence_thresh}

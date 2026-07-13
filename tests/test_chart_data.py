@@ -356,3 +356,21 @@ def test_ma6_overlay_no_ma120_warmup_gap():
     times = {c["time"] for c in out["candles"]}
     ma120_times = {p["time"] for p in out["ma120"]}
     assert times == ma120_times, "有 K 棒缺 MA120，暖機不足會跟交易所不一樣"
+
+
+def test_ma6_overlay_includes_spread_oscillator():
+    """六線發散度(spread)子圖資料（2026-07-13）：入場訊號的底層量——六線收斂(密集)→
+    發散(趨勢確立)→首踩進場。附密集/發散兩條門檻供子圖畫水平帶。"""
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    assert "spread" in out
+    assert len(out["spread"]) > 0
+    for p in out["spread"][:3]:
+        assert "time" in p and "value" in p
+    # 兩條門檻：發散門檻 > 密集門檻
+    assert out.get("spread_density_thresh", 0) > 0
+    assert out["spread_divergence_thresh"] > out["spread_density_thresh"]
+    # 暖機已在視窗外算好 → 回傳每根 K 棒都有 spread
+    times = {c["time"] for c in out["candles"]}
+    stimes = {p["time"] for p in out["spread"]}
+    assert times == stimes, "有 K 棒缺 spread（暖機不足）"

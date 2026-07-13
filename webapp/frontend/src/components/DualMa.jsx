@@ -62,6 +62,7 @@ export default function DualMa() {
   const markersRef = useRef(null)
   const dataRef = useRef(null)
   const retrLinesRef = useRef([])
+  const spreadLinesRef = useRef([])
 
   const [symbol, setSymbol] = useState('LINKUSDT')
   const [tf, setTf] = useState('4h')
@@ -77,8 +78,10 @@ export default function DualMa() {
   const [showFib, setShowFib] = useState(true)
   const [showFibInner, setShowFibInner] = useState(false)
   const [showRetr, setShowRetr] = useState(true)
+  const [showSpread, setShowSpread] = useState(true)   // 入場訊號子圖（六線發散度）
   const [fibDir, setFibDir] = useState(0)
   const [retrDir, setRetrDir] = useState(0)
+  const [spreadTh, setSpreadTh] = useState({ density: 0.015, divergence: 0.03 })
 
   // 依開關餵資料（不重抓 API）：均線 / 通道關鍵線 / 通道內層。
   const applyLineLayers = (d, { ma = showMa, fib = showFib, inner = showFibInner } = {}) => {
@@ -109,6 +112,27 @@ export default function DualMa() {
     })
   }
 
+  // 入場訊號子圖（pane 1）：六線發散度 spread + 密集/發散兩條門檻水平線。
+  // spread 低於密集門檻＝六線收斂(盤整)；升破發散門檻＝發散(趨勢確立)＝首踩進場區。
+  const applySpreadLayer = (d, visible = showSpread) => {
+    const s = seriesRef.current.spread
+    if (!s) return
+    s.setData(visible ? (d?.spread ?? []) : [])
+    spreadLinesRef.current.forEach(pl => { try { s.removePriceLine(pl) } catch { /* series 重建 */ } })
+    spreadLinesRef.current = []
+    if (!visible || !d) return
+    const c = getChartColors()
+    const dens = d.spread_density_thresh, div = d.spread_divergence_thresh
+    if (dens != null) spreadLinesRef.current.push(s.createPriceLine({
+      price: dens, color: `${c.pos}cc`, lineWidth: 1, lineStyle: 2,
+      axisLabelVisible: true, title: '密集門檻',
+    }))
+    if (div != null) spreadLinesRef.current.push(s.createPriceLine({
+      price: div, color: `${c.warn}cc`, lineWidth: 1, lineStyle: 2,
+      axisLabelVisible: true, title: '發散門檻',
+    }))
+  }
+
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -119,7 +143,7 @@ export default function DualMa() {
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: c.border, textColor: c.text },
       timeScale: { borderColor: c.border, timeVisible: true, secondsVisible: false, rightOffset: 12, barSpacing: 10, minBarSpacing: 3 },
-      width: el.clientWidth, height: 460,
+      width: el.clientWidth, height: 580,
     })
     seriesRef.current.candles = chart.addSeries(CandlestickSeries, {
       upColor: c.up, downColor: c.down, borderUpColor: c.up, borderDownColor: c.down,
@@ -151,14 +175,24 @@ export default function DualMa() {
       s.setData([])
       seriesRef.current[key] = s
     })
+    // 入場訊號子圖（pane 1）：六線發散度曲線，獨立於主價格圖下方。
+    const spreadS = chart.addSeries(LineSeries, {
+      color: c.accent, lineWidth: 2, title: '發散度',
+      priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: true,
+    }, 1)
+    spreadS.setData([])
+    seriesRef.current.spread = spreadS
+    try { const panes = chart.panes(); if (panes[1]) panes[1].setHeight(130) } catch { /* 舊版無 panes API */ }
     chartRef.current = chart
     retrLinesRef.current = []          // candle series 重建 → 舊 priceLine 已消滅
+    spreadLinesRef.current = []
 
     const d = dataRef.current
     if (d?.candles?.length) {
       seriesRef.current.candles.setData(d.candles)
       applyLineLayers(d)
       applyRetrLayer(d)
+      applySpreadLayer(d)
       markersRef.current.setMarkers(buildAllMarkers(d, c))
       const n = d.candles.length
       requestAnimationFrame(() => {
@@ -168,7 +202,7 @@ export default function DualMa() {
 
     const ro = new ResizeObserver(([e]) => chart.applyOptions({ width: e.contentRect.width }))
     ro.observe(el)
-    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = {}; retrLinesRef.current = [] }
+    return () => { ro.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = {}; retrLinesRef.current = []; spreadLinesRef.current = [] }
   }, [theme]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -182,8 +216,10 @@ export default function DualMa() {
         seriesRef.current.candles?.setData(d.candles ?? [])
         applyLineLayers(d)
         applyRetrLayer(d)
+        applySpreadLayer(d)
         setFibDir(d.fib_dir ?? 0)
         setRetrDir(d.fib_retracement?.dir ?? 0)
+        setSpreadTh({ density: d.spread_density_thresh ?? 0.015, divergence: d.spread_divergence_thresh ?? 0.03 })
         const c = getChartColors()
         markersRef.current?.setMarkers(buildAllMarkers(d, c))
         setCounts(countByTypeAndDir(d.ma6_signals ?? []))
@@ -202,6 +238,7 @@ export default function DualMa() {
   // 圖層開關：開→餵資料、關→清空，不重抓 API。
   useEffect(() => { if (dataRef.current) applyLineLayers(dataRef.current) }, [showMa, showFib, showFibInner]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (dataRef.current) applyRetrLayer(dataRef.current) }, [showRetr]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (dataRef.current) applySpreadLayer(dataRef.current) }, [showSpread]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 即時報價：輪詢幣安公開合約 K 線，更新最後一根 K 棒（跟 Chart.jsx 同機制）──
   useEffect(() => {
@@ -337,6 +374,9 @@ export default function DualMa() {
         <button onClick={() => setShowRetr(v => !v)} style={chip(showRetr, 'var(--pos)')}>
           回撤(水平){retrDir === -1 ? '↓' : retrDir === 1 ? '↑' : ''}
         </button>
+        <button onClick={() => setShowSpread(v => !v)} style={chip(showSpread, 'var(--accent)')}>
+          入場訊號(發散度)
+        </button>
       </div>
 
       {/* ── 分組圖例：每條線的顏色/線型/含義 ── */}
@@ -380,6 +420,20 @@ export default function DualMa() {
             </span>
           </div>
         )}
+        {showSpread && (
+          <div style={legendSection}>
+            {legendTag('入場訊號', 'var(--accent)')}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(cDom.accent, false, true)}六線發散度（下方子圖）
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(`${cDom.pos}cc`, true)}密集門檻 {spreadTh.density}（以下＝六線收斂/盤整）
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(`${cDom.warn}cc`, true)}發散門檻 {spreadTh.divergence}（升破＝趨勢確立→首踩進場區）
+            </span>
+          </div>
+        )}
         <div style={{ ...legendSection }}>
           {legendTag('訊號', 'var(--muted)')}
           <span style={{ color: 'var(--accent)' }}>◆ 密集突破 {counts.breakout.total}
@@ -397,7 +451,7 @@ export default function DualMa() {
 
       <div ref={containerRef} style={{
         borderRadius: 'var(--radius)', overflow: 'hidden', border: '1px solid var(--line)',
-        background: 'var(--surface)', minHeight: 460,
+        background: 'var(--surface)', minHeight: 580,
       }} />
 
       {errMsg && <div style={{ fontSize: 11, color: 'var(--neg)' }}>⚠ {errMsg}</div>}
