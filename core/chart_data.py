@@ -342,10 +342,14 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
         if bool(row.get("is_density", False)):
             density.append({"time": t, "value": c})
         # 六線發散度（入場訊號子圖）：spread=(六線max−min)/close 本身無號，只看得出
-        # 「散不散」看不出多空。用 trend_dir 帶號（跟上面訊號 dir 同一份狀態機、同一個
-        # 判斷來源）：多頭趨勢 value>=0、空頭 value<=0、無趨勢(密集/暖機) value=0。
+        # 「散不散」看不出多空。2026-07-13 使用者發現：原本用 trend_dir 帶號時，
+        # trend_dir 是狀態機鎖定值，只在 breakout 那一根才從 0 翻正/負——密集/發散
+        # 初期整段被釘在 0，訊號那根才瞬間跳到已經很大的值（平線→瞬間跳），跟密集區
+        # 銜接不起來。改用 order_dir（六線當下排列，逐根都算得出來，不用等狀態機
+        # 確認）帶號，方向會在訊號出現前就先隨排列成形而顯現，曲線平滑接續密集區。
         if (sv := _f(row.get("spread"))) is not None:
-            sd = trend_dir if trend_dir is not None else 0.0
+            od = _f(row.get("order_dir"))
+            sd = od if od is not None else 0.0
             spread.append({"time": t, "value": sv * (1 if sd > 0 else (-1 if sd < 0 else 0))})
         if _fc is not None:
             a_idx, a_px, slope, width, sdir = _fc

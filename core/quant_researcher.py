@@ -1285,6 +1285,11 @@ class MaConvergencePullbackStrategy(Strategy):
                       (out["ema20"] > out["ema60"]) & (out["ema60"] > out["ema120"]))
         bear_order = ((out["ma20"] < out["ma60"]) & (out["ma60"] < out["ma120"]) &
                       (out["ema20"] < out["ema60"]) & (out["ema60"] < out["ema120"]))
+        # order_dir：六線「當下排列」方向，跟 trend_dir 不同——trend_dir 是狀態機鎖定值
+        # （只在 breakout 那一根才從 0 翻正/負，密集/發散初期整段是 0）；order_dir 每根
+        # 都逐根反映當下排列，供圖表子圖連續畫出「收斂→排列成形→發散」的過程，不用
+        # 等狀態機確認才顯示方向（2026-07-13，見 chart_data.py 的 spread 子圖）。
+        out["order_dir"] = np.where(bull_order, 1.0, np.where(bear_order, -1.0, 0.0))
         thresh = float(self.params["divergence_thresh"])
         divergent_bull = bull_order & (out["spread"] > thresh)
         divergent_bear = bear_order & (out["spread"] > thresh)

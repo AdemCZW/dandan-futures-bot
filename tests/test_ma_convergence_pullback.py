@@ -350,3 +350,39 @@ def test_htf_filter_still_applies_to_breakout_entry():
     r = _row(trend_dir=1, is_first_pullback=False, is_breakout=True)
     r["htf_trend"] = -1
     assert s.signal(r, 0) == 0
+
+
+# ── order_dir：六線當下排列方向（不等狀態機鎖定）（2026-07-13）───────────────
+# 使用者發現：圖表子圖用 trend_dir 帶號時，密集/發散初期整段被釘在 0，訊號那根
+# 才瞬間跳到已經很大的 spread 值（平線→瞬間跳），跟密集區銜接不起來、也看不出
+# 「正在發散中」的過程。根因：trend_dir 是狀態機鎖定值，只在 breakout 那根才從
+# 0 翻正/負。真正該逐根連續反映的是六線「當下排列」（bull_order/bear_order），
+# 這個每根都算得出來，不用等狀態機確認——所以另外算一欄 order_dir，跟 trend_dir
+# 是兩回事：trend_dir＝「已確認的趨勢狀態」、order_dir＝「當下瞬時排列方向」。
+def test_prepare_adds_order_dir_column():
+    s = build_strategy("ma_convergence_pullback")
+    n = 200
+    close = 100 + np.cumsum(np.random.RandomState(3).normal(0, 1.0, n))
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    out = s.prepare(df)
+    assert "order_dir" in out.columns
+    assert set(out["order_dir"].dropna().unique()) <= {-1.0, 0.0, 1.0}
+
+
+def test_order_dir_is_continuous_unlike_locked_trend_dir():
+    """order_dir 在乾淨的單向上升趨勢裡，六線排列一旦成形就該持續是 +1，
+    不像 trend_dir 只在 breakout 那一根才翻正——這裡驗證排列成形後 order_dir
+    的正值根數，明顯早於/多於 trend_dir 從 0 翻正的那一刻（即排列先成形，
+    狀態機才確認），確保子圖曲線能在訊號出現前就先顯示出方向。"""
+    s = build_strategy("ma_convergence_pullback")
+    n = 300
+    close = 100 + np.arange(n) * 0.8          # 乾淨單向上升，六線終將同向排列
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    out = s.prepare(df)
+    first_order_bull = out.index[out["order_dir"] > 0][0]
+    first_trend_bull = out.index[out["trend_dir"] > 0][0]
+    assert first_order_bull <= first_trend_bull

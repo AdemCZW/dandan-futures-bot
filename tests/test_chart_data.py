@@ -7,6 +7,8 @@ import sys
 import importlib
 import builtins
 
+import numpy as np
+import pandas as pd
 import pytest
 
 from core.chart_data import build_trade_markers, parse_ts_unix, trade_markers, klines_data
@@ -398,3 +400,32 @@ def test_ma6_spread_carries_direction_matching_signals():
             assert v <= 0, f"空方訊號({t})但 spread 帶正號：{v}"
         checked += 1
     assert checked > 0, "測試資料裡沒有任何訊號可核對方向，換個 limit/seed"
+
+
+def test_ma6_spread_shows_direction_before_signal_fires(monkeypatch):
+    """使用者發現：子圖曲線在密集/發散初期整段被釘在 0，訊號那根才瞬間跳到已經
+    很大的值（平線→瞬間跳），跟密集區銜接不起來。根因：舊版用 trend_dir 帶號──
+    那是狀態機鎖定值，只在 breakout 那一根才從 0 翻正。改用 order_dir（六線當下
+    排列，逐根都算得出來，不用等狀態機確認）後，方向應該在訊號出現之前就先顯示
+    出來，而不是等到訊號那根才突然有值。"""
+    import core.chart_data as chart_data
+    from core.chart_data import ma6_overlay_data
+
+    # 前段長時間走平（六線真的糾結密集過，require_density_for_breakout 才會放行突破）
+    # 後段乾淨單向上升（六線終將同向排列、spread 逐漸推開）。
+    flat = 100 + np.sin(np.arange(180) * 0.3) * 0.3
+    ramp = flat[-1] + np.arange(1, 121) * 0.8
+    close = np.concatenate([flat, ramp])
+    n = len(close)
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    df = pd.DataFrame({"open": close, "high": close + 0.2, "low": close - 0.2,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    monkeypatch.setattr(chart_data, "_fetch_ohlcv_df", lambda *a, **k: df)
+
+    out = ma6_overlay_data(symbol="BTCUSDT", limit=200, source="testnet")
+    spread_pts = out["spread"]
+    first_nonzero_t = next(p["time"] for p in spread_pts if p["value"] != 0)
+    first_signal_t = min((s["time"] for s in out["ma6_signals"]), default=None)
+    assert first_signal_t is not None, "測試資料裡沒有任何訊號，換個走勢"
+    assert first_nonzero_t < first_signal_t, (
+        "spread 帶號應該在訊號出現之前就先反映方向（不是訊號那根才瞬間跳出來）")
