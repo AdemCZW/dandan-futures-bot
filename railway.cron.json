@@ -1,0 +1,14 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "//": "定時跑（cron）版設定：把 dandan-futures-bot 服務從『常駐』切成『每小時醒一次跑 run_once.py 就退出』。用法見 docs/定時跑部署.md。Volume 與 env 需在 Railway 面板設定（無法只靠此檔）。",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "python -u run_once.py",
+    "cronSchedule": "2 * * * *",
+    "restartPolicyType": "NEVER",
+    "numReplicas": 1
+  }
+}

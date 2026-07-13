@@ -392,3 +392,86 @@ ML 過濾維持 `ml_filter: false`。腳本 `research/scratchpad/cross_sectional
   而非整個移除（避免樣本內判斷的過擬合風險），尚未執行。
 - **實盤 vs 回測持續對照**：live_trade_audit.py 已可重跑，但尚未自動化
   成定期對照（驗證基礎設施缺口）。
+
+---
+
+## 2026-07-13：全策略交叉測試 + 前三名 walk-forward 樣本外最佳化
+
+> 由 YT-MV app session 代跑（`quant_researcher` 註冊策略全掃）。方法同本輪
+> 標準：8 幣池化（SUI/BTC/ETH/ARB/XRP/DOGE/ADA/DOT）、4h、~6573 根/幣、
+> 真實成本（fee0.05% + slippage0.02% + fill_lag1 + funding0.01%/8h）、
+> bootstrap 信賴下界（>0 才算扣掉抽樣噪音後仍有正 edge）。純模擬、只讀
+> `research/klines_cache/*_4h_1095.csv`。腳本暫存於 YT-MV session scratchpad
+> （`cross_test.py` / `wf_optimize.py`），未入庫本 repo。
+
+### Phase 1 — 22 個單策略（預設參數，依信賴下界排名）
+
+| 策略 | 筆數 | 勝率 | 期望 | 信賴下界 | 判定 |
+|---|---|---|---|---|---|
+| **smc_structure** | 1535 | 35.2% | +2.93 | **+1.45** | ✅ 顯著正 |
+| **vol_momentum** | 3436 | 34.6% | +1.30 | **+0.49** | ✅ 顯著正 |
+| **fib_ema** | 2109 | 34.0% | +1.68 | **+0.43** | ✅ 顯著正 |
+| chart_pattern_breakout | 1727 | 34.2% | +0.68 | −0.31 | ⚠ |
+| trend_pullback | 1563 | 32.4% | +0.35 | −0.94 | ⚠ |
+| ema_cross | 784 | 32.3% | +1.11 | −1.04 | ⚠ |
+| rsi2_connors | 1261 | **59.8%** | −0.55 | −1.28 | ❌ 高勝率陷阱 |
+| fib_channel | 1771 | 40.5% | −0.66 | −1.37 | ❌ |
+| ma_convergence_pullback | 503 | 38.8% | +0.80 | −1.63 | ⚠ |
+| fib_zero_reject | 1923 | 38.9% | −1.31 | −2.13 | ❌ |
+| ema_fib_vol | 391 | 33.2% | −1.11 | −2.90 | ❌ |
+| regression_channel | 2345 | 32.6% | −2.44 | −3.30 | ❌ |
+| zscore_ls | 1329 | 30.6% | −3.98 | −5.05 | ❌ |
+| zscore_revert | 606 | 26.2% | −6.18 | −7.70 | ❌ 最差 |
+
+- 無交易（預設參數在此資料/時框未觸發）：supertrend / donchian / of_momentum /
+  fib_retracement / vwap_band_reversion / heikin_ashi_momo / macd_scalp /
+  bb_squeeze_breakout（8 支，需個別調參或非 4h 設計，本輪未深入）。
+- **高勝率 ≠ 會賺**：rsi2_connors 勝率 59.8% 全場最高卻負期望；fib_channel /
+  fib_zero_reject 勝率 38–40% 也全是負下界。再次印證只能用期望值+下界判斷。
+
+### Phase 2 — 搭配（consensus 投票，min_agree 票同向才進場）
+
+以期望值前 6 名做投票組合，最佳者為 3票/前6（下界 +0.52）、3票/前5（+0.48）。
+**沒有任何組合贏過單用 smc_structure（+1.45）**；投票砍掉交易量、下界反而更低，
+且切半後段崩掉（後半下界 −2.27）。→ **搭配在此無加分，單獨跑優於混投票。**
+
+### Phase 3 — 前三名 walk-forward 樣本外最佳化（80 個獨立 OOS 測試窗，rr3 出場）
+
+train 1500 / test 500 / 每幣 10 folds；參數只在訓練窗依期望值挑、只在未見過的
+測試窗計分，跨 8 幣池化 OOS pnl 後 bootstrap。
+
+| 策略 | 配置 | OOS筆數 | 勝率 | 期望 | 信賴下界 | 判定 |
+|---|---|---|---|---|---|---|
+| **smc_structure** | OOS·**不調參** | 1036 | 36.0% | +4.09 | **+1.99** | ✅ |
+| | OOS·調參 | 1103 | 35.8% | +3.20 | +1.21 | ✅（比不調參**差**）|
+| | 全樣本·調參(IS) | 1448 | 36.4% | +4.06 | +2.31 | ✅ |
+| **vol_momentum** | OOS·不調參 | 2501 | 34.7% | +1.20 | +0.23 | ✅ |
+| | OOS·**調參** | 2594 | 35.9% | +1.92 | **+0.92** | ✅（比不調參**好**）|
+| | 全樣本·調參(IS) | 3102 | 36.4% | +3.03 | +1.96 | ✅ |
+| fib_ema | OOS·不調參 | 1495 | 33.2% | +1.58 | −0.08 | ⚠ |
+| | OOS·調參 | 1498 | 32.8% | +1.55 | −0.04 | ⚠ |
+| | 全樣本·調參(IS) | 1888 | 33.2% | +2.02 | +0.60 | ⚠ IS好OOS歸零 |
+
+### 結論與行動
+
+1. **smc_structure = 全場冠軍，維持實盤、用預設參數、別調它。** OOS 不調參下界
+   +1.99 > 調參 +1.21——格點搜尋只在追訓練窗噪音，套到樣本外反而扣分。**預設
+   參數已接近最優。** 現行實盤選擇正確。
+2. **vol_momentum = 唯一調參後 OOS 下界「上升」的策略（+0.23→+0.92），可上線
+   當獨立第二策略。** 參數選擇高度一致：80 folds 有 46 個選到 `lookback=10`。
+   **建議配置：`lookback=10 / entry_thresh=0.012 / use_trend_filter=True`。** 邏輯
+   （動能）與 smc（結構）不同，分散性佳。
+3. **fib_ema = 過不了樣本外，先別上線。** IS +0.60 → OOS ≈0（−0.04/−0.08），
+   IS-OOS 落差就是過擬合量。
+4. **最佳配置 = smc_structure + vol_momentum 兩支獨立並行**，非 consensus 混投票。
+
+> ⚠ 全為歷史回測、不構成投資建議；實盤另有滑價深度、資金費波動、交易所差異
+> 等回測未完全涵蓋之因素。
+
+### 尚待驗證/待辦（本輪新增）
+
+- **vol_momentum 上線為第二策略**：以 `lookback=10 / entry_thresh=0.012 /
+  use_trend_filter=True` 起一台 bot（需改 BOTS_CONFIG，讀取被安全機制擋，
+  待使用者提供內容或自行修改），尚未執行。
+- **8 支「無交易」策略調參復活**：supertrend/donchian 等在 4h 預設未觸發，
+  若要納入需個別掃參或換時框，尚未執行。

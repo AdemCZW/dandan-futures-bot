@@ -1,14 +1,14 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
+  "//": "定時跑模式：每小時第2分醒來跑 run_once.py（單輪決策）就退出，出場由交易所掛單守護。回滾：startCommand 改回 run_multi_futures.py、刪 cronSchedule、healthcheckPath 加回 /health、restartPolicyType 改回 ON_FAILURE。詳見 docs/定時跑部署.md。",
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "python -u run_live_futures.py",
-    "healthcheckPath": "/health",
-    "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10,
+    "startCommand": "python -u run_once.py",
+    "cronSchedule": "2 * * * *",
+    "restartPolicyType": "NEVER",
     "numReplicas": 1
   }
 }
