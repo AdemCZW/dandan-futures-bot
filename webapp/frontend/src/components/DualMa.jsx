@@ -48,7 +48,18 @@ const FIB_INNER_LINES = [
 // ── 圖層四：水平回撤層（擺動高低點錨定，畫成 priceLine，每條線自帶文字標籤）──
 // 0/1（行情起點/終點）實線較粗，中間比率虛線；顏色用綠色系跟金色通道區隔。
 const RETR_KEY = new Set([0, 1])
-const retrLabel = (ratio, dir) => {
+const MOBILE_BREAKPOINT = 640
+
+// 2026-07-13 手機實測：回撤7層+通道2層+現價，窄螢幕全部掛標籤會擠成一團看不清楚。
+// 窄螢幕只留錨點(0/1)掛標籤，中間 0.236~0.786 這5條細節線仍畫出來(保留視覺結構)
+// 但不掛價格軸標籤——線還在，只是不長標籤牌，跟桌面版「內層」預設收起同一個精簡邏輯。
+export function shouldLabelRetrLevel(ratio, isNarrow) {
+  return !isNarrow || RETR_KEY.has(ratio)
+}
+
+// 窄螢幕縮短文字：說明(高點/低點、支撐/壓力)已經在上面圖例欄寫過，不用每條線重複長句。
+export const retrLabel = (ratio, dir, isNarrow) => {
+  if (isNarrow) return ratio === 0 ? '回撤0' : ratio === 1 ? '回撤1' : `回撤${ratio}`
   if (ratio === 0) return dir === -1 ? '回撤0＝波段高點' : '回撤0＝波段低點'
   if (ratio === 1) return dir === -1 ? '回撤1＝波段低點' : '回撤1＝波段高點'
   return `回撤 ${ratio}`
@@ -99,15 +110,17 @@ export default function DualMa() {
     const retr = d?.fib_retracement
     if (!visible || !retr?.levels?.length) return
     const c = getChartColors()
+    const isNarrow = window.innerWidth <= MOBILE_BREAKPOINT
     retr.levels.forEach(({ ratio, price }) => {
       const isKey = RETR_KEY.has(ratio)
+      const showLabel = shouldLabelRetrLevel(ratio, isNarrow)
       retrLinesRef.current.push(candles.createPriceLine({
         price,
         color: isKey ? c.pos : `${c.pos}88`,
         lineWidth: isKey ? 2 : 1,
         lineStyle: isKey ? 0 : 2,
-        axisLabelVisible: true,
-        title: retrLabel(ratio, retr.dir),
+        axisLabelVisible: showLabel,
+        title: showLabel ? retrLabel(ratio, retr.dir, isNarrow) : '',
       }))
     })
   }
