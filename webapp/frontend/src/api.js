@@ -6,9 +6,24 @@ const BASE = import.meta.env.VITE_API ?? ''
 export const BOT_BASE = import.meta.env.VITE_BOT_URL
   ?? 'https://dandan-futures-bot-production.up.railway.app'
 
-// 本機開發（未設 VITE_BOT_URL）：bot 容器可能未開/已關，圖表資料改走本機後端
+// 2026-07-13：圖表資料(klines/ma6，純讀取歷史K線+指標，不含任何交易狀態)不該依賴
+// 交易 bot 容器死活——實測發現使用者停 bot 省 Railway 費用後，GitHub Pages 公開頁面
+// 圖表整條斷掉(Failed to fetch，bot 容器沒開就沒人回應)。改固定打 dandan-dashboard
+// （webapp/backend，同一份 core.chart_data、sleepApplication 閒置自動休眠、不含任何
+// 交易邏輯，bot 開不開都能看盤）。bot 專屬的即時持倉/手動平倉維持直連 bot 不變。
+export const DASHBOARD_BASE = import.meta.env.VITE_DASHBOARD_URL
+  ?? 'https://dandan-dashboard-production.up.railway.app'
+const PUBLIC_BUILD = import.meta.env.VITE_PUBLIC_BUILD === 'true'
+
+// 純函式（不碰 import.meta.env，方便單獨測試）：公開建置固定打 dashboard 絕對網址，
+// 本機開發回空字串（走 vite proxy 到本地 /api/*）。
+export function chartApiBase(publicBuild, dashboardBase) {
+  return publicBuild ? dashboardBase : ''
+}
+
+// 本機開發（未設 VITE_BOT_URL）：bot 容器可能未開/已關，bot 專屬端點改走本機後端
 // /api/*（同一份 core.chart_data，vite proxy 到 :8000）。GitHub Pages 建置（有設
-// VITE_BOT_URL）維持直連 bot 容器 /ma6 等，行為不變。
+// VITE_BOT_URL）維持直連 bot 容器，行為不變。
 const HAS_BOT = !!import.meta.env.VITE_BOT_URL
 
 // 平倉直連 token（僅 GitHub Pages 建置時由 GH Actions secret 注入）。
@@ -68,14 +83,12 @@ export const api = {
   closeBot: (id) => CLOSE_TOKEN
     ? postAbs(`${BOT_BASE}/${id}/close`, { 'X-Close-Token': CLOSE_TOKEN })
     : post(`/api/close/${id}`, {}),
-  // K 線 + 費波那契通道 + 交易標記：有 bot（GH Pages）直連容器；本機開發走後端 /api/*
-  klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) => HAS_BOT
-    ? getAbs(`${BOT_BASE}/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`)
-    : get(`/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
-  // 六線密集/發散（雙均線系統版面）：MA20/60/120 + EMA20/60/120 + 首次回踩訊號
-  ma6: (symbol = 'BTCUSDT', tf = '4h', limit = 300) => HAS_BOT
-    ? getAbs(`${BOT_BASE}/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`)
-    : get(`/api/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  // K 線 + 費波那契通道：純讀取，固定打 dashboard（不依賴 bot 容器，見上方註解）
+  klines: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
+    getAbs(`${chartApiBase(PUBLIC_BUILD, DASHBOARD_BASE)}/api/klines?symbol=${symbol}&interval=${tf}&limit=${limit}`),
+  // 六線密集/發散（雙均線系統版面）：MA20/60/120 + EMA20/60/120 + 首次回踩訊號，同上不依賴 bot
+  ma6: (symbol = 'BTCUSDT', tf = '4h', limit = 300) =>
+    getAbs(`${chartApiBase(PUBLIC_BUILD, DASHBOARD_BASE)}/api/ma6?symbol=${symbol}&interval=${tf}&limit=${limit}`),
   tradeMarkers: (symbol = 'BTCUSDT', bucketHours = 6) => HAS_BOT
     ? getAbs(`${BOT_BASE}/markers?symbol=${symbol}&bucket_hours=${bucketHours}`)
     : get(`/api/trade-markers?symbol=${symbol}&bucket_hours=${bucketHours}`),
