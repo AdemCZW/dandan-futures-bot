@@ -1368,13 +1368,24 @@ def test_f6_testnet_reset_clears_portfolio_equity(patched, tmp_path):
 #   杜絕「同一根棒重複決策 → 重複進場」的 churn（b7 實測同棒進場 3 次 ×2 輪）。
 # ═══════════════════════════════════════════════════════════════════════════
 
-def test_make_data_client_defaults_to_mainnet():
+@pytest.fixture
+def no_network_ping(monkeypatch):
+    """python-binance 的 Client.__init__ 會呼叫 self.ping() 打一次真實 API 驗證連線——
+    這讓「只是檢查 testnet flag 有沒有設對」的測試意外變成依賴真實網路的整合測試，
+    在 Binance 地區限制的環境（如部分 GitHub Actions runner IP，實測回 451
+    'restricted location'）會直接失敗，跟程式邏輯本身無關。這裡把 ping 短路掉，
+    讓測試只驗證 make_data_client() 真正要測的東西：testnet flag 有沒有設對。"""
+    import binance.client
+    monkeypatch.setattr(binance.client.Client, "ping", lambda self: {})
+
+
+def test_make_data_client_defaults_to_mainnet(no_network_ping):
     from core.market_analyst import make_data_client
     c = make_data_client()
     assert c.testnet is False
 
 
-def test_make_data_client_testnet_optout():
+def test_make_data_client_testnet_optout(no_network_ping):
     from core.market_analyst import make_data_client
     c = make_data_client("testnet")
     assert c.testnet is True
