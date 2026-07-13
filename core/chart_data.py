@@ -342,13 +342,17 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
         if bool(row.get("is_density", False)):
             density.append({"time": t, "value": c})
         # 六線發散度（入場訊號子圖）：spread=(六線max−min)/close 本身無號，只看得出
-        # 「散不散」看不出多空。2026-07-13 使用者發現：原本用 trend_dir 帶號時，
-        # trend_dir 是狀態機鎖定值，只在 breakout 那一根才從 0 翻正/負——密集/發散
-        # 初期整段被釘在 0，訊號那根才瞬間跳到已經很大的值（平線→瞬間跳），跟密集區
-        # 銜接不起來。改用 order_dir（六線當下排列，逐根都算得出來，不用等狀態機
-        # 確認）帶號，方向會在訊號出現前就先隨排列成形而顯現，曲線平滑接續密集區。
+        # 「散不散」看不出多空。2026-07-13 使用者先後發現兩層問題：
+        #  ① 原本用 trend_dir 帶號——那是狀態機鎖定值，只在 breakout 那一根才從 0
+        #     翻正/負，密集/發散初期整段釘在 0，訊號那根才瞬間跳值（平線→瞬間跳）。
+        #     改用 order_dir（六線當下排列，逐根都算得出來）解決。
+        #  ② 但 order_dir 密集時本身會雜訊般跳回 0（六線擠太近，嚴格排序極不穩定，
+        #     哪怕 spread 幾乎沒變）——用 1h 圖實測發現子圖曲線在密集區忽有忽無閃爍，
+        #     跟穩定顯示 True 的 is_density「密集」標記對不起來。改用 order_dir_sticky
+        #     （延續上一個非零方向，見 core.quant_researcher._order_dir_sticky_from_series），
+        #     密集時的排序雜訊不會讓曲線斷崖式歸零。
         if (sv := _f(row.get("spread"))) is not None:
-            od = _f(row.get("order_dir"))
+            od = _f(row.get("order_dir_sticky"))
             sd = od if od is not None else 0.0
             spread.append({"time": t, "value": sv * (1 if sd > 0 else (-1 if sd < 0 else 0))})
         if _fc is not None:

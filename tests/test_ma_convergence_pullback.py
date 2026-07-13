@@ -386,3 +386,50 @@ def test_order_dir_is_continuous_unlike_locked_trend_dir():
     first_order_bull = out.index[out["order_dir"] > 0][0]
     first_trend_bull = out.index[out["trend_dir"] > 0][0]
     assert first_order_bull <= first_trend_bull
+
+
+# ── order_dir_sticky：密集時排序雜訊不讓子圖曲線斷崖歸零（2026-07-13）───────
+# 使用者用 1h 圖實測發現：真實資料裡 spread(六線幅度)在密集區幾乎不變(0.0101→
+# 0.0101)，但 order_dir 卻從 +1 跳成 0——因為六線擠在一起時，嚴格排序極不穩定，
+# 隨便一條線鬆動一點順序就會亂。子圖曲線帶號用 order_dir，於是在密集區忽有忽無
+# 閃爍，跟穩定顯示 True 的 is_density「密集」標記完全對不起來。
+# 修法：order_dir_sticky 延續「上一個非零方向」，只有真的翻到另一邊才更新，
+# 密集時的排序雜訊不會讓曲線斷崖式歸零。
+def test_prepare_adds_order_dir_sticky_column():
+    s = build_strategy("ma_convergence_pullback")
+    out = s.prepare(_mk_random_df(200))
+    assert "order_dir_sticky" in out.columns
+    assert set(out["order_dir_sticky"].dropna().unique()) <= {-1.0, 0.0, 1.0}
+
+
+def _mk_random_df(n, seed=3):
+    close = 100 + np.cumsum(np.random.RandomState(seed).normal(0, 1.0, n))
+    idx = pd.date_range("2024-01-01", periods=n, freq="4h")
+    return pd.DataFrame({"open": close, "high": close + 1, "low": close - 1,
+                        "close": close, "volume": np.full(n, 100.0)}, index=idx)
+
+
+def test_order_dir_sticky_holds_through_noisy_zero_flicker():
+    """order_dir 序列 1,1,0,1,0,0,1（密集雜訊，多頭排列不斷小幅鬆動又恢復）→
+    sticky 全程維持 +1，不因中間的 0 而歸零（曲線不斷崖）。"""
+    from core.quant_researcher import _order_dir_sticky_from_series
+    seq = pd.Series([1, 1, 0, 1, 0, 0, 1], dtype=float)
+    result = _order_dir_sticky_from_series(seq)
+    assert list(result) == [1, 1, 1, 1, 1, 1, 1]
+
+
+def test_order_dir_sticky_updates_on_genuine_flip():
+    """order_dir 序列 1,1,0,-1,-1（真正翻空）→ sticky 在第一次出現 -1 那根就跟著翻空，
+    不會被舊的 +1 卡住不放。"""
+    from core.quant_researcher import _order_dir_sticky_from_series
+    seq = pd.Series([1, 1, 0, -1, -1], dtype=float)
+    result = _order_dir_sticky_from_series(seq)
+    assert list(result) == [1, 1, 1, -1, -1]
+
+
+def test_order_dir_sticky_zero_before_any_direction_forms():
+    """一開始還沒出現任何方向(全是0)時，sticky 維持 0，不會憑空冒出方向。"""
+    from core.quant_researcher import _order_dir_sticky_from_series
+    seq = pd.Series([0, 0, 0, 1, 1], dtype=float)
+    result = _order_dir_sticky_from_series(seq)
+    assert list(result) == [0, 0, 0, 1, 1]

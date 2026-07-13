@@ -486,6 +486,24 @@ def _num(v, default=None):
     return default if math.isnan(f) else f
 
 
+def _order_dir_sticky_from_series(order_dir: pd.Series) -> pd.Series:
+    """order_dir 延續「上一個非零方向」，不因密集時的排序雜訊斷崖歸零。
+
+    2026-07-13 使用者用 1h 圖實測發現：六線密集時彼此距離極近，嚴格排序
+    （bull_order/bear_order）極不穩定，隨便一條線鬆動一點順序就整組跳回 0——
+    即使 spread(六線幅度)幾乎沒變。子圖曲線若直接拿 order_dir 帶號，就會在
+    密集區忽有忽無地閃爍，跟穩定顯示 True 的 is_density「密集」標記對不起來。
+    這裡只做「持有上一個非零值」：真正翻到另一邊才更新，中間的 0 雜訊不清空。
+    """
+    prev = 0.0
+    out = np.empty(len(order_dir))
+    for i, v in enumerate(order_dir.to_numpy()):
+        if v != 0:
+            prev = v
+        out[i] = prev
+    return pd.Series(out, index=order_dir.index)
+
+
 class VwapBandReversionStrategy(Strategy):
     """滾動 VWAP 偏離 + 影線拒絕的均值回歸（多空雙向，盤整盤）。
 
@@ -1290,6 +1308,8 @@ class MaConvergencePullbackStrategy(Strategy):
         # 都逐根反映當下排列，供圖表子圖連續畫出「收斂→排列成形→發散」的過程，不用
         # 等狀態機確認才顯示方向（2026-07-13，見 chart_data.py 的 spread 子圖）。
         out["order_dir"] = np.where(bull_order, 1.0, np.where(bear_order, -1.0, 0.0))
+        # order_dir_sticky：密集時排序雜訊不讓子圖曲線斷崖歸零（見 _order_dir_sticky_from_series）。
+        out["order_dir_sticky"] = _order_dir_sticky_from_series(out["order_dir"])
         thresh = float(self.params["divergence_thresh"])
         divergent_bull = bull_order & (out["spread"] > thresh)
         divergent_bear = bear_order & (out["spread"] > thresh)

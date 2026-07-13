@@ -429,3 +429,32 @@ def test_ma6_spread_shows_direction_before_signal_fires(monkeypatch):
     assert first_signal_t is not None, "測試資料裡沒有任何訊號，換個走勢"
     assert first_nonzero_t < first_signal_t, (
         "spread 帶號應該在訊號出現之前就先反映方向（不是訊號那根才瞬間跳出來）")
+
+
+def test_ma6_spread_does_not_flicker_to_zero_during_steady_density(monkeypatch):
+    """使用者用真實 1h 圖實測發現：密集區(六線擠在一起)裡 spread(六線幅度)幾乎沒變，
+    但因為排序極不穩定，order_dir 會雜訊般跳回 0，導致回傳的 spread 忽有忽無地
+    閃爍歸零，跟穩定顯示 True 的 is_density「密集」標記完全對不起來。這裡構造
+    「排列先成形、隨後在密集雜訊中反覆小幅鬆動又恢復」的合成資料重現：後段
+    order_dir 應該延續前段方向、不因排序雜訊瞬間清零。"""
+    import core.chart_data as chart_data
+    from core.chart_data import ma6_overlay_data
+
+    n = 400
+    # 前段：乾淨上升，讓六線排列穩定成形
+    ramp = 100 + np.arange(200) * 0.6
+    # 後段：在成形的高點附近小幅來回震盪（密集雜訊），六線幅度變化很小
+    rng = np.random.RandomState(7)
+    noisy = ramp[-1] + np.cumsum(rng.normal(0, 0.05, 200))
+    close = np.concatenate([ramp, noisy])
+    idx = pd.date_range("2024-01-01", periods=n, freq="1h")
+    df = pd.DataFrame({"open": close, "high": close + 0.3, "low": close - 0.3,
+                       "close": close, "volume": np.full(n, 100.0)}, index=idx)
+    monkeypatch.setattr(chart_data, "_fetch_ohlcv_df", lambda *a, **k: df)
+
+    out = ma6_overlay_data(symbol="BTCUSDT", interval="1h", limit=300, source="testnet")
+    vals = [p["value"] for p in out["spread"]]
+    # 後段(密集雜訊區)不該出現「前一根還有值、下一根瞬間變 0」的斷崖
+    cliffs = sum(1 for a, b in zip(vals, vals[1:])
+                if a != 0 and b == 0 and abs(a) > 0.001)
+    assert cliffs == 0, f"spread 出現 {cliffs} 次斷崖式歸零，密集雜訊仍在造成閃爍"
