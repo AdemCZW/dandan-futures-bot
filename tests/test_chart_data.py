@@ -374,3 +374,27 @@ def test_ma6_overlay_includes_spread_oscillator():
     times = {c["time"] for c in out["candles"]}
     stimes = {p["time"] for p in out["spread"]}
     assert times == stimes, "有 K 棒缺 spread（暖機不足）"
+
+
+def test_ma6_spread_carries_direction_matching_signals():
+    """發散度子圖要標得出多空方向（2026-07-13，使用者指出原本子圖看不出做多還做空）：
+    spread 值本身是無號的六線最大最小差，改用 trend_dir 帶號──跟主圖箭頭訊號用的
+    是同一個 trend_dir（見 ma6_signals 的 dir 欄），子圖跟主圖方向定義一致，不重寫
+    一份平行邏輯。多頭趨勢時 value>=0、空頭時 value<=0、無趨勢(密集/暖機)時為 0。"""
+    from core.chart_data import ma6_overlay_data
+    from core.quant_researcher import build_strategy
+    out = ma6_overlay_data(source="synthetic", limit=400)
+    spread_by_t = {p["time"]: p["value"] for p in out["spread"]}
+    signal_dir_by_t = {s["time"]: s["dir"] for s in out["ma6_signals"]}
+    # 每一筆 pullback1/2 訊號當根，spread 的正負號要跟訊號方向一致
+    checked = 0
+    for t, d in signal_dir_by_t.items():
+        v = spread_by_t.get(t)
+        if v is None:
+            continue
+        if d > 0:
+            assert v >= 0, f"多方訊號({t})但 spread 帶負號：{v}"
+        else:
+            assert v <= 0, f"空方訊號({t})但 spread 帶正號：{v}"
+        checked += 1
+    assert checked > 0, "測試資料裡沒有任何訊號可核對方向，換個 limit/seed"

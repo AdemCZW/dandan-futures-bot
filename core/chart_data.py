@@ -341,9 +341,12 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
                 break
         if bool(row.get("is_density", False)):
             density.append({"time": t, "value": c})
-        # 六線發散度（入場訊號子圖）：spread=(六線max−min)/close，收斂(密集)→發散(趨勢)
+        # 六線發散度（入場訊號子圖）：spread=(六線max−min)/close 本身無號，只看得出
+        # 「散不散」看不出多空。用 trend_dir 帶號（跟上面訊號 dir 同一份狀態機、同一個
+        # 判斷來源）：多頭趨勢 value>=0、空頭 value<=0、無趨勢(密集/暖機) value=0。
         if (sv := _f(row.get("spread"))) is not None:
-            spread.append({"time": t, "value": sv})
+            sd = trend_dir if trend_dir is not None else 0.0
+            spread.append({"time": t, "value": sv * (1 if sd > 0 else (-1 if sd < 0 else 0))})
         if _fc is not None:
             a_idx, a_px, slope, width, sdir = _fc
             base = a_px + slope * (pos - a_idx)          # 0 線在當根（直線拉滿）

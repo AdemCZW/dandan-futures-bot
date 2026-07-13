@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { createChart, CrosshairMode, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
+import { createChart, CrosshairMode, CandlestickSeries, LineSeries, BaselineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { api } from '../api'
 import { Plain } from './Hint'
 import { getChartColors, useTheme } from '../lib/theme.js'
@@ -112,8 +112,9 @@ export default function DualMa() {
     })
   }
 
-  // 入場訊號子圖（pane 1）：六線發散度 spread + 密集/發散兩條門檻水平線。
-  // spread 低於密集門檻＝六線收斂(盤整)；升破發散門檻＝發散(趨勢確立)＝首踩進場區。
+  // 入場訊號子圖（pane 1）：六線發散度 spread，帶號（跟主圖箭頭訊號同一個 trend_dir）──
+  // 多頭趨勢 value>0(綠)、空頭 value<0(紅)、無趨勢(密集/暖機) value=0。BaselineSeries
+  // 原生以 0 為界自動上色，不用自己切段。門檻線上下各鏡射一條(±發散/±密集)。
   const applySpreadLayer = (d, visible = showSpread) => {
     const s = seriesRef.current.spread
     if (!s) return
@@ -123,14 +124,26 @@ export default function DualMa() {
     if (!visible || !d) return
     const c = getChartColors()
     const dens = d.spread_density_thresh, div = d.spread_divergence_thresh
-    if (dens != null) spreadLinesRef.current.push(s.createPriceLine({
-      price: dens, color: `${c.pos}cc`, lineWidth: 1, lineStyle: 2,
-      axisLabelVisible: true, title: '密集門檻',
-    }))
-    if (div != null) spreadLinesRef.current.push(s.createPriceLine({
-      price: div, color: `${c.warn}cc`, lineWidth: 1, lineStyle: 2,
-      axisLabelVisible: true, title: '發散門檻',
-    }))
+    if (div != null) {
+      spreadLinesRef.current.push(s.createPriceLine({
+        price: div, color: `${c.pos}cc`, lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: '發散門檻(多)',
+      }))
+      spreadLinesRef.current.push(s.createPriceLine({
+        price: -div, color: `${c.neg}cc`, lineWidth: 1, lineStyle: 2,
+        axisLabelVisible: true, title: '發散門檻(空)',
+      }))
+    }
+    if (dens != null) {
+      spreadLinesRef.current.push(s.createPriceLine({
+        price: dens, color: `${c.faint}cc`, lineWidth: 1, lineStyle: 3,
+        axisLabelVisible: true, title: '密集門檻',
+      }))
+      spreadLinesRef.current.push(s.createPriceLine({
+        price: -dens, color: `${c.faint}cc`, lineWidth: 1, lineStyle: 3,
+        axisLabelVisible: false, title: '',
+      }))
+    }
   }
 
   useEffect(() => {
@@ -175,9 +188,13 @@ export default function DualMa() {
       s.setData([])
       seriesRef.current[key] = s
     })
-    // 入場訊號子圖（pane 1）：六線發散度曲線，獨立於主價格圖下方。
-    const spreadS = chart.addSeries(LineSeries, {
-      color: c.accent, lineWidth: 2, title: '發散度',
+    // 入場訊號子圖（pane 1）：六線發散度曲線（帶號），獨立於主價格圖下方。
+    // BaselineSeries 原生以 0 為界分色：多頭(>0)綠、空頭(<0)紅，一眼看出方向。
+    const spreadS = chart.addSeries(BaselineSeries, {
+      baseValue: { type: 'price', price: 0 },
+      topLineColor: c.pos, topFillColor1: `${c.pos}33`, topFillColor2: `${c.pos}05`,
+      bottomLineColor: c.neg, bottomFillColor1: `${c.neg}05`, bottomFillColor2: `${c.neg}33`,
+      lineWidth: 2, title: '發散度(多綠/空紅)',
       priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: true,
     }, 1)
     spreadS.setData([])
@@ -424,13 +441,16 @@ export default function DualMa() {
           <div style={legendSection}>
             {legendTag('入場訊號', 'var(--accent)')}
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              {swatch(cDom.accent, false, true)}六線發散度（下方子圖）
+              {swatch(cDom.pos, false, true)}0以上(綠)＝多頭排列發散
             </span>
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              {swatch(`${cDom.pos}cc`, true)}密集門檻 {spreadTh.density}（以下＝六線收斂/盤整）
+              {swatch(cDom.neg, false, true)}0以下(紅)＝空頭排列發散
             </span>
             <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              {swatch(`${cDom.warn}cc`, true)}發散門檻 {spreadTh.divergence}（升破＝趨勢確立→首踩進場區）
+              {swatch(`${cDom.pos}cc`, true)}±發散門檻 {spreadTh.divergence}（突破＝趨勢確立→首踩進場區，方向見顏色）
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {swatch(`${cDom.faint}cc`, true)}±密集門檻 {spreadTh.density}（區間內＝六線收斂/盤整，無方向）
             </span>
           </div>
         )}
