@@ -21,7 +21,7 @@ from run_optimize import make_synthetic, GRIDS
 # 圖表資料層已抽到輕量 core.chart_data（bot 容器也能共用，不背回測相依）。
 # 這裡 re-export 保留舊介面（service.klines_data / build_trade_markers / trade_markers）不變。
 from core.chart_data import (
-    klines_data, build_trade_markers, trade_markers, parse_ts_unix as _parse_ts_unix,
+    klines_data, smc_overlay_data, build_trade_markers, trade_markers, parse_ts_unix as _parse_ts_unix,
     ma6_overlay_data,
 )
 

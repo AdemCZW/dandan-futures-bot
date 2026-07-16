@@ -481,3 +481,51 @@ def test_ma6_overlay_candles_include_volume():
         assert "volume" in c
         assert isinstance(c["volume"], float)
         assert c["volume"] > 0
+
+
+# ── smc_structure 疊圖（2026-07-16）：App 行情頁畫的一直是雙均線系統的六線/
+#    Fib 通道，但實際下單的 b1-b5 跑的是 smc_structure —— 兩者指標毫不相干，
+#    使用者對著圖找不到進場理由。這支吐 smc 真正看的東西：前高/前低觸發線、
+#    BOS 突破點、EMA20/50 方向濾網。
+def test_smc_overlay_returns_swing_levels_and_emas():
+    from core.chart_data import smc_overlay_data
+    out = smc_overlay_data(source="synthetic", limit=300)
+    for key in ("candles", "swing_high", "swing_low", "ema_fast", "ema_slow", "bos"):
+        assert key in out, f"缺欄位 {key}"
+    assert len(out["candles"]) > 0
+    # swing 位準是 ffill 的連續水位（畫成階梯線），暖機後每根都要有值
+    assert len(out["swing_high"]) > 0
+    for p in out["swing_high"][:3]:
+        assert "time" in p and "value" in p
+
+
+def test_smc_bos_markers_carry_direction():
+    from core.chart_data import smc_overlay_data
+    out = smc_overlay_data(source="synthetic", limit=400)
+    for b in out["bos"]:
+        assert "time" in b and "dir" in b
+        assert b["dir"] in (1, -1)
+
+
+def test_smc_overlay_matches_live_strategy():
+    """圖表用 SmcStructureStrategy.prepare() 本尊算出來的欄位——不是另外重寫一份
+    平行邏輯（否則圖上畫的觸發線會跟 bot 實際判定的悄悄不同步）。"""
+    from core.chart_data import smc_overlay_data, _SMC_WARMUP
+    from core.quant_researcher import build_strategy
+    from run_optimize import make_synthetic
+    df = make_synthetic(300 + _SMC_WARMUP)
+    expected = build_strategy("smc_structure").prepare(df.copy())
+    win = expected.iloc[-300:]
+    out = smc_overlay_data(source="synthetic", limit=300)
+    # BOS 標記數量應與策略本身在顯示視窗內算出的 bos_bull/bos_bear 一致
+    n_bull = sum(1 for b in out["bos"] if b["dir"] == 1)
+    n_bear = sum(1 for b in out["bos"] if b["dir"] == -1)
+    assert n_bull == int(win["bos_bull"].fillna(0).sum())
+    assert n_bear == int(win["bos_bear"].fillna(0).sum())
+
+
+def test_smc_overlay_candles_include_volume():
+    from core.chart_data import smc_overlay_data
+    out = smc_overlay_data(source="synthetic", limit=200)
+    for c in out["candles"][:3]:
+        assert "volume" in c

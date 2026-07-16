@@ -150,6 +150,15 @@ def ma6(symbol: str = "BTCUSDT", interval: str = "4h", limit: int = 300, source:
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+@app.get("/api/smc")
+def smc(symbol: str = "BTCUSDT", interval: str = "4h", limit: int = 300, source: str = "testnet"):
+    """smc_structure 疊圖：前高/前低觸發線 + BOS 突破點 + EMA20/50（b1-b5 實際跑的策略）。"""
+    try:
+        return service.smc_overlay_data(symbol, interval, limit, source)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
 @app.get("/api/trade-markers")
 def trade_markers(symbol: str = "BTCUSDT", bucket_hours: int = 6, limit: int = 5000):
     """機器人下單點：全部紀錄，每 bucket_hours 小時聚合一個點，依 bot 分色並標明 mode。"""

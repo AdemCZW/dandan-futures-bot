@@ -27,6 +27,7 @@ _KLINE_CACHE_TTL = 30.0            # 秒
 _BINANCE_BACKOFF = {"blocked_until": 0.0}
 _BACKOFF_DEFAULT_S = {429: 60.0, 418: 300.0}   # 418 代表已經觸發封鎖，預設值故意比 429 長
 _MA_WARMUP = 150                   # ma6 圖表多抓的暖機根數（>MA120，讓回傳每根都算得出長均線）
+_SMC_WARMUP = 80                   # smc 圖表暖機（>EMA50 + pivot 確認延遲，回傳每根都有觸發線）
 
 
 def parse_ts_unix(ts: str) -> int | None:
@@ -262,6 +263,71 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
         "donchian_lower": dc_lower,
         **fib_series,
     }
+
+
+def smc_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
+                     limit: int = 300, source: str = "testnet") -> dict:
+    """smc_structure 疊圖資料（2026-07-16）。
+
+    為什麼要這支：App 行情頁畫的是 ma6（雙均線系統的六線/Fib 通道/發散度），
+    但實際下單的 b1-b5 跑的是 smc_structure —— 兩套指標毫不相干，看著 ma6 的圖
+    永遠找不到 smc 的進場理由（它不看密集區、不看通道、不看量能）。
+
+    smc_structure 的進場條件其實只有兩個（見 SmcStructureStrategy.signal）：
+      1. BOS：收盤突破最近「已確認」的 swing 高/低點
+      2. EMA20 vs EMA50 方向濾網同向
+    所以這支就吐那三樣東西：swing_high/swing_low（ffill 的連續水位＝觸發線）、
+    bos（突破當根 + 方向）、ema_fast/ema_slow。
+
+    直接重用 SmcStructureStrategy.prepare()（單一事實來源），不重寫平行邏輯——
+    否則圖上畫的觸發線會跟 bot 實際判定的悄悄分岔。
+
+    回傳 lightweight-charts 格式：candles（含 volume）+ swing_high/swing_low/
+    ema_fast/ema_slow 四條線 + bos 標記（dir=+1 突破前高 / -1 跌破前低）。
+    """
+    from core.quant_researcher import build_strategy
+
+    fetch_n = limit + _SMC_WARMUP
+    df = _fetch_ohlcv_df(symbol, interval, fetch_n, source)
+    strat = build_strategy("smc_structure")
+    out = strat.prepare(df)
+
+    cutoff_ts = None
+    if len(out) > limit:
+        cutoff_ts = int(out.index[-limit].timestamp())
+
+    def _ts(idx):
+        return int(idx.timestamp())
+
+    def _f(v):
+        try:
+            x = float(v)
+            return None if (x != x) else x
+        except Exception:
+            return None
+
+    candles = []
+    lines = {k: [] for k in ("swing_high", "swing_low", "ema_fast", "ema_slow")}
+    bos = []
+    for idx, row in out.iterrows():
+        t = _ts(idx)
+        if cutoff_ts is not None and t < cutoff_ts:
+            continue                                     # 暖機根：只用來算指標，不回傳
+        o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
+        if None in (o, h, lo, c):
+            continue
+        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c,
+                        "volume": _f(row.get("volume")) or 0.0})
+        for k in lines:
+            if (v := _f(row.get(k))) is not None:
+                lines[k].append({"time": t, "value": v})
+        # BOS：突破當根 + 方向（bos_bull/bos_bear 在 warmup 期是 NaN → _f 回 None）
+        if (_f(row.get("bos_bull")) or 0) > 0:
+            bos.append({"time": t, "dir": 1, "price": c})
+        elif (_f(row.get("bos_bear")) or 0) > 0:
+            bos.append({"time": t, "dir": -1, "price": c})
+
+    return {"candles": candles, **lines, "bos": bos}
 
 
 def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
