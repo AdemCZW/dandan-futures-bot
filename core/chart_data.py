@@ -220,7 +220,8 @@ def klines_data(symbol: str = "BTCUSDT", interval: str = "4h",
         o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
         if None in (o, h, lo, c):
             continue
-        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c,
+                        "volume": _f(row.get("volume")) or 0.0})
         st_val = _f(row["supertrend"])
         if st_val is not None:
             st_dir = _f(row["st_dir"])
@@ -330,7 +331,8 @@ def ma6_overlay_data(symbol: str = "BTCUSDT", interval: str = "4h",
         o, h, lo, c = _f(row["open"]), _f(row["high"]), _f(row["low"]), _f(row["close"])
         if None in (o, h, lo, c):
             continue
-        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c})
+        candles.append({"time": t, "open": o, "high": h, "low": lo, "close": c,
+                        "volume": _f(row.get("volume")) or 0.0})
         for k in lines:
             if (v := _f(row[k])) is not None:
                 lines[k].append({"time": t, "value": v})

@@ -458,3 +458,26 @@ def test_ma6_spread_does_not_flicker_to_zero_during_steady_density(monkeypatch):
     cliffs = sum(1 for a, b in zip(vals, vals[1:])
                 if a != 0 and b == 0 and abs(a) > 0.001)
     assert cliffs == 0, f"spread 出現 {cliffs} 次斷崖式歸零，密集雜訊仍在造成閃爍"
+
+
+# ── 每根蠟燭附成交量（2026-07-16，App 行情頁要疊量能子圖）──
+def test_klines_data_candles_include_volume():
+    """`_fetch_ohlcv_df` 本來就有 volume 欄位，只是組裝 candles 時被丟掉——
+    補回去讓前端能畫量能柱，不必額外呼叫別支 API。"""
+    from core.chart_data import klines_data
+    out = klines_data(source="synthetic", limit=200)
+    assert len(out["candles"]) > 0
+    for c in out["candles"][:5]:
+        assert "volume" in c
+        assert isinstance(c["volume"], float)
+        assert c["volume"] > 0   # 合成資料用 lognormal，恆正
+
+
+def test_ma6_overlay_candles_include_volume():
+    from core.chart_data import ma6_overlay_data
+    out = ma6_overlay_data(source="synthetic", limit=300)
+    assert len(out["candles"]) > 0
+    for c in out["candles"][:5]:
+        assert "volume" in c
+        assert isinstance(c["volume"], float)
+        assert c["volume"] > 0
