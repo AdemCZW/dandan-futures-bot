@@ -47,9 +47,11 @@ def build_trade_markers(trades: list[dict], symbol: str, bucket_hours: int = 6) 
     """把交易日誌列轉成 K 線標記，每 bucket_hours 小時聚合一個點。
 
     - 只保留指定 symbol。
-    - 每 bucket_hours 小時為一桶（預設 6h）：同桶、同 bot、同進/出場方向的多筆
-      聚合成一個點，帶 count（筆數）與均價，避免分鐘級交易在圖上堆疊成柱。
-    - side 分類：entry（多 dir=+1 / 空 entry_short dir=−1）、exit（exit_* / scale_out）。
+    - 每 bucket_hours 小時為一桶（預設 6h）：同桶、同 bot、同進/出場方向、同 reason
+      的多筆聚合成一個點，帶 count（筆數）與均價，避免分鐘級交易在圖上堆疊成柱。
+    - side 分類：entry（多 dir=+1 / 空 entry_short dir=−1）、exit（exit_* / scale_out）；
+      另帶 reason＝原始 side，讓前端能分辨 exit_tp 這種真成交與 exit_reconciled
+      這種「重啟對帳回填、價格取當下標記價」的補記（兩者畫在圖上意義完全不同）。
     - 每點帶 strategy + mode（paper / live_futures_testnet / backtest），供前端標明回測。
     - 標記依時間遞增排序（lightweight-charts 要求）。
 
@@ -77,11 +79,14 @@ def build_trade_markers(trades: list[dict], symbol: str, bucket_hours: int = 6) 
         bt    = (unix // bucket) * bucket
         price = float(t.get("price", 0.0))
 
-        key = (strat, side, direction, bt)
+        # reason 進 key：side 被壓成 entry/exit 後，exit_tp 與 exit_reconciled
+        # （重啟對帳回填、價格為當下標記價）會長得一樣，聚在一起就再也分不出
+        # 哪筆是真成交 → 不同 reason 不合併，並把原始值帶給前端。
+        key = (strat, side, direction, bt, side_raw)
         g = groups.get(key)
         if g is None:
             g = {"time": bt, "side": side, "dir": direction, "strategy": strat,
-                 "mode": mode, "sum": 0.0, "count": 0}
+                 "mode": mode, "reason": side_raw, "sum": 0.0, "count": 0}
             groups[key] = g
             order.append(key)
         g["sum"]   += price
@@ -101,6 +106,7 @@ def build_trade_markers(trades: list[dict], symbol: str, bucket_hours: int = 6) 
             "price": round(g["sum"] / g["count"], 2),
             "side": g["side"],
             "dir": g["dir"],
+            "reason": g["reason"],      # 原始 side（exit_tp / exit_reconciled / ...）
             "strategy": g["strategy"],
             "mode": g["mode"],
             "count": g["count"],

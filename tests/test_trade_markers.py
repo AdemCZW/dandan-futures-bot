@@ -51,6 +51,29 @@ class TestBuildTradeMarkers:
             out = build_trade_markers([_row("2026-06-24 00:10:00", side, 100)], "BTCUSDT")
             assert out["markers"][0]["side"] == "exit", f"{side} 應分類為 exit"
 
+    # ── 出場原因（2026-07-16）：side 被壓成 "exit" 後，前端分不出「真成交」與
+    #    「exit_reconciled 對帳補記」。補記是重啟時交易所查無倉位而回填的、
+    #    價格為當下標記價，畫在圖上會被誤讀成真的平倉 → 帶原始 reason 供辨識。
+    def test_marker_carries_raw_exit_reason(self):
+        out = build_trade_markers(
+            [_row("2026-06-24 00:10:00", "exit_reconciled", 100)], "BTCUSDT")
+        m = out["markers"][0]
+        assert m["side"] == "exit"
+        assert m["reason"] == "exit_reconciled"
+
+    def test_entry_marker_carries_reason(self):
+        out = build_trade_markers([_row("2026-06-24 00:10:00", "entry", 100)], "BTCUSDT")
+        assert out["markers"][0]["reason"] == "entry"
+
+    def test_different_exit_reasons_not_merged(self):
+        """同桶但出場原因不同 → 不可聚合（真停利跟對帳補記是不同事件）。"""
+        rows = [_row("2026-06-24 00:10:00", "exit_tp", 100),
+                _row("2026-06-24 00:20:00", "exit_reconciled", 110)]
+        out = build_trade_markers(rows, "BTCUSDT")
+        assert len(out["markers"]) == 2
+        reasons = {m["reason"] for m in out["markers"]}
+        assert reasons == {"exit_tp", "exit_reconciled"}
+
     def test_six_hour_bucket_snapping(self):
         """ts 對齊到 6 小時桶（floor）。01:41 → 當日 00:00（0–6h 桶）。"""
         out = build_trade_markers([_row("2026-06-24 01:41:00", "entry", 100)], "BTCUSDT")
