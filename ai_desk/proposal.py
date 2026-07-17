@@ -31,13 +31,20 @@ def proposal_from_judge(data: dict, symbol: str, ts: str) -> TradeProposal:
     confidence = float(data["confidence"])
     if not 0.0 <= confidence <= 1.0:
         raise ValueError(f"confidence 必須在 0~1，收到 {confidence}")
-    entry = float(data["entry"])
-    stop = float(data["stop"])
-    take_profit = float(data["take_profit"])
-    if direction == 1 and not stop < entry:
-        raise ValueError(f"多單停損({stop})必須低於進場價({entry})")
-    if direction == -1 and not stop > entry:
-        raise ValueError(f"空單停損({stop})必須高於進場價({entry})")
+    # 觀望（direction 0）時裁判常把價格給 null；價格無意義，一律歸零、不驗證。
+    if direction == 0:
+        entry = stop = take_profit = 0.0
+    else:
+        # 有方向卻缺任一價格 → 不可用的提案，給明確 ValueError（而非 float(None) 的 TypeError）。
+        if data.get("entry") is None or data.get("stop") is None or data.get("take_profit") is None:
+            raise ValueError("方向非觀望時，entry/stop/take_profit 不可為空")
+        entry = float(data["entry"])
+        stop = float(data["stop"])
+        take_profit = float(data["take_profit"])
+        if direction == 1 and not stop < entry:
+            raise ValueError(f"多單停損({stop})必須低於進場價({entry})")
+        if direction == -1 and not stop > entry:
+            raise ValueError(f"空單停損({stop})必須高於進場價({entry})")
     return TradeProposal(symbol=symbol, ts=ts, direction=direction,
                          confidence=confidence, entry=entry, stop=stop,
                          take_profit=take_profit,

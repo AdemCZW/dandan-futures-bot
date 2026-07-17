@@ -53,6 +53,22 @@ def test_direction_zero_skips_price_validation():
     assert p.direction == 0
 
 
+def test_direction_zero_with_null_prices_defaults_to_zero():
+    """裁判判觀望時常把 entry/stop/take_profit 給 null；不可 float(None) 崩潰。"""
+    p = proposal_from_judge(
+        judge_data(direction=0, entry=None, stop=None, take_profit=None),
+        "BTCUSDT", "t")
+    assert p.direction == 0
+    assert p.entry == 0.0 and p.stop == 0.0 and p.take_profit == 0.0
+
+
+def test_directional_with_null_price_raises_valueerror_not_typeerror():
+    """有方向卻缺價格 → 明確 ValueError（不可用的提案），而非 float(None) 的 TypeError。"""
+    with pytest.raises(ValueError):
+        proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=None,
+                                       take_profit=90.0), "BTCUSDT", "t")
+
+
 def test_clamp_flat_proposal_not_allowed(officer):
     p = proposal_from_judge(judge_data(direction=0, entry=0, stop=0, take_profit=0),
                             "BTCUSDT", "t")
