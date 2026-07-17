@@ -139,7 +139,7 @@ PAGE_HTML = """<!doctype html>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body { font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
-         margin: 0; padding: 16px; max-width: 1000px; margin: 0 auto;
+         margin: 0; padding: 18px 24px;
          background: #0f1115; color: #e6e8eb; }
   h1 { font-size: 20px; margin: 4px 0 12px; }
   .muted { color: #8b93a1; font-size: 13px; }
@@ -150,12 +150,13 @@ PAGE_HTML = """<!doctype html>
   button { cursor: pointer; background: #2b6cff; border-color: #2b6cff; color: #fff; font-weight: 600; }
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: transparent; color: #e6e8eb; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } input { flex: 1; } }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; align-items: start; }
+  @media (max-width: 1200px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } input { flex: 1; } }
   .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 12px; padding: 14px; }
   .card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
   .role-body { white-space: pre-wrap; font-size: 13.5px; line-height: 1.55; color: #d3d7de;
-         max-height: 340px; overflow-y: auto; }
+         max-height: 62vh; overflow-y: auto; }
   .pending { color: #f2b04a; } .running { color: #4ac0f2; } .done { color: #4ad07a; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .dot.wait { background: #3a4150; } .dot.run { background: #4ac0f2; animation: pulse 1s infinite; }
