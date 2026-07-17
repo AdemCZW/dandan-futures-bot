@@ -32,8 +32,8 @@ EQUITY_FOR_SIZING = 10_000.0   # Phase 1 名目資金（測試網虛擬資金基
 
 
 def prepare_df(raw: pd.DataFrame) -> pd.DataFrame:
-    """fetch_klines 原始輸出 → DatetimeIndex + 丟掉最後一根未收盤 K 棒。"""
-    return raw.set_index("open_time").iloc[:-1]
+    """fetch_klines 已以 open_time 為 DatetimeIndex；這裡只丟掉最後一根未收盤 K 棒。"""
+    return raw.iloc[:-1]
 
 
 def build_llm():
