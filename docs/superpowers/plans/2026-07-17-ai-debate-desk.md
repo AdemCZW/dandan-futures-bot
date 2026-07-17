@@ -6,7 +6,7 @@
 
 **Architecture:** 新頂層套件 `ai_desk/` 與 `core/` 並存、零修改既有程式。LLM 呼叫透過 `llm_call: Callable[[str], str]` 依賴注入，所有膠水邏輯可離線測試。記憶層 = JSON Lines；核准層 = SQLite 狀態機；風控直接呼叫既有 `core.risk_officer.RiskOfficer`。
 
-**Tech Stack:** Python 3.12（uv venv）、pandas、pytest、anthropic SDK（新依賴，只進 `requirements-ai.txt`，不進 `requirements.txt`——避免改動 9 台生產 bot 的 Docker 映像）。
+**Tech Stack:** Python 3.12（uv venv）、pandas、pytest。LLM 後端 Phase 1 預設走本機 `claude` CLI（訂閱額度，免 SDK、免現金計費）；`anthropic` SDK 僅 Phase 2 API 排程需要，只進 `requirements-ai.txt`、不進 `requirements.txt`——避免改動 9 台生產 bot 的 Docker 映像。
 
 ## Global Constraints
 
@@ -15,7 +15,7 @@
 - 不修改 `core/`、`run_once.py`、`run_multi_futures.py`、`requirements.txt`、任何既有檔案（spec 原則 3、5）。
 - 禁止任何歷史回測程式碼或宣稱（spec 原則 4）。
 - 全程 TDD：先寫失敗測試，跑過再 commit；commit 訊息用中文（repo 慣例）。
-- 測試不得呼叫任何真實網路/API（anthropic 用注入假 client；K 線用合成資料）。
+- 測試不得呼叫任何真實網路/API/CLI（LLM 用注入假 runner/client；K 線用合成資料）。
 - Phase 1 範圍：BTCUSDT + 4h 單一組合；無 Telegram/儀表板；核准走 CLI。
 
 ---
@@ -28,7 +28,7 @@
 | `ai_desk/briefing.py` | Create | 指標 → LLM 可讀簡報（純函式） |
 | `ai_desk/memory.py` | Create | ThesisMemory（JSON Lines 讀寫） |
 | `ai_desk/roles.py` | Create | JSON 解析器 + 四角色 prompt/呼叫 |
-| `ai_desk/llm_client.py` | Create | 唯一真實呼叫 Anthropic API 之處 |
+| `ai_desk/llm_client.py` | Create | LLM 呼叫器：訂閱 CLI 版（Phase 1 預設）+ API 版（Phase 2） |
 | `ai_desk/proposal.py` | Create | TradeProposal + 風控夾限 |
 | `ai_desk/approval.py` | Create | SQLite 核准狀態機 + `__main__` CLI |
 | `ai_desk/desk.py` | Create | run_one_cycle 編排（全依賴注入） |
@@ -711,21 +711,23 @@ git commit -m "feat(ai_desk): 四辯論角色（技術分析→多方→空方�
 
 ---
 
-### Task 5: `llm_client.py`（Anthropic API 呼叫器）
+### Task 5: `llm_client.py`（LLM 呼叫器：訂閱 CLI 版 + API 版）
 
 **Files:**
 - Create: `ai_desk/llm_client.py`
 - Test: `tests/test_ai_desk_llm_client.py`
 
 **Interfaces:**
-- Consumes: `anthropic` SDK（延遲 import——沒裝也不影響其他模組測試）
-- Produces: `AnthropicLLMClient(model="claude-sonnet-5", max_tokens=2000, client=None)`，可呼叫物件 `__call__(prompt: str) -> str`。Task 9 依賴。`client` 參數供測試注入假物件。
+- Consumes: 本機 `claude` CLI（訂閱版，用 `subprocess`）；`anthropic` SDK（API 版，延遲 import）。兩者都可注入假物件（runner / client）完全離線測試。
+- Produces（Task 9 依賴，兩者同一 `__call__(prompt: str) -> str` 介面）:
+  - `ClaudeCliClient(binary="claude", model=None, timeout=180, runner=None)`——叫本機已登入的 `claude -p` 子程序，走 **Max 訂閱額度**、不額外計費。**Phase 1 預設**。
+  - `AnthropicLLMClient(model="claude-sonnet-5", max_tokens=2000, client=None)`——直接打 Anthropic API、按量計費。**Phase 2 排程用**。
 
 - [ ] **Step 1: 寫失敗測試**
 
 ```python
 # tests/test_ai_desk_llm_client.py
-"""ai_desk.llm_client 測試 — 注入假 client，不呼叫真實 API。"""
+"""ai_desk.llm_client 測試 — 兩個 client 都注入假物件，不碰網路/CLI/API。"""
 import os
 import sys
 
@@ -733,9 +735,44 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ai_desk.llm_client import AnthropicLLMClient
+from ai_desk.llm_client import AnthropicLLMClient, ClaudeCliClient
 
 
+# ── 訂閱 CLI 版（Phase 1 預設）────────────────────────────
+def test_cli_client_invokes_claude_p_and_strips_output():
+    captured = {}
+
+    def fake_runner(args):
+        captured["args"] = args
+        return "  回覆內容  \n"
+
+    out = ClaudeCliClient(runner=fake_runner)("測試 prompt")
+    assert out == "回覆內容"                              # 前後空白被 strip
+    assert captured["args"][:2] == ["claude", "-p"]
+    assert captured["args"][-1] == "測試 prompt"          # prompt 為最後一個參數
+
+
+def test_cli_client_passes_model_flag_when_set():
+    captured = {}
+
+    def fake_runner(args):
+        captured["args"] = args
+        return "x"
+
+    ClaudeCliClient(model="claude-opus-4-8", runner=fake_runner)("hi")
+    assert "--model" in captured["args"]
+    assert "claude-opus-4-8" in captured["args"]
+
+
+def test_cli_client_missing_binary_raises_clear_error():
+    def fake_runner(args):
+        raise FileNotFoundError()
+
+    with pytest.raises(RuntimeError, match="claude CLI"):
+        ClaudeCliClient(runner=fake_runner)("hi")
+
+
+# ── API 版（Phase 2 排程用）──────────────────────────────
 class FakeBlock:
     def __init__(self, text):
         self.type = "text"
@@ -760,17 +797,16 @@ class FakeAnthropic:
         self.messages = FakeMessages()
 
 
-def test_call_passes_prompt_and_returns_text():
+def test_api_client_passes_prompt_and_returns_text():
     fake = FakeAnthropic()
-    llm = AnthropicLLMClient(client=fake)
-    out = llm("測試 prompt")
+    out = AnthropicLLMClient(client=fake)("測試 prompt")
     assert out == "回覆內容"
     assert fake.messages.kwargs["messages"] == [{"role": "user", "content": "測試 prompt"}]
     assert fake.messages.kwargs["model"] == "claude-sonnet-5"
     assert fake.messages.kwargs["max_tokens"] == 2000
 
 
-def test_missing_api_key_raises_clear_error(monkeypatch):
+def test_api_client_missing_api_key_raises(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         AnthropicLLMClient()
@@ -785,25 +821,66 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'ai_desk.llm_client'`）
 
 ```python
 # ai_desk/llm_client.py
-"""唯一真正呼叫 Anthropic API 的地方。
+"""LLM 呼叫器 — 兩種後端，同一個 __call__(prompt) -> str 介面。
 
-按用量計費（與 Claude Max 訂閱分開的帳）。需要 env: ANTHROPIC_API_KEY。
-測試時注入 client 參數即可完全離線。
+ClaudeCliClient（Phase 1 預設）：叫本機已登入的 claude CLI（claude -p），走 Max
+  訂閱額度，不額外計費；但只能在有登入的本機跑、且吃訂閱用量上限，僅適合低頻手動試跑。
+AnthropicLLMClient（Phase 2 排程）：直接打 Anthropic API，按 token 計費，
+  可在 Railway 等無登入伺服器跑。
+
+兩者都可注入假物件（runner / client）完全離線測試。
 """
 from __future__ import annotations
 
 import os
 
 
+class ClaudeCliClient:
+    """透過本機 claude CLI 呼叫（訂閱額度，非 API 計費）。
+
+    prompt 以最後一個 positional 參數傳入（用 subprocess list，無 shell 逸出問題）；
+    輸出取 stdout 並 strip。runner 可注入以利離線測試。
+    """
+
+    def __init__(self, binary: str = "claude", model: str | None = None,
+                 timeout: int = 180, runner=None):
+        self.binary = binary
+        self.model = model
+        self.timeout = timeout
+        self._runner = runner or self._default_runner
+
+    def _default_runner(self, args) -> str:
+        import subprocess
+        result = subprocess.run(args, capture_output=True, text=True,
+                                timeout=self.timeout, check=True)
+        return result.stdout
+
+    def __call__(self, prompt: str) -> str:
+        args = [self.binary, "-p"]
+        if self.model:
+            args += ["--model", self.model]
+        args.append(prompt)
+        try:
+            out = self._runner(args)
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"找不到 {self.binary} CLI。ClaudeCliClient 需要本機已安裝並登入的 "
+                "claude CLI（走 Max 訂閱）。若要在無登入的伺服器跑，請改用 AnthropicLLMClient。"
+            ) from e
+        return out.strip()
+
+
 class AnthropicLLMClient:
+    """直接呼叫 Anthropic API（按用量計費，與 Max 訂閱分開的帳）。需 env: ANTHROPIC_API_KEY。"""
+
     def __init__(self, model: str = "claude-sonnet-5", max_tokens: int = 2000,
                  client=None):
         if client is None:
             if not os.getenv("ANTHROPIC_API_KEY"):
                 raise RuntimeError(
-                    "缺少 ANTHROPIC_API_KEY 環境變數。"
-                    "ai_desk 直接呼叫 Anthropic API（按用量計費，與 Claude Max 訂閱分開），"
-                    "請到 console.anthropic.com 取得 API key 後 export。"
+                    "缺少 ANTHROPIC_API_KEY 環境變數。AnthropicLLMClient 直接呼叫 "
+                    "Anthropic API（按用量計費，與 Claude Max 訂閱分開）。"
+                    "Phase 1 本機試跑建議改用 ClaudeCliClient（走訂閱、免額外計費）。"
                 )
             import anthropic  # 延遲 import：沒裝 SDK 不影響其他模組
             client = anthropic.Anthropic()
@@ -824,13 +901,13 @@ class AnthropicLLMClient:
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `python -m pytest tests/test_ai_desk_llm_client.py -v`
-Expected: 2 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ai_desk/llm_client.py tests/test_ai_desk_llm_client.py
-git commit -m "feat(ai_desk): Anthropic API 呼叫器（延遲import、缺key明確報錯、可注入假client）"
+git commit -m "feat(ai_desk): LLM呼叫器雙後端（訂閱CLI版預設+API版備用，同介面可切換）"
 ```
 
 ---
@@ -1501,8 +1578,8 @@ git commit -m "feat(ai_desk): 單輪編排（簡報→四角色辯論→提案�
 - Test: `tests/test_ai_desk_entrypoint.py`
 
 **Interfaces:**
-- Consumes: `core.market_analyst.fetch_klines(client, symbol, interval, limit=500, futures=False) -> pd.DataFrame`（回傳含 `open_time` 欄位的 DataFrame，需 `set_index("open_time")`；最後一根是未收盤 K 棒，需丟棄）；Task 5 `AnthropicLLMClient`；Task 8 `run_one_cycle`。
-- Produces: `prepare_df(raw: pd.DataFrame) -> pd.DataFrame`（設索引 + 丟未收盤根，抽成純函式以利測試）、`main()` 進入點。
+- Consumes: `core.market_analyst.fetch_klines(client, symbol, interval, limit=500, futures=False) -> pd.DataFrame`（回傳含 `open_time` 欄位的 DataFrame，需 `set_index("open_time")`；最後一根是未收盤 K 棒，需丟棄）；Task 5 `ClaudeCliClient`/`AnthropicLLMClient`；Task 8 `run_one_cycle`。
+- Produces: `prepare_df(raw: pd.DataFrame) -> pd.DataFrame`（設索引 + 丟未收盤根，抽成純函式以利測試）、`build_llm()`（依 `AI_DESK_LLM` env 選後端，預設 CLI）、`main()` 進入點。
 
 - [ ] **Step 1: 寫失敗測試**
 
@@ -1547,11 +1624,14 @@ Expected: FAIL（`ModuleNotFoundError: No module named 'run_ai_desk_once'`）
 Phase 1：本機手動執行、人工肉眼檢視辯論品質。不排程、不執行任何下單。
 核准後的提案執行接線屬 Phase 2（本腳本只列印 approved 未執行清單提醒）。
 
-用法：
-    ANTHROPIC_API_KEY=sk-ant-... python run_ai_desk_once.py [SYMBOL] [INTERVAL]
-    （預設 BTCUSDT 4h；K 線用幣安公開端點，不需交易金鑰）
+用法（Phase 1 預設走訂閱 CLI，不額外計費）：
+    python run_ai_desk_once.py [SYMBOL] [INTERVAL]
+    （預設 BTCUSDT 4h；需本機已登入 claude CLI；K 線用幣安公開端點，不需交易金鑰）
 
-費用注意：每輪 4 次 Anthropic API 呼叫，按用量計費（與 Claude Max 訂閱分開）。
+切換到 API 版（Phase 2 排程用，按量計費）：
+    AI_DESK_LLM=api ANTHROPIC_API_KEY=sk-ant-... python run_ai_desk_once.py
+
+費用注意：預設 CLI 版走 Max 訂閱額度（免額外計費，但吃訂閱用量上限）；每輪 4 次呼叫。
 """
 import os
 import sys
@@ -1565,7 +1645,7 @@ from core.risk_officer import RiskOfficer
 
 from ai_desk.approval import ApprovalStore
 from ai_desk.desk import run_one_cycle
-from ai_desk.llm_client import AnthropicLLMClient
+from ai_desk.llm_client import AnthropicLLMClient, ClaudeCliClient
 from ai_desk.memory import ThesisMemory
 
 MEMORY_DIR = os.path.join("ai_desk", "memory")
@@ -1577,11 +1657,18 @@ def prepare_df(raw: pd.DataFrame) -> pd.DataFrame:
     return raw.set_index("open_time").iloc[:-1]
 
 
+def build_llm():
+    """依 AI_DESK_LLM 選後端：預設 cli（走訂閱、免額外計費）；api（按量計費，Phase 2 排程）。"""
+    if os.getenv("AI_DESK_LLM", "cli").lower() == "api":
+        return AnthropicLLMClient()                    # 缺 key 在這裡就報錯
+    return ClaudeCliClient()                           # 走本機登入的訂閱額度
+
+
 def main() -> None:
     symbol = sys.argv[1] if len(sys.argv) > 1 else "BTCUSDT"
     interval = sys.argv[2] if len(sys.argv) > 2 else "4h"
 
-    llm = AnthropicLLMClient()                        # 缺 key 在這裡就報錯
+    llm = build_llm()
     client = Client()                                 # 公開 K 線端點不需金鑰
     raw = fetch_klines(client, symbol, interval, limit=400, futures=True)
     df = prepare_df(raw)
@@ -1636,14 +1723,15 @@ git add run_ai_desk_once.py tests/test_ai_desk_entrypoint.py
 git commit -m "feat(ai_desk): 單輪進入點 run_ai_desk_once.py（真實K線+四角色辯論+pending佇列）"
 ```
 
-- [ ] **Step 6: 首次真實試跑（需使用者提供 ANTHROPIC_API_KEY，事前明確告知計費）**
+- [ ] **Step 6: 首次真實試跑（Phase 1 走訂閱 CLI，不需 API key、不需 pip install）**
 
-先安裝依賴：`python -m pip install -r requirements-ai.txt`
+確認本機 `claude` CLI 已登入（`claude -p "hi"` 能回話即可）。CLI 版不需要 `anthropic` SDK，
+故本步不必安裝 `requirements-ai.txt`（那是 Phase 2 API 版才需要）。
 
-向使用者確認取得 API key 並理解「按用量計費、與 Claude Max 訂閱分開」後：
-
-Run: `ANTHROPIC_API_KEY=... python run_ai_desk_once.py BTCUSDT 4h`
+Run: `python run_ai_desk_once.py BTCUSDT 4h`
 Expected: 印出四角色完整辯論全文（繁體中文）、最終提案、風控結果；若方向非 0 且風控放行，`python -m ai_desk.approval` 可看到 pending 提案。
+
+備註：這一步實際會消耗你的 Max 訂閱用量（非 API 現金計費）。跑一輪 = 4 次 CLI 呼叫。
 
 **這一步的產出（辯論全文品質）交給使用者肉眼評估——是 Phase 1 的核心驗收，不是自動化測試。**
 
@@ -1660,6 +1748,6 @@ git commit -m "docs: ai_desk 首輪真實辯論試跑觀察（品質/token/費�
 
 ## Self-Review 記錄
 
-- **Spec 覆蓋**：①簡報層=Task 1；②分析層=Task 3/4；③記憶層=Task 2；④風控閘門=Task 6；⑤核准閘門=Task 7；編排=Task 8；進入點=Task 9；`anthropic` 依賴=Task 1 的 `requirements-ai.txt`（進 requirements-ai 而非 requirements.txt，比 spec 原文更嚴格地滿足「與 9 台生產 bot 隔離」原則）。⑥執行層接線與 ⑦驗證層樣本統計屬 Phase 2/3，spec 的 rollout 表已明確排除於 Phase 1。
+- **Spec 覆蓋**：①簡報層=Task 1；②分析層=Task 3/4；③記憶層=Task 2；④風控閘門=Task 6；⑤核准閘門=Task 7；編排=Task 8；進入點=Task 9。LLM 後端：Phase 1 走訂閱 CLI（Task 5 `ClaudeCliClient`），零額外現金計費、零 pip 安裝；API 版（`AnthropicLLMClient` + `anthropic` 依賴，只進 `requirements-ai.txt`、不進 `requirements.txt`）保留給 Phase 2 排程。⑥執行層接線與 ⑦驗證層樣本統計屬 Phase 2/3，spec 的 rollout 表已明確排除於 Phase 1。
 - **Placeholder 掃描**：無 TBD/TODO；每步含完整程式碼與預期輸出。
 - **型別/簽名一致性**：`run_one_cycle` 的 keyword 參數、`RoleOutput.full_text/.data`、`ApprovalStore` 方法名、`TradeProposal` 欄位在 Task 6/7/8/9 間逐字一致。

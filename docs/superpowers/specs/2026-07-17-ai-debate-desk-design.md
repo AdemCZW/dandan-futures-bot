@@ -35,7 +35,7 @@
 ① 資料層 [既有，不改]
    market_analyst (真實幣安合約 K 線) + signal_engineer (EMA/RSI/ATR/通道位置/回撤/背離等既有因果指標)
         ↓ 只把「算好的事實」餵給 AI 層，AI 層不碰原始 K 線
-② 分析層 [新，每輪 3–4 次真實 Claude API 呼叫]
+② 分析層 [新，每輪 4 次 LLM 呼叫；Phase 1 走訂閱 CLI，Phase 2 走 API]
    技術分析角色 → 客觀描述市場結構（不帶方向偏好）
    多方研究員角色 → 讀技術分析 + 歷史記憶 → 最強多方論點
    空方研究員角色 → 讀多方論點 → 直接反駁 + 最強空方論點
@@ -66,7 +66,7 @@
 |---|---|---|
 | `ai_desk/briefing.py` | `build_market_briefing(df, symbol, interval) -> MarketBriefing` —— 把 `signal_engineer` 算好的欄位轉成給 LLM 讀的結構化摘要（純函式，不呼叫 LLM，不呼叫網路） | `core.signal_engineer` |
 | `ai_desk/roles.py` | 四個角色函式，每個都是 `run_role(prompt_ctx, llm_call) -> ParsedRoleOutput`，`llm_call: Callable[[str], str]` 由外部注入 | 無（純邏輯 + 注入的呼叫器） |
-| `ai_desk/llm_client.py` | 唯一真正呼叫 Anthropic API 的地方：`AnthropicLLMClient.__call__(prompt: str) -> str` | `anthropic`（新依賴） |
+| `ai_desk/llm_client.py` | LLM 呼叫器兩後端，同一 `__call__(prompt) -> str` 介面：`ClaudeCliClient`（訂閱 CLI，Phase 1 預設）+ `AnthropicLLMClient`（API，Phase 2） | `subprocess`（CLI）／`anthropic`（API，Phase 2 才需要） |
 | `ai_desk/memory.py` | `ThesisMemory` —— 讀寫 `ai_desk/memory/{symbol}_{interval}.jsonl`，`load(n=5)` / `append(entry)` | 無 |
 | `ai_desk/proposal.py` | `TradeProposal` dataclass + `clamp_with_risk_officer(proposal, risk_officer) -> RiskDecision` | `core.risk_officer.RiskOfficer` |
 | `ai_desk/approval.py` | `ApprovalStore` —— SQLite 狀態機（pending/approved/rejected/executed），沿用 `trade_journal.py` 的 SQLite-fallback 慣例 | 無 |
@@ -83,7 +83,7 @@
 
 ### ② 分析/辯論層
 
-四個角色皆為「一次 Claude API 呼叫 + 一次結構化解析」，呼叫本身透過 `llm_call` 注入以利測試：
+四個角色皆為「一次 LLM 呼叫 + 一次結構化解析」，呼叫本身透過 `llm_call` 注入以利測試（後端 CLI/API 皆可）：
 
 - **技術分析角色**：輸入 `MarketBriefing`，輸出客觀市場結構描述（禁止在 prompt 層要求方向性結論）。
 - **多方研究員**：輸入技術分析結果 + 最近 N 輪記憶，輸出「最強看多論點」（列點式）。
@@ -124,13 +124,15 @@ MVP 版本刻意做到最簡單、無需任何新基礎設施：
 
 ---
 
-## 新增外部依賴與成本
+## LLM 後端與成本
 
-`requirements.txt` 目前**沒有** `anthropic` SDK（已確認）。本設計需新增 `anthropic>=0.40` 作為 `ai_desk/llm_client.py` 的依賴。
+LLM 呼叫抽象成 `llm_call(prompt) -> str` 介面（依賴注入），有兩種可切換後端：
 
-**重要成本澄清**：這與 OpenAlice 不同——OpenAlice 重用使用者本機已登入的 Claude Code CLI 訂閱（Claude Max），呼叫是「免費」的（訂閱內）。本系統是直接呼叫 Anthropic API，需要一組獨立的 `ANTHROPIC_API_KEY`，**按用量計費，與 Claude Max 訂閱是分開的兩筆帳**。
+**Phase 1 預設 — 訂閱 CLI（`ClaudeCliClient`）**：仿 OpenAlice 的做法，把使用者本機已登入的 `claude` CLI（`claude -p`）當子程序呼叫，用其 **Claude Max 訂閱額度**，**不額外計費**。限制：只能在有登入的本機跑（不可上 Railway）、會吃訂閱的用量上限（跑多了排擠互動式 Claude Code 額度）、屬訂閱互動用途的灰色地帶（僅適合低頻手動試跑）。此後端不需要 `anthropic` SDK。
 
-成本估算（延續 `OpenAlice評估報告.md` 的估法）：試點階段（1 幣種 BTCUSDT、4h 週期）每次收盤 4 次 API 呼叫 × 每天 6 次收盤 ≈ 每天 24 次呼叫。以中等 prompt 長度估算，預期每天成本落在數十美分至個位數美元區間（實際數字待第一階段跑起來後用真實帳單校準,本設計不做更精確承諾）。
+**Phase 2 排程 — API（`AnthropicLLMClient`）**：直接呼叫 Anthropic API，需一組獨立 `ANTHROPIC_API_KEY`，**按用量計費，與 Max 訂閱是分開的兩筆帳**；可在 Railway 等無登入伺服器跑。需新增 `anthropic>=0.40`，只進 `requirements-ai.txt`、不進 `requirements.txt`（避免動到 9 台生產 bot 的 Docker 映像）。
+
+**成本**：Phase 1 走訂閱 = 零額外現金支出（只耗訂閱用量）。Phase 2 走 API 的估算（延續 `OpenAlice評估報告.md` 估法）：1 幣種 BTCUSDT、4h、每輪 4 次呼叫 × 每天 6 輪 ≈ 每天 24 次，中等 prompt 長度下每天數十美分至約 1 美元、每月約 20–30 美元；放大幣種／縮短週期／加辯論輪數會線性上升。實際數字待跑起來用真實帳單校準。
 
 ---
 
