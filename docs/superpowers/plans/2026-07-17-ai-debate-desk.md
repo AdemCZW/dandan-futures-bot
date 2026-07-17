@@ -1578,7 +1578,7 @@ git commit -m "feat(ai_desk): 單輪編排（簡報→四角色辯論→提案�
 - Test: `tests/test_ai_desk_entrypoint.py`
 
 **Interfaces:**
-- Consumes: `core.market_analyst.fetch_klines(client, symbol, interval, limit=500, futures=False) -> pd.DataFrame`（回傳含 `open_time` 欄位的 DataFrame，需 `set_index("open_time")`；最後一根是未收盤 K 棒，需丟棄）；Task 5 `ClaudeCliClient`/`AnthropicLLMClient`；Task 8 `run_one_cycle`。
+- Consumes: `core.market_analyst.fetch_klines(client, symbol, interval, limit=500, futures=False) -> pd.DataFrame`（**已內部 `set_index("open_time")`**，回傳以 `open_time` 為 DatetimeIndex、無該欄位的 DataFrame；最後一根是未收盤 K 棒，需丟棄——`prepare_df` 只要 `iloc[:-1]`，不可再 set_index）；Task 5 `ClaudeCliClient`/`AnthropicLLMClient`；Task 8 `run_one_cycle`。
 - Produces: `prepare_df(raw: pd.DataFrame) -> pd.DataFrame`（設索引 + 丟未收盤根，抽成純函式以利測試）、`build_llm()`（依 `AI_DESK_LLM` env 選後端，預設 CLI）、`main()` 進入點。
 
 - [ ] **Step 1: 寫失敗測試**
@@ -1599,15 +1599,15 @@ from run_ai_desk_once import prepare_df
 
 def test_prepare_df_sets_index_and_drops_open_bar():
     n = 10
+    idx = pd.date_range("2026-07-01", periods=n, freq="4h", name="open_time")
     raw = pd.DataFrame({
-        "open_time": pd.date_range("2026-07-01", periods=n, freq="4h"),
         "open": np.ones(n), "high": np.ones(n), "low": np.ones(n),
         "close": np.ones(n), "volume": np.ones(n),
-    })
+    }, index=idx)                                    # fetch_klines 已以 open_time 為索引
     df = prepare_df(raw)
     assert len(df) == n - 1                          # 最後一根（未收盤）被丟掉
     assert isinstance(df.index, pd.DatetimeIndex)
-    assert df.index[-1] == raw["open_time"].iloc[-2]
+    assert df.index[-1] == idx[-2]
 ```
 
 - [ ] **Step 2: 跑測試確認失敗**
@@ -1653,8 +1653,8 @@ EQUITY_FOR_SIZING = 10_000.0   # Phase 1 名目資金（測試網虛擬資金基
 
 
 def prepare_df(raw: pd.DataFrame) -> pd.DataFrame:
-    """fetch_klines 原始輸出 → DatetimeIndex + 丟掉最後一根未收盤 K 棒。"""
-    return raw.set_index("open_time").iloc[:-1]
+    """fetch_klines 已以 open_time 為 DatetimeIndex；這裡只丟掉最後一根未收盤 K 棒。"""
+    return raw.iloc[:-1]
 
 
 def build_llm():
