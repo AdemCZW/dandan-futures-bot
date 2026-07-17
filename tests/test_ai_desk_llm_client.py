@@ -1,5 +1,6 @@
 """ai_desk.llm_client 測試 — 兩個 client 都注入假物件，不碰網路/CLI/API。"""
 import os
+import subprocess
 import sys
 
 import pytest
@@ -40,6 +41,23 @@ def test_cli_client_missing_binary_raises_clear_error():
         raise FileNotFoundError()
 
     with pytest.raises(RuntimeError, match="claude CLI"):
+        ClaudeCliClient(runner=fake_runner)("hi")
+
+
+def test_cli_client_nonzero_exit_raises_clear_error_with_stderr():
+    def fake_runner(args):
+        raise subprocess.CalledProcessError(returncode=1, cmd=["claude"],
+                                            stderr="not logged in")
+
+    with pytest.raises(RuntimeError, match="not logged in"):
+        ClaudeCliClient(runner=fake_runner)("hi")
+
+
+def test_cli_client_timeout_raises_clear_error():
+    def fake_runner(args):
+        raise subprocess.TimeoutExpired(cmd=["claude"], timeout=180)
+
+    with pytest.raises(RuntimeError, match="逾時|timeout"):
         ClaudeCliClient(runner=fake_runner)("hi")
 
 

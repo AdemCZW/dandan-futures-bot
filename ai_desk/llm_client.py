@@ -10,6 +10,7 @@ AnthropicLLMClient（Phase 2 排程）：直接打 Anthropic API，按 token 計
 from __future__ import annotations
 
 import os
+import subprocess
 
 
 class ClaudeCliClient:
@@ -43,6 +44,18 @@ class ClaudeCliClient:
             raise RuntimeError(
                 f"找不到 {self.binary} CLI。ClaudeCliClient 需要本機已安裝並登入的 "
                 "claude CLI（走 Max 訂閱）。若要在無登入的伺服器跑，請改用 AnthropicLLMClient。"
+            ) from e
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            raise RuntimeError(
+                f"{self.binary} CLI 執行失敗（exit code {e.returncode}）。"
+                f"請確認本機已登入 claude CLI。"
+                + (f" stderr: {stderr}" if stderr else "")
+            ) from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"{self.binary} CLI 呼叫逾時（超過 {self.timeout} 秒）。"
+                "請確認網路狀況或稍後再試。"
             ) from e
         return out.strip()
 
