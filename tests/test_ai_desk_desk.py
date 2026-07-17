@@ -98,3 +98,27 @@ def test_second_cycle_sees_first_cycle_memory(deps):
     llm2 = scripted_llm(judge)
     run_one_cycle(df, "BTCUSDT", "4h", llm_call=llm2, **deps)
     assert "第一輪觀望" in llm2.calls[1]             # 多方 prompt 含上輪記憶
+
+
+def test_on_progress_fires_once_per_role_in_order(deps):
+    df = make_df()
+    judge = ('{"direction": 0, "confidence": 0.3, "entry": 0, "stop": 0, '
+             '"take_profit": 0, "rationale": "觀望"}')
+    events = []
+    run_one_cycle(df, "BTCUSDT", "4h", llm_call=scripted_llm(judge),
+                  on_progress=lambda role, text: events.append((role, text)),
+                  **deps)
+    roles = [e[0] for e in events]
+    assert roles == ["analyst", "bull", "bear", "judge"]   # 依序各回報一次
+    texts = {e[0]: e[1] for e in events}
+    assert "結構論述" in texts["analyst"]                   # 回報的是角色全文
+    assert "空方論述" in texts["bear"]
+
+
+def test_on_progress_defaults_to_noop(deps):
+    """不傳 on_progress 時行為不變（向後相容）。"""
+    df = make_df()
+    judge = ('{"direction": 0, "confidence": 0.3, "entry": 0, "stop": 0, '
+             '"take_profit": 0, "rationale": "觀望"}')
+    r = run_one_cycle(df, "BTCUSDT", "4h", llm_call=scripted_llm(judge), **deps)
+    assert set(r.debate) == {"analyst", "bull", "bear", "judge"}

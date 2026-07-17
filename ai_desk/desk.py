@@ -33,17 +33,28 @@ class CycleResult:
 def run_one_cycle(df, symbol: str, interval: str, *,
                   llm_call, risk_officer: RiskOfficer, equity: float,
                   memory: ThesisMemory,
-                  approval_store: ApprovalStore) -> CycleResult:
+                  approval_store: ApprovalStore,
+                  on_progress=None) -> CycleResult:
+    """on_progress(role_name, full_text)（可選）：每個角色跑完就回報一次，
+    role_name 依序為 analyst/bull/bear/judge，供即時介面逐步顯示辯論。"""
+    def _report(role: str, text: str) -> None:
+        if on_progress is not None:
+            on_progress(role, text)
+
     briefing = build_market_briefing(df, symbol, interval)
     briefing_text = format_briefing(briefing)
     memory_text = memory.format_for_prompt()
 
     analyst = run_technical_analyst(briefing_text, llm_call)
+    _report("analyst", analyst.full_text)
     bull = run_bull_researcher(analyst.full_text, memory_text, llm_call)
+    _report("bull", bull.full_text)
     bear = run_bear_researcher(analyst.full_text, bull.full_text,
                                memory_text, llm_call)
+    _report("bear", bear.full_text)
     judge = run_trader_judge(analyst.full_text, bull.full_text,
                              bear.full_text, llm_call)
+    _report("judge", judge.full_text)
 
     proposal = proposal_from_judge(judge.data, symbol, briefing.as_of)
     risk = clamp_with_risk_officer(proposal, risk_officer, equity,
