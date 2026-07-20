@@ -31,13 +31,14 @@ CREATE TABLE IF NOT EXISTS ai_desk_proposals (
     debate_full_text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
-    decided_at TEXT
+    decided_at TEXT,
+    model TEXT
 )
 """
 
 _COLS = ["id", "symbol", "ts", "direction", "confidence", "entry", "stop",
          "take_profit", "qty", "rationale", "debate_full_text", "status",
-         "created_at", "decided_at"]
+         "created_at", "decided_at", "model"]
 
 
 def _utc_now() -> str:
@@ -49,22 +50,27 @@ class ApprovalStore:
         self.db_path = db_path
         with self._conn() as c:
             c.execute(_SCHEMA)
+            # 舊資料庫沒有 model 欄位 → 補上（既有列留 NULL，代表當時沒記錄、查不回來）
+            cols = [r[1] for r in c.execute("PRAGMA table_info(ai_desk_proposals)")]
+            if "model" not in cols:
+                c.execute("ALTER TABLE ai_desk_proposals ADD COLUMN model TEXT")
 
     def _conn(self):
         return sqlite3.connect(self.db_path)
 
     def add(self, proposal: TradeProposal, qty: float,
-            debate_full_text: str) -> int:
+            debate_full_text: str, model: str | None = None) -> int:
+        """model：產生這筆提案的 LLM 模型。留 None 代表未記錄（舊樣本），不可假裝知道。"""
         with self._conn() as c:
             cur = c.execute(
                 "INSERT INTO ai_desk_proposals "
                 "(symbol, ts, direction, confidence, entry, stop, take_profit,"
-                " qty, rationale, debate_full_text, status, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?)",
+                " qty, rationale, debate_full_text, status, created_at, model) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?)",
                 (proposal.symbol, proposal.ts, proposal.direction,
                  proposal.confidence, proposal.entry, proposal.stop,
                  proposal.take_profit, qty, proposal.rationale,
-                 debate_full_text, _utc_now()))
+                 debate_full_text, _utc_now(), model))
             return cur.lastrowid
 
     def _rows(self, where: str, args=()) -> list:

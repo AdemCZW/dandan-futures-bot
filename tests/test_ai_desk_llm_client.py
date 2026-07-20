@@ -99,3 +99,16 @@ def test_api_client_missing_api_key_raises(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
         AnthropicLLMClient()
+
+
+def test_cli_client_pins_opus_by_default():
+    """預設釘死模型，不再跟著 CLI 當下的 /model 飄（否則前瞻樣本會混到不同模型）。"""
+    captured = {}
+
+    def fake_runner(args):
+        captured["args"] = args
+        return "x"
+
+    ClaudeCliClient(runner=fake_runner)("hi")
+    assert "--model" in captured["args"]
+    assert "claude-opus-4-8" in captured["args"]

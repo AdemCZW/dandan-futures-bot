@@ -67,7 +67,9 @@ def run_one_cycle(df, symbol: str, interval: str, *,
     if risk.allow:
         full_text = "\n\n".join(
             f"【{k}】\n{v}" for k, v in debate.items())
-        proposal_id = approval_store.add(proposal, risk.quantity, full_text)
+        # 記下產生這筆提案的模型（llm_call 有 .model 就取），供樣本分組比較
+        proposal_id = approval_store.add(proposal, risk.quantity, full_text,
+                                         model=getattr(llm_call, "model", None))
 
     memory.append({
         "ts": proposal.ts,

@@ -13,14 +13,24 @@ import os
 import subprocess
 
 
+DEFAULT_CLI_MODEL = "claude-opus-4-8"
+"""釘死辯論用的模型。
+
+不可改成「跟著 CLI 當下的 /model 走」——那會讓不同時期的提案偷偷用到不同模型，
+前瞻樣本混在一起就無法做有效的統計驗證（而且不會有任何警告）。
+要換模型是一個明確的決策，換了之後前後樣本必須分開統計。
+"""
+
+
 class ClaudeCliClient:
     """透過本機 claude CLI 呼叫（訂閱額度，非 API 計費）。
 
     prompt 以最後一個 positional 參數傳入（用 subprocess list，無 shell 逸出問題）；
     輸出取 stdout 並 strip。runner 可注入以利離線測試。
+    model 預設釘死 DEFAULT_CLI_MODEL；傳 None 才會退回 CLI 自己的預設（不建議）。
     """
 
-    def __init__(self, binary: str = "claude", model: str | None = None,
+    def __init__(self, binary: str = "claude", model: str | None = DEFAULT_CLI_MODEL,
                  timeout: int = 180, runner=None):
         self.binary = binary
         self.model = model

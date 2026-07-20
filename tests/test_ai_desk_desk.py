@@ -122,3 +122,17 @@ def test_on_progress_defaults_to_noop(deps):
              '"take_profit": 0, "rationale": "觀望"}')
     r = run_one_cycle(df, "BTCUSDT", "4h", llm_call=scripted_llm(judge), **deps)
     assert set(r.debate) == {"analyst", "bull", "bear", "judge"}
+
+
+def test_records_llm_model_on_proposal(deps):
+    """提案要留下當時用的模型（llm_call 有 .model 就記下來），否則樣本無法分組比較。"""
+    df = make_df()
+    price = float(df["close"].iloc[-1])
+    judge = (f'{{"direction": 1, "confidence": 0.7, "entry": {price:.2f}, '
+             f'"stop": {price * 0.95:.2f}, "take_profit": {price * 1.1:.2f}, '
+             f'"rationale": "多方勝"}}')
+    llm = scripted_llm(judge)
+    llm.model = "claude-opus-4-8"               # 仿 ClaudeCliClient 帶 .model
+    r = run_one_cycle(df, "BTCUSDT", "4h", llm_call=llm, **deps)
+    row = deps["approval_store"].get(r.proposal_id)
+    assert row["model"] == "claude-opus-4-8"

@@ -138,7 +138,7 @@ def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None,
             rows.append({**{k: r[k] for k in
                             ("id", "symbol", "direction", "confidence", "entry",
                              "stop", "take_profit", "qty", "status", "created_at",
-                             "rationale")},
+                             "rationale", "model")},
                          **res})
         return {"rows": rows, "summary": summarize(rows)}
 
@@ -256,8 +256,8 @@ PAGE_HTML = """<!doctype html>
   <div class="stats" id="stats"></div>
   <div class="tbl-wrap"><table id="outcomes">
     <thead><tr><th>#</th><th>標的</th><th>方向</th><th>狀態</th><th>紙上損益</th>
-      <th>進場</th><th>停損</th><th>停利</th><th>信心</th><th>提案時間</th><th>審批</th></tr></thead>
-    <tbody><tr><td colspan="11" class="muted">載入中…</td></tr></tbody>
+      <th>進場</th><th>停損</th><th>停利</th><th>信心</th><th>模型</th><th>提案時間</th><th>審批</th></tr></thead>
+    <tbody><tr><td colspan="12" class="muted">載入中…</td></tr></tbody>
   </table></div>
   <div class="note" id="outcomeNote"></div>
 
@@ -389,7 +389,7 @@ async function loadOutcomes(){
   ].map(([l,v]) => '<div class="stat"><div class="lab">'+l+'</div><div class="val">'+v+'</div></div>').join("");
 
   if (!data.rows.length){
-    tb.innerHTML = '<tr><td colspan="11" class="muted">還沒有任何提案。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="12" class="muted">還沒有任何提案。</td></tr>';
     document.getElementById("outcomeNote").textContent = "";
     return;
   }
@@ -399,9 +399,11 @@ async function loadOutcomes(){
     '<td><span class="st '+r.state+'">'+(STATE_TXT[r.state]||r.state)+'</span></td>'+
     '<td class="'+cls(r.pnl)+'">'+(r.state==="unfilled"||r.state==="no_data" ? "—" : money(r.pnl))+'</td>'+
     '<td>'+r.entry+'</td><td>'+r.stop+'</td><td>'+r.take_profit+'</td>'+
-    '<td>'+r.confidence+'</td><td class="muted">'+(r.created_at||"").slice(0,16).replace("T"," ")+'</td>'+
+    '<td>'+r.confidence+'</td>'+
+    '<td class="muted">'+(r.model ? escapeHtml(r.model) : "未記錄")+'</td>'+
+    '<td class="muted">'+(r.created_at||"").slice(0,16).replace("T"," ")+'</td>'+
     '<td class="muted">'+(STATUS_TXT[r.status]||r.status)+'</td></tr>'+
-    '<tr><td></td><td colspan="10" class="wrap">依據：'+escapeHtml(r.rationale)+'</td></tr>'
+    '<tr><td></td><td colspan="11" class="wrap">依據：'+escapeHtml(r.rationale)+'</td></tr>'
   ).join("");
   document.getElementById("outcomeNote").textContent =
     "樣本數 " + s.closed + " 筆已結算 —— 依你系統一貫標準，要判斷有無 edge 需累積數十筆並算 bootstrap 信賴下界，目前遠遠不足。";
