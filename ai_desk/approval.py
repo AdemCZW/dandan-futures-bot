@@ -1,7 +1,13 @@
-"""人工核准閘門 — 借用 OpenAlice「Trading as Git」概念的最簡版本。
+"""人工核准閘門 + 訂單生命週期 — 借用 OpenAlice「Trading as Git」概念。
 
-狀態機：pending → approved | rejected；approved → executed。
-只有 approved 的提案才可能被送進執行層（Phase 2 接線）。
+狀態機：
+    pending ──► approved ──► placed ──► filled ──► closed_stop
+        └────► rejected        │                └► closed_target
+                               │                └► closed_manual
+                               └────────────────► expired（掛單逾時未成交）
+
+人工核准是硬閘門：只有 approved 能進入 placed（真的掛單）。每次轉移都是單一
+guarded UPDATE，來源狀態不符即拋錯，因此不可能重複核准或跳過關卡。
 
 CLI 小工具：
     python -m ai_desk.approval              # 列出待核准提案（含辯論全文）
@@ -32,13 +38,33 @@ CREATE TABLE IF NOT EXISTS ai_desk_proposals (
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL,
     decided_at TEXT,
-    model TEXT
+    model TEXT,
+    exchange_order_id TEXT,
+    filled_at TEXT,
+    closed_at TEXT,
+    realized_pnl REAL
 )
 """
 
 _COLS = ["id", "symbol", "ts", "direction", "confidence", "entry", "stop",
          "take_profit", "qty", "rationale", "debate_full_text", "status",
-         "created_at", "decided_at", "model"]
+         "created_at", "decided_at", "model",
+         "exchange_order_id", "filled_at", "closed_at", "realized_pnl"]
+
+
+# 舊資料庫可能缺這些欄位，開啟時逐一補上（順序即新增順序）
+_ADDED_COLUMNS = [
+    ("model", "TEXT"),
+    ("exchange_order_id", "TEXT"),
+    ("filled_at", "TEXT"),
+    ("closed_at", "TEXT"),
+    ("realized_pnl", "REAL"),
+]
+
+# Phase 2 訂單生命週期：
+#   pending → approved → placed → filled → closed_stop/closed_target/closed_manual
+#                          └────────────────────────────────► expired（掛單逾時未成交）
+CLOSED_STATES = frozenset({"closed_stop", "closed_target", "closed_manual"})
 
 
 def _utc_now() -> str:
@@ -50,10 +76,11 @@ class ApprovalStore:
         self.db_path = db_path
         with self._conn() as c:
             c.execute(_SCHEMA)
-            # 舊資料庫沒有 model 欄位 → 補上（既有列留 NULL，代表當時沒記錄、查不回來）
-            cols = [r[1] for r in c.execute("PRAGMA table_info(ai_desk_proposals)")]
-            if "model" not in cols:
-                c.execute("ALTER TABLE ai_desk_proposals ADD COLUMN model TEXT")
+            # 舊資料庫缺欄位 → 逐一補上（既有列留 NULL，代表當時沒記錄、不假裝知道）
+            cols = {r[1] for r in c.execute("PRAGMA table_info(ai_desk_proposals)")}
+            for name, decl in _ADDED_COLUMNS:
+                if name not in cols:
+                    c.execute(f"ALTER TABLE ai_desk_proposals ADD COLUMN {name} {decl}")
 
     def _conn(self):
         return sqlite3.connect(self.db_path)
@@ -96,12 +123,19 @@ class ApprovalStore:
     def approved_unexecuted(self) -> list:
         return self._rows("status = 'approved'")
 
-    def _transition(self, pid: int, from_status: str, to_status: str) -> None:
+    def _transition(self, pid: int, from_status: str, to_status: str,
+                    extra: dict | None = None) -> None:
+        """單一 UPDATE 同時驗證來源狀態並寫入欄位（原子性，防重複轉移）。"""
+        sets = ["status = ?", "decided_at = ?"]
+        vals = [to_status, _utc_now()]
+        for k, v in (extra or {}).items():
+            sets.append(f"{k} = ?")
+            vals.append(v)
         with self._conn() as c:
             cur = c.execute(
-                "UPDATE ai_desk_proposals SET status = ?, decided_at = ? "
+                f"UPDATE ai_desk_proposals SET {', '.join(sets)} "
                 "WHERE id = ? AND status = ?",
-                (to_status, _utc_now(), pid, from_status))
+                (*vals, pid, from_status))
             if cur.rowcount != 1:
                 raise ValueError(
                     f"提案 id={pid} 不在 {from_status} 狀態，無法轉為 {to_status}")
@@ -112,8 +146,34 @@ class ApprovalStore:
     def reject(self, pid: int) -> None:
         self._transition(pid, "pending", "rejected")
 
-    def mark_executed(self, pid: int) -> None:
-        self._transition(pid, "approved", "executed")
+    # ── Phase 2 訂單生命週期 ──────────────────────────────
+    def mark_placed(self, pid: int, exchange_order_id: str) -> None:
+        """已在交易所掛出限價進場單。只有 approved 能進來——人工核准是硬閘門。"""
+        self._transition(pid, "approved", "placed",
+                         extra={"exchange_order_id": str(exchange_order_id)})
+
+    def mark_filled(self, pid: int) -> None:
+        """限價單成交。"""
+        self._transition(pid, "placed", "filled", extra={"filled_at": _utc_now()})
+
+    def mark_expired(self, pid: int) -> None:
+        """掛單逾時未成交、已撤單。"""
+        self._transition(pid, "placed", "expired", extra={"closed_at": _utc_now()})
+
+    def mark_closed(self, pid: int, state: str, realized_pnl: float) -> None:
+        """部位平倉。state 必須是 CLOSED_STATES 之一。"""
+        if state not in CLOSED_STATES:
+            raise ValueError(f"平倉狀態必須是 {sorted(CLOSED_STATES)}，收到 {state}")
+        self._transition(pid, "filled", state,
+                         extra={"closed_at": _utc_now(),
+                                "realized_pnl": float(realized_pnl)})
+
+    def by_status(self, *statuses: str) -> list:
+        """依狀態查詢（可多個）。"""
+        if not statuses:
+            return []
+        marks = ", ".join("?" for _ in statuses)
+        return self._rows(f"status IN ({marks})", tuple(statuses))
 
 
 def _cli(argv):

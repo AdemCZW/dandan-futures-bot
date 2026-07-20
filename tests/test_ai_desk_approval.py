@@ -54,17 +54,19 @@ def test_cannot_approve_twice(store):
         store.approve(pid)
 
 
-def test_cannot_execute_pending(store):
+def test_cannot_place_pending(store):
+    """未核准的提案不可掛單——人工核准是硬閘門。"""
     pid = store.add(make_proposal(), 0.05, "全文")
     with pytest.raises(ValueError, match="approved"):
-        store.mark_executed(pid)
+        store.mark_placed(pid, "OID-1")
 
 
-def test_executed_leaves_unexecuted_queue(store):
+def test_placed_leaves_approved_queue(store):
     pid = store.add(make_proposal(), 0.05, "全文")
     store.approve(pid)
-    store.mark_executed(pid)
+    store.mark_placed(pid, "OID-1")
     assert store.approved_unexecuted() == []
+    assert store.get(pid)["exchange_order_id"] == "OID-1"
 
 
 def test_debate_full_text_persisted(store):
@@ -113,3 +115,55 @@ def test_migrates_old_db_missing_model_column(tmp_path):
     rows = s.all()
     assert len(rows) == 1
     assert rows[0]["model"] is None             # 舊樣本查不回模型，誠實留空
+
+
+# ── Phase 2 訂單生命週期 ────────────────────────────────────
+def test_full_lifecycle_to_closed_target(store):
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid)
+    store.mark_placed(pid, "OID-9")
+    store.mark_filled(pid)
+    assert store.get(pid)["status"] == "filled"
+    assert store.get(pid)["filled_at"] is not None
+    store.mark_closed(pid, "closed_target", realized_pnl=12.5)
+    row = store.get(pid)
+    assert row["status"] == "closed_target"
+    assert row["realized_pnl"] == 12.5
+    assert row["closed_at"] is not None
+
+
+def test_placed_can_expire_when_never_filled(store):
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid); store.mark_placed(pid, "OID-2")
+    store.mark_expired(pid)
+    assert store.get(pid)["status"] == "expired"
+
+
+def test_cannot_fill_before_placed(store):
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid)
+    with pytest.raises(ValueError, match="placed"):
+        store.mark_filled(pid)
+
+
+def test_cannot_close_before_filled(store):
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid); store.mark_placed(pid, "OID-3")
+    with pytest.raises(ValueError, match="filled"):
+        store.mark_closed(pid, "closed_stop", realized_pnl=-5.0)
+
+
+def test_mark_closed_rejects_unknown_state(store):
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid); store.mark_placed(pid, "OID-4"); store.mark_filled(pid)
+    with pytest.raises(ValueError, match="closed_"):
+        store.mark_closed(pid, "closed_whatever", realized_pnl=0.0)
+
+
+def test_by_status_filters(store):
+    a = store.add(make_proposal(), 0.05, "全文")
+    b = store.add(make_proposal(), 0.05, "全文")
+    store.approve(a); store.mark_placed(a, "OID-5")
+    assert [r["id"] for r in store.by_status("placed")] == [a]
+    assert [r["id"] for r in store.by_status("pending")] == [b]
+    assert sorted(r["id"] for r in store.by_status("placed", "pending")) == [a, b]
