@@ -11,6 +11,23 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
+
+DEFAULT_TTL_HOURS = 24
+"""限價單未成交的存活時間。
+
+提案是基於某一根 4h 收盤的市況做的判斷；隔了 6 根 K 棒（24h）之後，那個判斷
+已經過期，不該還掛在市場上等成交。逾時即撤單。
+"""
+
+# 決策動作
+ACTION_PLACE = "place"                    # 掛出限價進場單
+ACTION_SKIP_POSITION = "skip_position_open"  # 該幣已有部位 → 不加碼不反手
+ACTION_FILL = "fill"                      # 限價單已成交 → 標記並掛停損停利
+ACTION_EXPIRE = "expire"                  # 逾時或交易所端已消失 → 撤單/標記
+ACTION_WAIT = "wait"                      # 無事可做
+
+_ORDER_GONE = frozenset({"CANCELED", "EXPIRED", "REJECTED"})
 
 DEFAULT_SYMBOLS = frozenset({"ETHUSDT"})
 """白名單預設值。
@@ -55,3 +72,62 @@ def assert_testnet(client) -> None:
         raise RuntimeError(
             f"client 實際請求網址不是 testnet：{uri}；拒絕執行。"
             "ai_desk 僅允許在 Binance Futures testnet 上運作。")
+
+
+# ── 限價進場單 ──────────────────────────────────────────────
+def limit_order_params(symbol: str, direction: int, qty: float, price: float,
+                       *, round_qty, round_price) -> dict:
+    """組出限價進場單參數。
+
+    為什麼一定要限價：提案的核心是「等回抽到 entry 再進」（AI 明確表示不宜追價）。
+    若改用市價立即成交，等於把它的判斷做反。
+
+    round_qty / round_price 由呼叫端傳入（實務上用 FuturesExecutionEngineer 的
+    交易所精度處理），本函式因此可離線測試。
+    """
+    if direction not in (1, -1):
+        raise ValueError(f"限價進場單方向必須是 1（多）或 -1（空），收到 {direction}")
+    return {
+        "symbol": symbol,
+        "side": "BUY" if direction == 1 else "SELL",
+        "type": "LIMIT",
+        "timeInForce": "GTC",
+        "quantity": round_qty(qty),
+        "price": round_price(price),
+    }
+
+
+# ── 逾時 ────────────────────────────────────────────────────
+def is_expired(placed_at: str, now: datetime | None = None,
+               ttl_hours: int = DEFAULT_TTL_HOURS) -> bool:
+    """掛單是否已超過存活時間。placed_at 為 ISO 字串。"""
+    now = now or datetime.now(timezone.utc)
+    t0 = datetime.fromisoformat(placed_at)
+    if t0.tzinfo is None:
+        t0 = t0.replace(tzinfo=timezone.utc)
+    return (now - t0) > timedelta(hours=ttl_hours)
+
+
+# ── 動作決策 ────────────────────────────────────────────────
+def decide_action(*, status: str, has_position: bool, order_status: str | None = None,
+                  placed_at: str | None = None, now: datetime | None = None,
+                  ttl_hours: int = DEFAULT_TTL_HOURS) -> str:
+    """依提案狀態 + 交易所實況決定下一步。純函式，不碰網路。
+
+    交易所是持倉/訂單的唯一真相來源：order_status 說單子沒了就以它為準，
+    不管本地怎麼記。
+    """
+    if status == "approved":
+        # 已有部位就不再進場——不加碼、不反手（硬規則）
+        return ACTION_SKIP_POSITION if has_position else ACTION_PLACE
+
+    if status == "placed":
+        if order_status == "FILLED":
+            return ACTION_FILL
+        if order_status in _ORDER_GONE:
+            return ACTION_EXPIRE
+        if placed_at and is_expired(placed_at, now=now, ttl_hours=ttl_hours):
+            return ACTION_EXPIRE
+        return ACTION_WAIT
+
+    return ACTION_WAIT
