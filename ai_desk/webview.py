@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 
 from ai_desk.approval import ApprovalStore
+from ai_desk.outcome import evaluate_outcome, summarize
 
 DEFAULT_DB = "ai_desk_proposals.db"
 ROLE_ORDER = ["analyst", "bull", "bear", "judge"]
@@ -49,12 +50,27 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     )
 
 
-def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None) -> FastAPI:
+def _real_klines(symbol: str, since: str):
+    """抓提案成立後的 1h K 線，供結果結算用。延遲 import 避免測試碰網路。"""
+    import pandas as pd
+    from binance.client import Client
+
+    from core.market_analyst import fetch_klines
+
+    raw = fetch_klines(Client(), symbol, "1h", limit=1000, futures=True)
+    t0 = pd.to_datetime(since).tz_localize(None)
+    return raw[raw.index >= t0]
+
+
+def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None,
+               klines_fn=None) -> FastAPI:
     if cycle_fn is None:
         def cycle_fn(symbol, interval, on_progress):
             return _real_cycle(symbol, interval, on_progress, store_path)
     if spawn is None:
         spawn = _thread_spawn
+    if klines_fn is None:
+        klines_fn = _real_klines
 
     app = FastAPI(title="ai_desk 本地觀察後台")
     runs: dict[str, dict] = {}
@@ -109,6 +125,22 @@ def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None) -> Fa
     @app.get("/api/pending")
     def pending() -> list:
         return ApprovalStore(store_path).pending()
+
+    @app.get("/api/outcomes")
+    def outcomes() -> dict:
+        """每筆提案的紙上結算 + 彙總。注意：ai_desk 從不執行，這是推演不是真實損益。"""
+        rows = []
+        for r in ApprovalStore(store_path).all():
+            res = evaluate_outcome(direction=r["direction"], entry=r["entry"],
+                                   stop=r["stop"], take_profit=r["take_profit"],
+                                   qty=r["qty"],
+                                   klines=klines_fn(r["symbol"], r["created_at"]))
+            rows.append({**{k: r[k] for k in
+                            ("id", "symbol", "direction", "confidence", "entry",
+                             "stop", "take_profit", "qty", "status", "created_at",
+                             "rationale")},
+                         **res})
+        return {"rows": rows, "summary": summarize(rows)}
 
     @app.post("/api/approve/{pid}")
     def approve(pid: int) -> dict:
@@ -172,6 +204,24 @@ PAGE_HTML = """<!doctype html>
   .approve { background: #2f9e57; border-color: #2f9e57; }
   .reject { background: #b3403f; border-color: #b3403f; }
   details summary { cursor: pointer; color: #8b93a1; font-size: 13px; margin-top: 6px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 14px; }
+  .stat { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px;
+          padding: 10px 14px; min-width: 120px; }
+  .stat .lab { font-size: 12px; color: #8b93a1; }
+  .stat .val { font-size: 19px; font-weight: 700; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #2a2f3a; white-space: nowrap; }
+  th { color: #8b93a1; font-weight: 600; font-size: 12.5px; }
+  td.wrap { white-space: normal; color: #b9bfc9; font-size: 12.5px; }
+  .tbl-wrap { overflow-x: auto; border: 1px solid #2a2f3a; border-radius: 12px; background: #171a21; }
+  .st { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .st.stopped { background: #3a1c1e; color: #f2555a; }
+  .st.target  { background: #17331f; color: #4ad07a; }
+  .st.open    { background: #16303d; color: #4ac0f2; }
+  .st.unfilled, .st.no_data { background: #24282f; color: #8b93a1; }
+  .pos { color: #4ad07a; } .neg { color: #f2555a; }
+  .warn-band { background: #2a2113; border: 1px solid #4a3a18; color: #e8c07a;
+               border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
   .err { color: #f2555a; }
   .note { font-size: 12px; color: #8b93a1; margin-top: 4px; }
 </style>
@@ -200,6 +250,16 @@ PAGE_HTML = """<!doctype html>
 
   <h1 style="margin-top:26px">待核准清單 <span class="muted">（核准/打槍目前只留紀錄，不會真的下單）</span></h1>
   <div id="queue"><div class="muted">載入中…</div></div>
+
+  <h1 style="margin-top:26px">提案結果追蹤 <span class="muted">（前瞻樣本累積）</span></h1>
+  <div class="warn-band">⚠️ 以下全部是<b>紙上推演</b>：ai_desk 只提案、從未真實下單。這是用真實 K 線回推「若當初照提案掛單會怎樣」，不代表帳戶真有這些損益。同一根同時觸及停損停利時保守算停損。</div>
+  <div class="stats" id="stats"></div>
+  <div class="tbl-wrap"><table id="outcomes">
+    <thead><tr><th>#</th><th>標的</th><th>方向</th><th>狀態</th><th>紙上損益</th>
+      <th>進場</th><th>停損</th><th>停利</th><th>信心</th><th>提案時間</th><th>審批</th></tr></thead>
+    <tbody><tr><td colspan="11" class="muted">載入中…</td></tr></tbody>
+  </table></div>
+  <div class="note" id="outcomeNote"></div>
 
 <script>
 const ROLE_LABEL = {analyst:"技術分析", bull:"多方研究員", bear:"空方研究員", judge:"裁判"};
@@ -250,6 +310,7 @@ async function poll(run_id){
     document.getElementById("runBtn").disabled = false;
     renderProposal(st);
     loadQueue();
+    loadOutcomes();
   } else if (st.status === "error"){
     clearInterval(polling); polling = null;
     setStatus("出錯", "");
@@ -305,13 +366,52 @@ async function loadQueue(){
 async function decide(pid, action){
   const res = await fetch("/api/"+action+"/"+pid, {method:"POST"});
   if (!res.ok){ const e = await res.json(); alert("失敗：" + (e.detail||res.status)); }
-  loadQueue();
+  loadQueue(); loadOutcomes();
+}
+
+const STATE_TXT = {stopped:"停損", target:"停利", open:"持有中",
+                   unfilled:"未成交", no_data:"尚無資料"};
+const STATUS_TXT = {pending:"待核准", approved:"已核准", rejected:"已打槍", executed:"已執行"};
+
+async function loadOutcomes(){
+  const tb = document.querySelector("#outcomes tbody");
+  const data = await (await fetch("/api/outcomes")).json();
+  const s = data.summary;
+  const money = v => (v>=0?"+":"") + v.toFixed(2);
+  const cls = v => v>=0 ? "pos" : "neg";
+  document.getElementById("stats").innerHTML = [
+    ["總提案", s.total],
+    ["已結算", s.closed],
+    ["勝 / 敗", s.wins + " / " + s.losses],
+    ["勝率", s.closed ? (s.win_rate*100).toFixed(0)+"%" : "—"],
+    ["已實現(紙上)", '<span class="'+cls(s.realized_pnl)+'">'+money(s.realized_pnl)+'</span>'],
+    ["未平倉(紙上)", '<span class="'+cls(s.open_pnl)+'">'+money(s.open_pnl)+'</span>'],
+  ].map(([l,v]) => '<div class="stat"><div class="lab">'+l+'</div><div class="val">'+v+'</div></div>').join("");
+
+  if (!data.rows.length){
+    tb.innerHTML = '<tr><td colspan="11" class="muted">還沒有任何提案。</td></tr>';
+    document.getElementById("outcomeNote").textContent = "";
+    return;
+  }
+  const dirTxt = {"1":"做多","-1":"做空","0":"觀望"};
+  tb.innerHTML = data.rows.map(r =>
+    '<tr><td>#'+r.id+'</td><td>'+r.symbol+'</td><td>'+(dirTxt[String(r.direction)]||"?")+'</td>'+
+    '<td><span class="st '+r.state+'">'+(STATE_TXT[r.state]||r.state)+'</span></td>'+
+    '<td class="'+cls(r.pnl)+'">'+(r.state==="unfilled"||r.state==="no_data" ? "—" : money(r.pnl))+'</td>'+
+    '<td>'+r.entry+'</td><td>'+r.stop+'</td><td>'+r.take_profit+'</td>'+
+    '<td>'+r.confidence+'</td><td class="muted">'+(r.created_at||"").slice(0,16).replace("T"," ")+'</td>'+
+    '<td class="muted">'+(STATUS_TXT[r.status]||r.status)+'</td></tr>'+
+    '<tr><td></td><td colspan="10" class="wrap">依據：'+escapeHtml(r.rationale)+'</td></tr>'
+  ).join("");
+  document.getElementById("outcomeNote").textContent =
+    "樣本數 " + s.closed + " 筆已結算 —— 依你系統一貫標準，要判斷有無 edge 需累積數十筆並算 bootstrap 信賴下界，目前遠遠不足。";
 }
 
 function setStatus(t, cls){ const s=document.getElementById("status"); s.textContent=t; s.className = cls||"muted"; }
 function escapeHtml(s){ return (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 loadQueue();
+loadOutcomes();
 </script>
 </body>
 </html>"""

@@ -71,3 +71,13 @@ def test_debate_full_text_persisted(store):
     pid = store.add(make_proposal(), 0.05, "四角色完整辯論全文…")
     row = store.get(pid)
     assert "四角色完整辯論全文" in row["debate_full_text"]
+
+
+def test_all_returns_every_proposal_regardless_of_status(store):
+    a = store.add(make_proposal(), 0.05, "全文A")
+    b = store.add(make_proposal(direction=1), 0.06, "全文B")
+    store.approve(a)
+    store.reject(b)
+    rows = store.all()
+    assert [r["id"] for r in rows] == [a, b]           # 含已核准與已拒絕
+    assert {r["status"] for r in rows} == {"approved", "rejected"}

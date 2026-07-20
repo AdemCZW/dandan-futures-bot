@@ -83,6 +83,10 @@ class ApprovalStore:
     def pending(self) -> list:
         return self._rows("status = 'pending'")
 
+    def all(self) -> list:
+        """全部提案（含已核准/已拒絕/已執行），供結果追蹤用。"""
+        return self._rows("1 = 1")
+
     def approved_unexecuted(self) -> list:
         return self._rows("status = 'approved'")
 

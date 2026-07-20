@@ -2,6 +2,7 @@
 import os
 import sys
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -87,3 +88,35 @@ def test_reject_removes_from_pending(client):
     pid = store.add(p, 0.5, "全文")
     assert client.post(f"/api/reject/{pid}").json()["ok"] is True
     assert client.get("/api/pending").json() == []
+
+
+def make_klines(bars):
+    idx = pd.date_range("2026-07-17", periods=len(bars), freq="1h")
+    return pd.DataFrame(
+        {"high": [b[0] for b in bars], "low": [b[1] for b in bars],
+         "close": [b[2] for b in bars]}, index=idx)
+
+
+def test_outcomes_endpoint_evaluates_and_summarizes(tmp_path):
+    db = str(tmp_path / "o.db")
+    store = ApprovalStore(db)
+    # 空單 entry100/stop110/tp80，注入的 K 線會先成交再停損
+    p = TradeProposal("BTCUSDT", "t", -1, 0.6, 100.0, 110.0, 80.0, "測試")
+    pid = store.add(p, 2.0, "全文")
+
+    def fake_klines(symbol, since):
+        return make_klines([(101, 96, 100), (112, 105, 111)])
+
+    app = create_app(store_path=db, cycle_fn=fake_cycle, spawn=sync_spawn,
+                     klines_fn=fake_klines)
+    c = TestClient(app)
+    got = c.get("/api/outcomes").json()
+
+    assert len(got["rows"]) == 1
+    row = got["rows"][0]
+    assert row["id"] == pid and row["symbol"] == "BTCUSDT"
+    assert row["state"] == "stopped"
+    assert row["pnl"] == pytest.approx(-20.0)
+    assert got["summary"]["closed"] == 1
+    assert got["summary"]["losses"] == 1
+    assert got["summary"]["realized_pnl"] == pytest.approx(-20.0)
