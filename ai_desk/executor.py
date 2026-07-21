@@ -131,3 +131,64 @@ def decide_action(*, status: str, has_position: bool, order_status: str | None =
         return ACTION_WAIT
 
     return ACTION_WAIT
+
+
+# ── 執行編排 ────────────────────────────────────────────────
+def place_entry(row: dict, store, engine) -> None:
+    """把 approved 的提案掛成限價進場單。
+
+    row：store.get(pid) 的字典。engine：FuturesExecutionEngineer 相容物件
+    （round_qty/round_price/client）。安全檢查一律在送出委託前做，
+    任何一項失敗都不會建立委託、不會改動提案狀態。
+    """
+    assert_symbol_allowed(row["symbol"])
+    assert_testnet(engine.client)
+    params = limit_order_params(
+        row["symbol"], row["direction"], row["qty"], row["entry"],
+        round_qty=engine.round_qty, round_price=engine.round_price)
+    resp = engine.client.futures_create_order(**params)
+    store.mark_placed(row["id"], resp["orderId"])
+
+
+def handle_placed(row: dict, store, engine, *, ttl_hours: int = DEFAULT_TTL_HOURS,
+                  now=None) -> str:
+    """處理一筆 placed 狀態的提案：查交易所實況、決定動作、執行。
+
+    回傳實際採取的動作字串（"fill" / "expire" / "wait"），方便呼叫端記錄。
+    """
+    order = engine.get_order(row["exchange_order_id"])
+    action = decide_action(
+        status="placed",
+        has_position=(engine.position_amt() != 0),
+        order_status=order.get("status"),
+        placed_at=row["decided_at"],
+        now=now, ttl_hours=ttl_hours,
+    )
+    if action == ACTION_FILL:
+        store.mark_filled(row["id"])
+        _protect_with_stop(row, store, engine)
+    elif action == ACTION_EXPIRE:
+        try:
+            engine.cancel_order(row["exchange_order_id"])
+        except Exception:
+            pass   # 單子可能已經不存在（交易所端已消失才會判定 expire），容忍
+        store.mark_expired(row["id"])
+    return action
+
+
+def _protect_with_stop(row: dict, store, engine) -> None:
+    """成交後立刻掛停損停利；掛停損失敗 → 絕不留裸倉，立刻市價平倉。
+
+    真實損益需要對帳補正（此處無法可靠算出平倉均價），先記 None，交由
+    Phase 2 對帳補正——不可用假數字冒充。
+    """
+    try:
+        engine.place_stop(row["direction"], row["stop"])
+        engine.place_take_profit(row["direction"], row["take_profit"])
+    except Exception as e:
+        qty = abs(engine.position_amt())
+        engine.close(qty, row["direction"])
+        store.mark_closed(row["id"], "closed_manual", realized_pnl=None)
+        raise RuntimeError(
+            f"掛停損失敗（{e}），為避免裸倉已立刻市價平倉 #{row['id']}；"
+            "真實損益待對帳補正。") from e

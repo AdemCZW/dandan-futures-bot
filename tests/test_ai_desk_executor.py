@@ -157,3 +157,185 @@ def test_placed_but_order_gone_expires():
 def test_other_statuses_wait():
     assert decide_action(status="pending", has_position=False) == ACTION_WAIT
     assert decide_action(status="filled", has_position=True) == ACTION_WAIT
+
+
+# ── 執行編排：place_entry / handle_placed ──────────────────
+from ai_desk.approval import ApprovalStore  # noqa: E402
+from ai_desk.executor import handle_placed, place_entry  # noqa: E402
+from ai_desk.proposal import TradeProposal  # noqa: E402
+
+
+class FakeFuturesClient:
+    """假交易所 client：只實作 executor 會用到的方法，含 testnet URI。"""
+
+    def __init__(self):
+        self.created_orders = []
+        self.canceled = []
+
+    def _create_futures_api_uri(self, path):
+        return f"https://testnet.binancefuture.com/fapi/v1/{path}"
+
+    def futures_create_order(self, **params):
+        self.created_orders.append(params)
+        return {"orderId": f"OID-{len(self.created_orders)}", **params}
+
+
+class FakeEngine:
+    """假執行引擎：符合 FuturesExecutionEngineer 的公開介面，不碰網路。"""
+
+    def __init__(self, symbol, position_amt=0.0, order_status="NEW",
+                place_stop_should_fail=False):
+        self.symbol = symbol
+        self.client = FakeFuturesClient()
+        self._position_amt = position_amt
+        self._order_status = order_status
+        self._place_stop_should_fail = place_stop_should_fail
+        self.stop_calls = []
+        self.tp_calls = []
+        self.close_calls = []
+        self.cancel_calls = []
+
+    def round_qty(self, q):
+        return f"{q:.3f}"
+
+    def round_price(self, p):
+        return f"{p:.2f}"
+
+    def position_amt(self):
+        return self._position_amt
+
+    def get_order(self, order_id):
+        return {"orderId": order_id, "status": self._order_status}
+
+    def place_stop(self, direction, price):
+        if self._place_stop_should_fail:
+            raise RuntimeError("模擬掛停損失敗（如 -4130）")
+        self.stop_calls.append((direction, price))
+
+    def place_take_profit(self, direction, price):
+        self.tp_calls.append((direction, price))
+
+    def close(self, qty, direction):
+        self.close_calls.append((qty, direction))
+
+    def cancel_order(self, order_id):
+        self.cancel_calls.append(order_id)
+
+
+def _fresh_store(tmp_path):
+    return ApprovalStore(str(tmp_path / "exec.db"))
+
+
+def _approved_row(store, symbol="ETHUSDT", direction=-1):
+    p = TradeProposal(symbol, "t", direction, 0.6, 1855.0, 1877.0, 1808.0, "測試")
+    pid = store.add(p, 1.5, "全文")
+    store.approve(pid)
+    return store.get(pid)
+
+
+# place_entry
+def test_place_entry_submits_limit_and_marks_placed(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+
+    place_entry(row, store, engine)
+
+    assert len(engine.client.created_orders) == 1
+    order = engine.client.created_orders[0]
+    assert order["type"] == "LIMIT" and order["side"] == "SELL"
+    updated = store.get(row["id"])
+    assert updated["status"] == "placed"
+    assert updated["exchange_order_id"] == "OID-1"
+
+
+def test_place_entry_rejects_symbol_outside_whitelist(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_DESK_SYMBOLS", "ETHUSDT")
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store, symbol="BTCUSDT")
+    engine = FakeEngine("BTCUSDT")
+
+    with pytest.raises(ValueError, match="白名單"):
+        place_entry(row, store, engine)
+    assert engine.client.created_orders == []          # 沒有送出任何委託
+    assert store.get(row["id"])["status"] == "approved"  # 狀態未被改動
+
+
+def test_place_entry_rejects_non_testnet_client(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+    engine.client._create_futures_api_uri = lambda path: f"https://fapi.binance.com/fapi/v1/{path}"
+
+    with pytest.raises(RuntimeError, match="testnet"):
+        place_entry(row, store, engine)
+    assert engine.client.created_orders == []
+
+
+# handle_placed — 成交 + 裸倉防護
+def test_handle_placed_fill_places_stop_and_tp(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+    place_entry(row, store, engine)
+    row = store.get(row["id"])
+
+    engine._position_amt = -1.5           # 成交後交易所顯示有空頭部位
+    engine._order_status = "FILLED"
+    action = handle_placed(row, store, engine)
+
+    assert action == "fill"
+    assert store.get(row["id"])["status"] == "filled"
+    assert engine.stop_calls == [(-1, 1877.0)]
+    assert engine.tp_calls == [(-1, 1808.0)]
+
+
+def test_handle_placed_stop_failure_forces_market_close_never_naked(tmp_path):
+    """掛停損失敗 → 絕不留裸倉：立刻市價平倉並記錄。"""
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT", place_stop_should_fail=True)
+    place_entry(row, store, engine)
+    row = store.get(row["id"])
+
+    engine._position_amt = -1.5
+    engine._order_status = "FILLED"
+
+    with pytest.raises(RuntimeError, match="裸倉"):
+        handle_placed(row, store, engine)
+
+    assert engine.close_calls == [(1.5, -1)]            # 立刻市價平倉
+    final = store.get(row["id"])
+    assert final["status"] == "closed_manual"            # 不會停在 filled（裸倉）
+
+
+def test_handle_placed_expired_cancels_and_marks(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+    place_entry(row, store, engine)
+    row = store.get(row["id"])
+
+    engine._order_status = "NEW"
+    from datetime import datetime, timedelta, timezone
+    future = datetime.now(timezone.utc) + timedelta(hours=30)
+    action = handle_placed(row, store, engine, now=future)
+
+    assert action == "expire"
+    assert engine.cancel_calls == [row["exchange_order_id"]]
+    assert store.get(row["id"])["status"] == "expired"
+
+
+def test_handle_placed_still_open_waits_and_touches_nothing(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+    place_entry(row, store, engine)
+    row = store.get(row["id"])
+
+    engine._order_status = "NEW"
+    action = handle_placed(row, store, engine)
+
+    assert action == "wait"
+    assert engine.cancel_calls == [] and engine.stop_calls == []
+    assert store.get(row["id"])["status"] == "placed"

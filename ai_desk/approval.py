@@ -160,13 +160,17 @@ class ApprovalStore:
         """掛單逾時未成交、已撤單。"""
         self._transition(pid, "placed", "expired", extra={"closed_at": _utc_now()})
 
-    def mark_closed(self, pid: int, state: str, realized_pnl: float) -> None:
-        """部位平倉。state 必須是 CLOSED_STATES 之一。"""
+    def mark_closed(self, pid: int, state: str, realized_pnl: float | None) -> None:
+        """部位平倉。state 必須是 CLOSED_STATES 之一。
+
+        realized_pnl=None：無法可靠算出（例如裸倉緊急平倉），留 NULL 待對帳補正，
+        不可用 0.0 這種假數字冒充「無損益」。
+        """
         if state not in CLOSED_STATES:
             raise ValueError(f"平倉狀態必須是 {sorted(CLOSED_STATES)}，收到 {state}")
+        pnl = None if realized_pnl is None else float(realized_pnl)
         self._transition(pid, "filled", state,
-                         extra={"closed_at": _utc_now(),
-                                "realized_pnl": float(realized_pnl)})
+                         extra={"closed_at": _utc_now(), "realized_pnl": pnl})
 
     def by_status(self, *statuses: str) -> list:
         """依狀態查詢（可多個）。"""
