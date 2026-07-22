@@ -155,8 +155,13 @@ def handle_placed(row: dict, store, engine, *, ttl_hours: int = DEFAULT_TTL_HOUR
     """處理一筆 placed 狀態的提案：查交易所實況、決定動作、執行。
 
     回傳實際採取的動作字串（"fill" / "expire" / "wait"），方便呼叫端記錄。
+    交易所查無此單（例如 closePosition 單成交後被自動撤銷、查不到）視同「已消失」，
+    以 expire 處理——交易所是唯一真相來源，查不到就不該再等它成交。
     """
-    order = engine.get_order(row["exchange_order_id"])
+    try:
+        order = engine.get_order(row["exchange_order_id"])
+    except Exception:
+        order = {"status": "CANCELED"}
     action = decide_action(
         status="placed",
         has_position=(engine.position_amt() != 0),
@@ -192,3 +197,57 @@ def _protect_with_stop(row: dict, store, engine) -> None:
         raise RuntimeError(
             f"掛停損失敗（{e}），為避免裸倉已立刻市價平倉 #{row['id']}；"
             "真實損益待對帳補正。") from e
+
+
+# ── 對帳 ────────────────────────────────────────────────────
+def reconcile_orphan_positions(engines: dict, store) -> list:
+    """檢查每個白名單幣種是否有「交易所有部位、但本地無 filled 中提案追蹤」的孤兒倉。
+
+    只告警、絕不接管或平倉——這不是 ai_desk 自己的部位就不該碰，
+    避免誤動到既有 bot 或人工操作留下的倉位。
+
+    engines：{symbol: engine}，僅檢查傳入的幣種。
+    """
+    tracked = {r["symbol"] for r in store.by_status("filled")}
+    warnings = []
+    for symbol, engine in engines.items():
+        amt = engine.position_amt()
+        if amt != 0 and symbol not in tracked:
+            warnings.append(
+                f"⚠️ {symbol} 交易所有部位（amt={amt}）但本地無對應追蹤中的提案"
+                "——不接管、不平倉，僅告警，請人工確認來源。")
+    return warnings
+
+
+# ── 一輪執行 ────────────────────────────────────────────────
+def run_execution_pass(store, engines: dict, *, ttl_hours: int = DEFAULT_TTL_HOURS,
+                       now=None) -> dict:
+    """跑一輪：對帳孤兒倉 → 該掛的掛（approved）→ 該處理的處理（placed）。
+
+    engines：{symbol: engine}。只處理有傳入 engine 的幣種，其餘一律不碰
+    （即使資料庫裡有其他幣種的提案）。回傳各動作影響到的提案 id，方便記錄/測試。
+    """
+    result = {"warnings": [], "placed": [], "skipped": [], "filled": [], "expired": []}
+    result["warnings"] = reconcile_orphan_positions(engines, store)
+
+    for symbol, engine in engines.items():
+        has_position = engine.position_amt() != 0
+        for row in store.by_status("approved"):
+            if row["symbol"] != symbol:
+                continue
+            if has_position:
+                result["skipped"].append(row["id"])
+                continue
+            place_entry(row, store, engine)
+            result["placed"].append(row["id"])
+
+        for row in store.by_status("placed"):
+            if row["symbol"] != symbol:
+                continue
+            action = handle_placed(row, store, engine, ttl_hours=ttl_hours, now=now)
+            if action == ACTION_FILL:
+                result["filled"].append(row["id"])
+            elif action == ACTION_EXPIRE:
+                result["expired"].append(row["id"])
+
+    return result

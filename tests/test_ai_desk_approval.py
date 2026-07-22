@@ -167,3 +167,20 @@ def test_by_status_filters(store):
     assert [r["id"] for r in store.by_status("placed")] == [a]
     assert [r["id"] for r in store.by_status("pending")] == [b]
     assert sorted(r["id"] for r in store.by_status("placed", "pending")) == [a, b]
+
+
+def test_reject_also_works_from_approved(store):
+    """approved 但過期太久還沒掛單 → 允許撤回核准。"""
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid)
+    store.reject(pid)
+    assert store.get(pid)["status"] == "rejected"
+
+
+def test_reject_fails_from_placed(store):
+    """已經掛出去的單不能用 reject 撤——那要走 mark_expired/mark_closed。"""
+    pid = store.add(make_proposal(), 0.05, "全文")
+    store.approve(pid)
+    store.mark_placed(pid, "OID-1")
+    with pytest.raises(ValueError):
+        store.reject(pid)

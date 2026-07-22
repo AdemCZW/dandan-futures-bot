@@ -339,3 +339,104 @@ def test_handle_placed_still_open_waits_and_touches_nothing(tmp_path):
     assert action == "wait"
     assert engine.cancel_calls == [] and engine.stop_calls == []
     assert store.get(row["id"])["status"] == "placed"
+
+
+# ── 對帳：孤兒部位只告警、不接管 ─────────────────────────────
+from ai_desk.executor import reconcile_orphan_positions  # noqa: E402
+
+
+def test_reconcile_warns_on_untracked_position_does_not_touch(tmp_path):
+    """交易所有白名單幣種的部位，但本地沒有 filled 中的提案在追蹤 → 只告警，不平倉不接管。"""
+    store = _fresh_store(tmp_path)
+    engine = FakeEngine("ETHUSDT", position_amt=2.0)
+    warnings = reconcile_orphan_positions({"ETHUSDT": engine}, store)
+    assert len(warnings) == 1 and "ETHUSDT" in warnings[0]
+    assert engine.close_calls == []            # 沒有任何平倉動作
+
+
+def test_reconcile_silent_when_position_matches_tracked_filled(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+    place_entry(row, store, engine)
+    row = store.get(row["id"])
+    engine._position_amt = -1.5
+    engine._order_status = "FILLED"
+    handle_placed(row, store, engine)          # 現在有一筆 filled 追蹤這個部位
+
+    warnings = reconcile_orphan_positions({"ETHUSDT": engine}, store)
+    assert warnings == []
+
+
+def test_reconcile_silent_when_no_position(tmp_path):
+    store = _fresh_store(tmp_path)
+    engine = FakeEngine("ETHUSDT", position_amt=0.0)
+    assert reconcile_orphan_positions({"ETHUSDT": engine}, store) == []
+
+
+# ── handle_placed 容忍「查無此單」（closePosition 單可能被自動撤銷查不到）──
+def test_handle_placed_tolerates_order_not_found_as_expired(tmp_path):
+    store = _fresh_store(tmp_path)
+    row = _approved_row(store)
+    engine = FakeEngine("ETHUSDT")
+    place_entry(row, store, engine)
+    row = store.get(row["id"])
+
+    def _raise(order_id):
+        raise RuntimeError("Order does not exist")
+    engine.get_order = _raise
+
+    action = handle_placed(row, store, engine)
+    assert action == "expire"
+    assert store.get(row["id"])["status"] == "expired"
+
+
+# ── 一輪執行 pass：approved→掛單、placed→處理，全注入 engine ────
+from ai_desk.executor import run_execution_pass  # noqa: E402
+
+
+def test_pass_places_approved_and_handles_placed_together(tmp_path):
+    store = _fresh_store(tmp_path)
+    a = _approved_row(store, symbol="ETHUSDT")
+    engine = FakeEngine("ETHUSDT")
+
+    result = run_execution_pass(store, {"ETHUSDT": engine})
+
+    assert store.get(a["id"])["status"] == "placed"
+    assert result["placed"] == [a["id"]]
+    assert result["warnings"] == []
+
+
+def test_pass_skips_approved_when_symbol_already_has_position(tmp_path):
+    store = _fresh_store(tmp_path)
+    a = _approved_row(store, symbol="ETHUSDT")
+    engine = FakeEngine("ETHUSDT", position_amt=1.0)   # 已有別的部位
+
+    result = run_execution_pass(store, {"ETHUSDT": engine})
+
+    assert store.get(a["id"])["status"] == "approved"   # 沒被動
+    assert engine.client.created_orders == []
+    assert result["skipped"] == [a["id"]]
+
+
+def test_pass_processes_placed_proposal(tmp_path):
+    store = _fresh_store(tmp_path)
+    a = _approved_row(store, symbol="ETHUSDT")
+    engine = FakeEngine("ETHUSDT")
+    place_entry(a, store, engine)
+    engine._position_amt = -1.5
+    engine._order_status = "FILLED"
+
+    result = run_execution_pass(store, {"ETHUSDT": engine})
+
+    assert store.get(a["id"])["status"] == "filled"
+    assert result["filled"] == [a["id"]]
+
+
+def test_pass_ignores_proposals_outside_given_engines(tmp_path):
+    """只處理有傳入 engine 的幣種，其餘（例如白名單外）完全不碰。"""
+    store = _fresh_store(tmp_path)
+    a = _approved_row(store, symbol="BTCUSDT")
+    result = run_execution_pass(store, {"ETHUSDT": FakeEngine("ETHUSDT")})
+    assert store.get(a["id"])["status"] == "approved"
+    assert result["placed"] == [] and result["skipped"] == []

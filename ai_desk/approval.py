@@ -144,7 +144,14 @@ class ApprovalStore:
         self._transition(pid, "pending", "approved")
 
     def reject(self, pid: int) -> None:
-        self._transition(pid, "pending", "rejected")
+        """撤回一筆提案。pending（從未核准）或 approved（核准後過期太久還沒掛單）皆可撤回；
+        placed 之後已經在交易所掛出委託，不可再用 reject（改用 mark_expired/mark_closed）。"""
+        row = self.get(pid)
+        if row["status"] not in ("pending", "approved"):
+            raise ValueError(
+                f"提案 id={pid} 狀態為 {row['status']}，不可撤回"
+                "（僅 pending/approved 可 reject；已掛單請用 mark_expired/mark_closed）")
+        self._transition(pid, row["status"], "rejected")
 
     # ── Phase 2 訂單生命週期 ──────────────────────────────
     def mark_placed(self, pid: int, exchange_order_id: str) -> None:
