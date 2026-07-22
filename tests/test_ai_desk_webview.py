@@ -120,3 +120,42 @@ def test_outcomes_endpoint_evaluates_and_summarizes(tmp_path):
     assert got["summary"]["closed"] == 1
     assert got["summary"]["losses"] == 1
     assert got["summary"]["realized_pnl"] == pytest.approx(-20.0)
+
+
+def test_run_surfaces_auto_placement_when_cycle_fn_returns_autocycleresult(client):
+    """cycle_fn 回傳 AutoCycleResult（全自動模式）時，/api/run/{id} 要能看到 auto_placed/auto_error。"""
+    from ai_desk.auto import AutoCycleResult
+
+    def fake_auto_cycle(symbol, interval, on_progress):
+        base = fake_cycle(symbol, interval, on_progress)
+        return AutoCycleResult(cycle=base, placed=True, error=None)
+
+    app = create_app(store_path=client._db, cycle_fn=fake_auto_cycle, spawn=sync_spawn)
+    c = TestClient(app)
+    run_id = c.post("/api/run", json={}).json()["run_id"]
+    got = c.get(f"/api/run/{run_id}").json()
+    assert got["auto_placed"] is True
+    assert got["auto_error"] is None
+
+
+def test_run_surfaces_auto_placement_failure(client):
+    from ai_desk.auto import AutoCycleResult
+
+    def fake_auto_cycle_fail(symbol, interval, on_progress):
+        base = fake_cycle(symbol, interval, on_progress)
+        return AutoCycleResult(cycle=base, placed=False, error="不在白名單")
+
+    app = create_app(store_path=client._db, cycle_fn=fake_auto_cycle_fail, spawn=sync_spawn)
+    c = TestClient(app)
+    run_id = c.post("/api/run", json={}).json()["run_id"]
+    got = c.get(f"/api/run/{run_id}").json()
+    assert got["auto_placed"] is False
+    assert got["auto_error"] == "不在白名單"
+
+
+def test_run_manual_mode_leaves_auto_fields_none(client):
+    """非全自動模式（cycle_fn 直接回傳 CycleResult）：auto_placed/auto_error 應為 None。"""
+    run_id = client.post("/api/run", json={"symbol": "BTCUSDT", "interval": "4h"}).json()["run_id"]
+    got = client.get(f"/api/run/{run_id}").json()
+    assert got["auto_placed"] is None
+    assert got["auto_error"] is None

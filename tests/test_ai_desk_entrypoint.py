@@ -19,3 +19,19 @@ def test_prepare_df_sets_index_and_drops_open_bar():
     assert len(df) == n - 1                          # 最後一根（未收盤）被丟掉
     assert isinstance(df.index, pd.DatetimeIndex)
     assert df.index[-1] == idx[-2]
+
+
+def test_auto_approve_enabled_defaults_to_false(monkeypatch):
+    from run_ai_desk_once import auto_approve_enabled
+    monkeypatch.delenv("AI_DESK_AUTO_APPROVE", raising=False)
+    assert auto_approve_enabled() is False
+
+
+def test_auto_approve_enabled_requires_exact_true(monkeypatch):
+    from run_ai_desk_once import auto_approve_enabled
+    monkeypatch.setenv("AI_DESK_AUTO_APPROVE", "1")
+    assert auto_approve_enabled() is False
+    monkeypatch.setenv("AI_DESK_AUTO_APPROVE", "true")
+    assert auto_approve_enabled() is True
+    monkeypatch.setenv("AI_DESK_AUTO_APPROVE", "TRUE")
+    assert auto_approve_enabled() is True

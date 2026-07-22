@@ -1,11 +1,18 @@
-"""ai_desk 單輪進入點 — 抓真實合約 K 線，跑一輪四角色辯論，提案進 pending。
+"""ai_desk 單輪進入點 — 抓真實合約 K 線，跑一輪四角色辯論。
 
-Phase 1：本機手動執行、人工肉眼檢視辯論品質。不排程、不執行任何下單。
-核准後的提案執行接線屬 Phase 2（本腳本只列印 approved 未執行清單提醒）。
+預設（AI_DESK_AUTO_APPROVE 未設或非 "true"）：提案進 pending，等人工核准；
+核准後執行需另外手動跑 run_ai_desk_execute.py（本腳本只列印提醒）。
+
+全自動模式（AI_DESK_AUTO_APPROVE=true，2026-07-22 使用者明確要求開啟）：
+風控放行的方向性提案立刻自動核准+掛單，不等人工核准。見設計文件修訂記錄
+docs/superpowers/specs/2026-07-20-ai-desk-phase2-execution-design.md。
 
 用法（Phase 1 預設走訂閱 CLI，不需 API key、不需 pip install）：
     python run_ai_desk_once.py [SYMBOL] [INTERVAL]
     （預設 BTCUSDT 4h；需本機已登入 claude CLI；K 線用幣安公開端點，不需交易金鑰）
+
+全自動＋真實掛單（僅限 Testnet；SYMBOL 必須在 AI_DESK_SYMBOLS 白名單內）：
+    AI_DESK_AUTO_APPROVE=true python run_ai_desk_once.py ETHUSDT 4h
 
 切換到 API 版（Phase 2 排程用，按量計費）：
     AI_DESK_LLM=api ANTHROPIC_API_KEY=sk-ant-... python run_ai_desk_once.py
@@ -19,16 +26,22 @@ import pandas as pd
 
 from binance.client import Client
 from config import Config
+from core.futures_execution_engineer import FuturesExecutionEngineer
 from core.market_analyst import fetch_klines
 from core.risk_officer import RiskOfficer
 
 from ai_desk.approval import ApprovalStore
+from ai_desk.auto import run_auto_cycle
 from ai_desk.desk import run_one_cycle
 from ai_desk.llm_client import AnthropicLLMClient, ClaudeCliClient
 from ai_desk.memory import ThesisMemory
 
 MEMORY_DIR = os.path.join("ai_desk", "memory")
 EQUITY_FOR_SIZING = 10_000.0   # Phase 1 名目資金（測試網虛擬資金基準）
+
+
+def auto_approve_enabled() -> bool:
+    return os.getenv("AI_DESK_AUTO_APPROVE", "false").lower() == "true"
 
 
 def prepare_df(raw: pd.DataFrame) -> pd.DataFrame:
@@ -52,14 +65,26 @@ def main() -> None:
     raw = fetch_klines(client, symbol, interval, limit=400, futures=True)
     df = prepare_df(raw)
 
-    result = run_one_cycle(
-        df, symbol, interval,
-        llm_call=llm,
-        risk_officer=RiskOfficer(Config()),
-        equity=EQUITY_FOR_SIZING,
-        memory=ThesisMemory(MEMORY_DIR, symbol, interval),
-        approval_store=ApprovalStore(),
-    )
+    store = ApprovalStore()
+    memory = ThesisMemory(MEMORY_DIR, symbol, interval)
+    risk_officer = RiskOfficer(Config())
+
+    if auto_approve_enabled():
+        cfg = Config()
+        trade_client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+        engine = FuturesExecutionEngineer(trade_client, symbol, set_leverage=False)
+        auto = run_auto_cycle(
+            df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
+            equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+            engine=engine,
+        )
+        result = auto.cycle
+    else:
+        result = run_one_cycle(
+            df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
+            equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+        )
+        auto = None
 
     print("=" * 60)
     for role, text in result.debate.items():
@@ -72,15 +97,20 @@ def main() -> None:
         print(f"進場 {p.entry}  停損 {p.stop}  停利 {p.take_profit}")
     print(f"風控：{'放行' if r.allow else '拒絕'}（{r.reason}）"
           + (f"  數量 {r.quantity:.6f}" if r.allow else ""))
-    if result.proposal_id is not None:
+
+    if auto is not None:
+        if auto.placed:
+            print(f"→ 全自動：已核准並掛單 #{result.proposal_id}")
+        elif result.proposal_id is not None:
+            print(f"→ 全自動：#{result.proposal_id} 已核准但掛單失敗（{auto.error}）")
+    elif result.proposal_id is not None:
         print(f"→ 已進入待核准佇列 #{result.proposal_id}；"
               f"檢視/核准：python -m ai_desk.approval")
 
-    store = ApprovalStore()
     approved = store.approved_unexecuted()
     if approved:
         print(f"⚠ 有 {len(approved)} 筆已核准未執行的提案"
-              f"（執行接線屬 Phase 2，目前需人工處理）")
+              f"（執行 python run_ai_desk_execute.py，或設 AI_DESK_AUTO_APPROVE=true）")
 
 
 if __name__ == "__main__":

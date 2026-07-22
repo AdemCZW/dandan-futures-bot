@@ -25,7 +25,11 @@ def _thread_spawn(fn) -> None:
 
 
 def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
-    """真實一輪：抓幣安合約 K 線 → run_one_cycle（走訂閱 CLI）。延遲 import 避免測試碰網路。"""
+    """真實一輪：抓幣安合約 K 線 → 跑辯論（走訂閱 CLI）。延遲 import 避免測試碰網路。
+
+    AI_DESK_AUTO_APPROVE=true 時走全自動（風控放行的方向性提案立刻核准+掛單，
+    回傳 AutoCycleResult）；否則回傳 CycleResult（等人工核准，行為與 Phase 1 相同）。
+    """
     from binance.client import Client
 
     from config import Config
@@ -35,19 +39,44 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     from ai_desk.desk import run_one_cycle
     from ai_desk.llm_client import ClaudeCliClient
     from ai_desk.memory import ThesisMemory
-    from run_ai_desk_once import EQUITY_FOR_SIZING, MEMORY_DIR, prepare_df
+    from run_ai_desk_once import EQUITY_FOR_SIZING, MEMORY_DIR, auto_approve_enabled, prepare_df
 
     raw = fetch_klines(Client(), symbol, interval, limit=400, futures=True)
     df = prepare_df(raw)
+    memory = ThesisMemory(MEMORY_DIR, symbol, interval)
+    risk_officer = RiskOfficer(Config())
+    store = ApprovalStore(store_path)
+    llm = ClaudeCliClient()
+
+    if auto_approve_enabled():
+        from core.futures_execution_engineer import FuturesExecutionEngineer
+
+        from ai_desk.auto import run_auto_cycle
+
+        cfg = Config()
+        client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+        engine = FuturesExecutionEngineer(client, symbol, set_leverage=False)
+        return run_auto_cycle(
+            df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
+            equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+            engine=engine, on_progress=on_progress,
+        )
+
     return run_one_cycle(
-        df, symbol, interval,
-        llm_call=ClaudeCliClient(),
-        risk_officer=RiskOfficer(Config()),
-        equity=EQUITY_FOR_SIZING,
-        memory=ThesisMemory(MEMORY_DIR, symbol, interval),
-        approval_store=ApprovalStore(store_path),
+        df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
+        equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
         on_progress=on_progress,
     )
+
+
+def _unpack_cycle(result):
+    """result 可能是 CycleResult（人工核准模式）或 AutoCycleResult（全自動模式包一層 .cycle）。
+
+    回傳 (cycle, auto_placed, auto_error)；非全自動模式時後兩者為 None。
+    """
+    if hasattr(result, "cycle"):
+        return result.cycle, result.placed, result.error
+    return result, None, None
 
 
 def _real_klines(symbol: str, since: str):
@@ -96,14 +125,17 @@ def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None,
                 i = ROLE_ORDER.index(role)
                 st["current"] = ROLE_ORDER[i + 1] if i + 1 < len(ROLE_ORDER) else None
             try:
-                result = cycle_fn(symbol, interval, on_progress)
-                p, rk = result.proposal, result.risk
+                raw_result = cycle_fn(symbol, interval, on_progress)
+                cycle, auto_placed, auto_error = _unpack_cycle(raw_result)
+                p, rk = cycle.proposal, cycle.risk
                 st = runs[run_id]
                 st["proposal"] = {"direction": p.direction, "confidence": p.confidence,
                                   "entry": p.entry, "stop": p.stop,
                                   "take_profit": p.take_profit, "rationale": p.rationale}
                 st["risk"] = {"allow": rk.allow, "quantity": rk.quantity, "reason": rk.reason}
-                st["proposal_id"] = result.proposal_id
+                st["proposal_id"] = cycle.proposal_id
+                st["auto_placed"] = auto_placed
+                st["auto_error"] = auto_error
                 st["status"] = "done"
                 st["current"] = None
             except Exception as e:  # noqa: BLE001 — 顯示給使用者看，不吞
@@ -321,6 +353,16 @@ async function poll(run_id){
   }
 }
 
+function autoNote(st){
+  if (st.auto_placed === true) {
+    return '<div class="note" style="color:#4ad07a">✓ 全自動：已核准並真實掛單 #'+st.proposal_id+'（Testnet）</div>';
+  }
+  if (st.auto_placed === false && st.proposal_id) {
+    return '<div class="note" style="color:#f2b04a">⚠ 全自動：#'+st.proposal_id+' 已核准但掛單失敗：'+escapeHtml(st.auto_error||"")+'</div>';
+  }
+  return st.proposal_id ? '<div class="note">已進待核准佇列 #'+st.proposal_id+'</div>' : '';
+}
+
 function renderProposal(st){
   const p = st.proposal, rk = st.risk;
   if (!p){ document.getElementById("proposalBox").innerHTML = ""; return; }
@@ -341,7 +383,7 @@ function renderProposal(st){
       priceLine +
       '<div class="kv">依據：'+escapeHtml(p.rationale)+'</div>'+
       '<div class="kv muted">'+riskLine+'</div>'+
-      (st.proposal_id ? '<div class="note">已進待核准佇列 #'+st.proposal_id+'</div>' : '')+
+      (autoNote(st))+
     '</div>';
 }
 
