@@ -22,6 +22,24 @@ DEFAULT_CLI_MODEL = "claude-opus-4-8"
 """
 
 
+DEFAULT_CLI_TIMEOUT = 600
+"""claude CLI 單次呼叫的預設逾時（秒）。
+
+實測（2026-07-23，Opus 4.8）：四角色中最短的技術分析角色就要約 55 秒；裁判角色
+的 prompt 要吃下前三個角色的完整論述，長度與推理複雜度都高出數倍。原本 180 秒
+太緊，會在正常使用中誤殺尚在推理的呼叫。可用 AI_DESK_CLI_TIMEOUT 覆寫。
+"""
+
+
+def _env_timeout() -> int:
+    """從 AI_DESK_CLI_TIMEOUT 讀逾時秒數；未設或無法解析 → 預設值。"""
+    raw = os.getenv("AI_DESK_CLI_TIMEOUT", "").strip()
+    try:
+        return int(raw) if raw else DEFAULT_CLI_TIMEOUT
+    except ValueError:
+        return DEFAULT_CLI_TIMEOUT
+
+
 class ClaudeCliClient:
     """透過本機 claude CLI 呼叫（訂閱額度，非 API 計費）。
 
@@ -31,10 +49,10 @@ class ClaudeCliClient:
     """
 
     def __init__(self, binary: str = "claude", model: str | None = DEFAULT_CLI_MODEL,
-                 timeout: int = 180, runner=None):
+                 timeout: int | None = None, runner=None):
         self.binary = binary
         self.model = model
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else _env_timeout()
         self._runner = runner or self._default_runner
 
     def _default_runner(self, args) -> str:
@@ -65,7 +83,8 @@ class ClaudeCliClient:
         except subprocess.TimeoutExpired as e:
             raise RuntimeError(
                 f"{self.binary} CLI 呼叫逾時（超過 {self.timeout} 秒）。"
-                "請確認網路狀況或稍後再試。"
+                "Opus 跑長篇辯論本來就慢（實測單一角色可達數分鐘），"
+                "可設環境變數 AI_DESK_CLI_TIMEOUT 加大（單位：秒）。"
             ) from e
         return out.strip()
 

@@ -112,3 +112,31 @@ def test_cli_client_pins_opus_by_default():
     ClaudeCliClient(runner=fake_runner)("hi")
     assert "--model" in captured["args"]
     assert "claude-opus-4-8" in captured["args"]
+
+
+def test_cli_default_timeout_is_generous_for_opus_debate(monkeypatch):
+    """實測技術分析角色(最短的一個)就要 ~55s，裁判角色 prompt 更長更慢；
+    180s 太緊會在真實使用中誤殺。預設放寬到 600s。"""
+    monkeypatch.delenv("AI_DESK_CLI_TIMEOUT", raising=False)
+    assert ClaudeCliClient(runner=lambda a: "x").timeout == 600
+
+
+def test_cli_timeout_configurable_by_env(monkeypatch):
+    monkeypatch.setenv("AI_DESK_CLI_TIMEOUT", "900")
+    assert ClaudeCliClient(runner=lambda a: "x").timeout == 900
+
+
+def test_cli_explicit_timeout_arg_wins_over_env(monkeypatch):
+    monkeypatch.setenv("AI_DESK_CLI_TIMEOUT", "900")
+    assert ClaudeCliClient(timeout=120, runner=lambda a: "x").timeout == 120
+
+
+def test_cli_timeout_error_message_mentions_how_to_raise_it():
+    """逾時的錯誤訊息要告訴使用者怎麼調，而不是只說失敗。"""
+    import subprocess
+
+    def slow_runner(args):
+        raise subprocess.TimeoutExpired(cmd=args, timeout=600)
+
+    with pytest.raises(RuntimeError, match="AI_DESK_CLI_TIMEOUT"):
+        ClaudeCliClient(runner=slow_runner)("hi")
