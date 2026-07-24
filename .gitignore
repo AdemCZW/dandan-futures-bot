@@ -60,3 +60,4 @@ research/live_audit/forward_cron.err
 
 # ai_desk 執行期記憶檔（判斷歷史，不進版控）
 ai_desk/memory/
+logs/
