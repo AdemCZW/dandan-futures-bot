@@ -219,7 +219,16 @@ PAGE_HTML = """<!doctype html>
   @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } input { flex: 1; } }
   .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 12px; padding: 14px; }
   .card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-  .role-body { white-space: pre-wrap; font-size: 13.5px; line-height: 1.55; color: #d3d7de;
+  .md-h { font-size: 14px; font-weight: 700; color: #e6e8eb; margin: 14px 0 6px;
+          padding-bottom: 4px; border-bottom: 1px solid #2a2f3a; }
+  .md-h:first-child { margin-top: 0; }
+  .md-li { margin: 5px 0 5px 2px; padding-left: 14px; text-indent: -14px; }
+  .md-num { color: #8b93a1; font-variant-numeric: tabular-nums; }
+  .md-code { background: #22262e; padding: 1px 5px; border-radius: 4px;
+             font-size: 12.5px; color: #9fd0ff; }
+  .role-body strong { color: #fff; font-weight: 650; }
+  .role-body { white-space: pre-wrap; font-size: 13.5px; line-height: 1.7; color: #c8cdd6;
+               letter-spacing: 0.01em; word-break: break-word;
          max-height: 62vh; overflow-y: auto; }
   .pending { color: #f2b04a; } .running { color: #4ac0f2; } .done { color: #4ad07a; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
@@ -300,6 +309,20 @@ let polling = null;
 
 function stripJson(t){ return (t||"").replace(/```json[\\s\\S]*?```/g, "").trim(); }
 
+// 輕量 Markdown 渲染：LLM 回覆帶 **粗體**、## 標題、- 清單，純文字直出很難讀。
+// 一定要「先 escapeHtml 再套規則」——順序反過來會讓模型輸出的 HTML 被當標籤執行。
+function renderMarkdown(t){
+  let s = escapeHtml(t || "");
+  s = s.replace(/^###\\s+(.+)$/gm, '<h4 class="md-h">$1</h4>');
+  s = s.replace(/^##\\s+(.+)$/gm, '<h4 class="md-h">$1</h4>');
+  s = s.replace(/^#\\s+(.+)$/gm, '<h4 class="md-h">$1</h4>');
+  s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+  s = s.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+  s = s.replace(/^\\s*[-–—]\\s+(.+)$/gm, '<div class="md-li">• $1</div>');
+  s = s.replace(/^\\s*(\\d+)\\.\\s+(.+)$/gm, '<div class="md-li"><span class="md-num">$1.</span> $2</div>');
+  return s;
+}
+
 async function startRun(){
   const btn = document.getElementById("runBtn");
   btn.disabled = true;
@@ -327,7 +350,7 @@ async function poll(run_id){
     const body = document.getElementById("body-"+r);
     if (st.roles[r] !== undefined){
       dot.className = "dot ok";
-      body.textContent = stripJson(st.roles[r]);
+      body.innerHTML = renderMarkdown(stripJson(st.roles[r]));
       body.className = "role-body";
     } else if (st.current === r){
       dot.className = "dot run";
@@ -398,7 +421,7 @@ async function loadQueue(){
         '<span class="muted">信心 '+r.confidence+'　數量 '+Number(r.qty).toFixed(6)+'</span></div>'+
       '<div class="kv"><span>進場 <b>'+r.entry+'</b></span><span>停損 <b>'+r.stop+'</b></span><span>停利 <b>'+r.take_profit+'</b></span></div>'+
       '<div class="kv">依據：'+escapeHtml(r.rationale)+'</div>'+
-      '<details><summary>看完整四角色辯論</summary><div class="role-body">'+escapeHtml(r.debate_full_text)+'</div></details>'+
+      '<details><summary>看完整四角色辯論</summary><div class="role-body">'+renderMarkdown(r.debate_full_text)+'</div></details>'+
       '<div class="acts"><button class="approve" onclick="decide('+r.id+',\\'approve\\')">核准</button>'+
         '<button class="reject" onclick="decide('+r.id+',\\'reject\\')">打槍</button></div>'+
     '</div>';
