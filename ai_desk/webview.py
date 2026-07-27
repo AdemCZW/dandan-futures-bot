@@ -79,6 +79,19 @@ def _unpack_cycle(result):
     return result, None, None
 
 
+def _real_briefing(symbol: str, interval: str):
+    """抓真實 K 線並算出行情簡報（儀錶板顯示用）。延遲 import 避免測試碰網路。"""
+    from binance.client import Client
+
+    from core.market_analyst import fetch_klines
+
+    from ai_desk.briefing import build_market_briefing
+    from run_ai_desk_once import prepare_df
+
+    raw = fetch_klines(Client(), symbol, interval, limit=400, futures=True)
+    return build_market_briefing(prepare_df(raw), symbol, interval)
+
+
 def _real_klines(symbol: str, since: str):
     """抓提案成立後的 1h K 線，供結果結算用。延遲 import 避免測試碰網路。"""
     import pandas as pd
@@ -92,7 +105,7 @@ def _real_klines(symbol: str, since: str):
 
 
 def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None,
-               klines_fn=None) -> FastAPI:
+               klines_fn=None, briefing_fn=None) -> FastAPI:
     if cycle_fn is None:
         def cycle_fn(symbol, interval, on_progress):
             return _real_cycle(symbol, interval, on_progress, store_path)
@@ -100,6 +113,8 @@ def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None,
         spawn = _thread_spawn
     if klines_fn is None:
         klines_fn = _real_klines
+    if briefing_fn is None:
+        briefing_fn = _real_briefing
 
     app = FastAPI(title="ai_desk 本地觀察後台")
     runs: dict[str, dict] = {}
@@ -157,6 +172,19 @@ def create_app(*, store_path: str = DEFAULT_DB, cycle_fn=None, spawn=None,
     @app.get("/api/pending")
     def pending() -> list:
         return ApprovalStore(store_path).pending()
+
+    @app.get("/api/briefing")
+    def briefing(symbol: str = "BTCUSDT", interval: str = "4h") -> dict:
+        """行情儀錶板資料 —— AI 每輪唯一看到的那組事實。"""
+        import dataclasses
+
+        try:
+            b = briefing_fn(symbol.upper(), interval)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:  # noqa: BLE001 — 顯示給使用者，不吞成白畫面
+            raise HTTPException(status_code=502, detail=f"抓取行情失敗：{e}") from e
+        return dataclasses.asdict(b)
 
     @app.get("/api/outcomes")
     def outcomes() -> dict:
@@ -219,6 +247,29 @@ PAGE_HTML = """<!doctype html>
   @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } input { flex: 1; } }
   .card { background: #171a21; border: 1px solid #2a2f3a; border-radius: 12px; padding: 14px; }
   .card h3 { margin: 0 0 8px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  /* 行情儀錶板 */
+  .gauges { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 10px; margin-bottom: 14px; }
+  .gauge { background: #171a21; border: 1px solid #2a2f3a; border-radius: 10px; padding: 11px 13px; }
+  .gauge .g-top { display: flex; justify-content: space-between; align-items: baseline;
+                  font-size: 12px; color: #8b93a1; margin-bottom: 7px; }
+  .gauge .g-val { font-size: 17px; font-weight: 700; color: #e6e8eb; }
+  .meter { height: 7px; background: #22262e; border-radius: 99px; position: relative; overflow: hidden; }
+  .meter-fill { height: 100%; border-radius: 99px; transition: width .3s; }
+  .meter-mark { position: absolute; top: -3px; width: 2px; height: 13px; background: #e6e8eb;
+              border-radius: 1px; }
+  .meter-zone { position: absolute; top: 0; height: 100%; background: rgba(255,255,255,.05); }
+  .g-scale { display: flex; justify-content: space-between; font-size: 10.5px;
+             color: #6b7280; margin-top: 4px; }
+  .spark { display: block; width: 100%; height: 42px; }
+  .trend-pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px;
+                border-radius: 99px; font-size: 12.5px; font-weight: 600; }
+  .trend-pill.up { background: #17331f; color: #4ad07a; }
+  .trend-pill.down { background: #3a1c1e; color: #f2555a; }
+  .trend-pill.flat { background: #24282f; color: #8b93a1; }
+  .price-row { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
+               margin-bottom: 12px; }
+  .price-now { font-size: 26px; font-weight: 700; color: #fff; }
   .md-h { font-size: 14px; font-weight: 700; color: #e6e8eb; margin: 14px 0 6px;
           padding-bottom: 4px; border-bottom: 1px solid #2a2f3a; }
   .md-h:first-child { margin-top: 0; }
@@ -279,6 +330,8 @@ PAGE_HTML = """<!doctype html>
     <span id="status" class="muted"></span>
   </div>
   <div class="note">按下後會叫本機 claude（訂閱額度）跑 4 次，約需 1–4 分鐘。過程一步步顯示於下方。</div>
+
+  <div id="gaugeBox" style="margin-top:14px"></div>
 
   <div class="grid" id="roles" style="margin-top:14px">
     <div class="card"><h3><span class="dot wait" id="dot-analyst"></span>技術分析</h3><div class="role-body muted" id="body-analyst">尚未開始</div></div>
@@ -366,6 +419,7 @@ async function poll(run_id){
     renderProposal(st);
     loadQueue();
     loadOutcomes();
+    loadGauges();
   } else if (st.status === "error"){
     clearInterval(polling); polling = null;
     setStatus("出錯", "");
@@ -373,6 +427,96 @@ async function poll(run_id){
     document.getElementById("proposalBox").innerHTML =
       '<div class="card proposal"><b class="err">跑辯論失敗</b><div class="role-body err">'+
       escapeHtml(st.error||"")+'</div></div>';
+  }
+}
+
+// ── 行情儀錶板：把 AI 看到的那組數字畫成圖 ──
+function bar(pct, color, opts){
+  opts = opts || {};
+  const clamped = Math.max(0, Math.min(100, pct));
+  let zone = "";
+  if (opts.zone) {
+    zone = '<div class="meter-zone" style="left:'+opts.zone[0]+'%;width:'+(opts.zone[1]-opts.zone[0])+'%"></div>';
+  }
+  if (opts.marker) {
+    return '<div class="meter">'+zone+'<div class="meter-mark" style="left:calc('+clamped+'% - 1px)"></div></div>';
+  }
+  return '<div class="meter">'+zone+'<div class="meter-fill" style="width:'+clamped+'%;background:'+color+'"></div></div>';
+}
+
+function gauge(label, valText, barHtml, scale){
+  return '<div class="gauge"><div class="g-top"><span>'+label+'</span>'+
+         '<span class="g-val">'+valText+'</span></div>'+barHtml+
+         '<div class="g-scale"><span>'+scale[0]+'</span><span>'+scale[1]+'</span></div></div>';
+}
+
+function sparkline(vals){
+  if (!vals || vals.length < 2) return "";
+  const w = 100, h = 42, pad = 3;
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = (max - min) || 1;
+  const pts = vals.map((v, i) => {
+    const x = (i / (vals.length - 1)) * w;
+    const y = h - pad - ((v - min) / span) * (h - pad * 2);
+    return x.toFixed(1) + "," + y.toFixed(1);
+  });
+  const rising = vals[vals.length - 1] >= vals[0];
+  const color = rising ? "#4ad07a" : "#f2555a";
+  const area = "0," + h + " " + pts.join(" ") + " " + w + "," + h;
+  return '<svg class="spark" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'+
+    '<polygon points="'+area+'" fill="'+color+'" opacity="0.12"/>'+
+    '<polyline points="'+pts.join(" ")+'" fill="none" stroke="'+color+'" stroke-width="1.6" '+
+    'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>';
+}
+
+function rsiColor(v){ return v >= 70 ? "#f2555a" : v <= 30 ? "#4ad07a" : "#4ac0f2"; }
+
+async function loadGauges(){
+  const symbol = document.getElementById("symbol").value.trim() || "BTCUSDT";
+  const interval = document.getElementById("interval").value;
+  const box = document.getElementById("gaugeBox");
+  try {
+    const res = await fetch("/api/briefing?symbol="+encodeURIComponent(symbol)+"&interval="+interval);
+    if (!res.ok) { const e = await res.json(); box.innerHTML = '<div class="note err">行情載入失敗：'+escapeHtml(e.detail||"")+'</div>'; return; }
+    const b = await res.json();
+
+    const trendTxt = {1:"多頭", "-1":"空頭", 0:"中性"}[String(b.htf_trend)] || "?";
+    const trendCls = b.htf_trend === 1 ? "up" : b.htf_trend === -1 ? "down" : "flat";
+    const emaTxt = b.close > b.ema_fast && b.close > b.ema_slow ? "站上雙均線"
+                 : b.close < b.ema_fast && b.close < b.ema_slow ? "跌破雙均線" : "夾在均線間";
+
+    // Z 分數：-3~+3 映射到 0~100
+    const zPct = ((Math.max(-3, Math.min(3, b.zscore)) + 3) / 6) * 100;
+    const atrPct = (b.atr / b.close) * 100;
+
+    box.innerHTML =
+      '<div class="price-row">'+
+        '<span class="price-now">'+b.close.toLocaleString()+'</span>'+
+        '<span class="trend-pill '+trendCls+'">日線'+trendTxt+'</span>'+
+        '<span class="muted">'+emaTxt+'（EMA12 '+b.ema_fast.toFixed(2)+' / EMA26 '+b.ema_slow.toFixed(2)+'）</span>'+
+        '<span class="muted">資料時間 '+escapeHtml(b.as_of)+'</span>'+
+      '</div>'+
+      '<div class="gauges">'+
+        gauge("RSI(14) 動能", b.rsi.toFixed(1),
+              bar(b.rsi, rsiColor(b.rsi), {zone:[30,70]}), ["0 超賣", "100 超買"])+
+        gauge("Z 分數（偏離均值）", (b.zscore>=0?"+":"")+b.zscore.toFixed(2),
+              bar(zPct, "#a78bfa", {marker:true, zone:[33.3,66.7]}), ["-3σ", "+3σ"])+
+        gauge("Fib 區間位置", b.fib_pos.toFixed(3),
+              bar(b.fib_pos*100, "#4ac0f2", {marker:true, zone:[38.2,61.8]}), ["區間低", "區間高"])+
+        gauge("ATR 波動", atrPct.toFixed(2)+"%",
+              bar(Math.min(atrPct*33, 100), "#f2b04a"), ["低波動", "高波動（3%）"])+
+        '<div class="gauge"><div class="g-top"><span>近 6 根走勢</span>'+
+          '<span class="g-val">'+(b.recent_closes[5] >= b.recent_closes[0] ? "↑" : "↓")+'</span></div>'+
+          sparkline(b.recent_closes)+
+          '<div class="g-scale"><span>'+b.recent_closes[0].toLocaleString()+'</span>'+
+          '<span>'+b.recent_closes[5].toLocaleString()+'</span></div></div>'+
+        '<div class="gauge"><div class="g-top"><span>關鍵水位</span></div>'+
+          '<div style="font-size:13px;line-height:1.9;color:#c8cdd6">'+
+          'Fib 61.8%：<b>'+b.fib_618.toFixed(2)+'</b><br>'+
+          'Fib 38.2%：<b>'+b.fib_382.toFixed(2)+'</b></div></div>'+
+      '</div>';
+  } catch (e) {
+    box.innerHTML = '<div class="note err">行情載入失敗：'+escapeHtml(String(e))+'</div>';
   }
 }
 
@@ -479,6 +623,9 @@ function escapeHtml(s){ return (s||"").replace(/[&<>"]/g, c => ({"&":"&amp;","<"
 
 loadQueue();
 loadOutcomes();
+loadGauges();
+document.getElementById("symbol").addEventListener("change", loadGauges);
+document.getElementById("interval").addEventListener("change", loadGauges);
 </script>
 </body>
 </html>"""

@@ -159,3 +159,43 @@ def test_run_manual_mode_leaves_auto_fields_none(client):
     got = client.get(f"/api/run/{run_id}").json()
     assert got["auto_placed"] is None
     assert got["auto_error"] is None
+
+
+# ── 行情儀錶板：/api/briefing ───────────────────────────────
+def test_briefing_endpoint_returns_indicator_fields(client):
+    """儀錶板要畫的數字（RSI/Z/Fib位置/均線/趨勢/近期走勢）都要吐出來。"""
+    import dataclasses
+
+    from ai_desk.briefing import MarketBriefing
+
+    fake = MarketBriefing(
+        symbol="BTCUSDT", interval="4h", as_of="2026-07-27 08:00:00",
+        close=65261.5, ema_fast=64743.19, ema_slow=64784.8, rsi=57.9,
+        atr=462.27, zscore=0.25, fib_pos=0.49, fib_382=64910.59,
+        fib_618=65679.51, htf_trend=1,
+        recent_closes=[64341.2, 64481.4, 64733.6, 64665.5, 65375.1, 65261.5],
+    )
+    app = create_app(store_path=client._db, cycle_fn=fake_cycle, spawn=sync_spawn,
+                     briefing_fn=lambda s, i: fake)
+    c = TestClient(app)
+    got = c.get("/api/briefing?symbol=BTCUSDT&interval=4h").json()
+
+    for field in dataclasses.fields(MarketBriefing):
+        assert field.name in got, f"缺少欄位 {field.name}"
+    assert got["rsi"] == 57.9
+    assert got["fib_pos"] == 0.49
+    assert got["htf_trend"] == 1
+    assert len(got["recent_closes"]) == 6
+
+
+def test_briefing_endpoint_surfaces_errors_instead_of_crashing(client):
+    """K線不足等狀況要回可讀的錯誤，不是 500 白畫面。"""
+    def boom(symbol, interval):
+        raise ValueError("K 棒不足（100 根）")
+
+    app = create_app(store_path=client._db, cycle_fn=fake_cycle, spawn=sync_spawn,
+                     briefing_fn=boom)
+    c = TestClient(app)
+    r = c.get("/api/briefing?symbol=BTCUSDT&interval=4h")
+    assert r.status_code == 400
+    assert "K 棒不足" in r.json()["detail"]
