@@ -140,3 +140,51 @@ def test_cli_timeout_error_message_mentions_how_to_raise_it():
 
     with pytest.raises(RuntimeError, match="AI_DESK_CLI_TIMEOUT"):
         ClaudeCliClient(runner=slow_runner)("hi")
+
+
+# ── binary 路徑（launchd 極簡 PATH 找不到 claude 的真實故障）────
+def test_cli_binary_configurable_by_env(monkeypatch):
+    """launchd 的 PATH 不含 /opt/homebrew/bin，裸 `claude` 會 FileNotFoundError。
+    實際踩過：排程連續多輪全部 exit 1，log 顯示 No such file or directory: 'claude'。"""
+    monkeypatch.setenv("AI_DESK_CLAUDE_BIN", "/opt/homebrew/bin/claude")
+    captured = {}
+
+    def fake_runner(args):
+        captured["args"] = args
+        return "x"
+
+    ClaudeCliClient(runner=fake_runner)("hi")
+    assert captured["args"][0] == "/opt/homebrew/bin/claude"
+
+
+def test_cli_binary_defaults_to_bare_name(monkeypatch):
+    monkeypatch.delenv("AI_DESK_CLAUDE_BIN", raising=False)
+    captured = {}
+
+    def fake_runner(args):
+        captured["args"] = args
+        return "x"
+
+    ClaudeCliClient(runner=fake_runner)("hi")
+    assert captured["args"][0] == "claude"
+
+
+def test_cli_explicit_binary_arg_wins_over_env(monkeypatch):
+    monkeypatch.setenv("AI_DESK_CLAUDE_BIN", "/opt/homebrew/bin/claude")
+    captured = {}
+
+    def fake_runner(args):
+        captured["args"] = args
+        return "x"
+
+    ClaudeCliClient(binary="/custom/claude", runner=fake_runner)("hi")
+    assert captured["args"][0] == "/custom/claude"
+
+
+def test_missing_binary_error_mentions_env_override():
+    """找不到 binary 時要提示可用環境變數指定絕對路徑（排程場景的解法）。"""
+    def missing(args):
+        raise FileNotFoundError()
+
+    with pytest.raises(RuntimeError, match="AI_DESK_CLAUDE_BIN"):
+        ClaudeCliClient(runner=missing)("hi")

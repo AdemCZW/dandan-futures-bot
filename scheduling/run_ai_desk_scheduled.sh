@@ -10,6 +10,13 @@
 PROJECT_ROOT="/Users/adem/量化機器"
 PYTHON="$PROJECT_ROOT/.venv/bin/python"
 
+# launchd 的 PATH 極簡（約 /usr/bin:/bin:/usr/sbin:/sbin），找不到 homebrew 裝的
+# claude。實際踩過：2026-07-24~27 排程連續多輪全部 exit 1，錯誤是
+# FileNotFoundError: No such file or directory: 'claude'。
+# 兩層保險：補 PATH，並直接把絕對路徑告訴 ClaudeCliClient。
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export AI_DESK_CLAUDE_BIN="/opt/homebrew/bin/claude"
+
 cd "$PROJECT_ROOT" || {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 致命：找不到專案目錄 $PROJECT_ROOT"
     exit 1

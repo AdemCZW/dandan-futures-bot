@@ -103,3 +103,21 @@ def test_script_continues_to_second_symbol_even_if_first_fails(script_text):
     """
     code_lines = [ln.split("#", 1)[0] for ln in script_text.splitlines()]
     assert not any(re.match(r"\s*set\s+-\w*e", ln) for ln in code_lines)
+
+
+def test_script_makes_claude_findable_in_minimal_launchd_path(script_text):
+    """launchd 的 PATH 不含 /opt/homebrew/bin。實際故障：2026-07-24~27 排程連續
+    多輪 exit 1，錯誤 No such file or directory: 'claude'。腳本必須自己解決。"""
+    assert "/opt/homebrew/bin" in script_text
+
+
+def test_script_passes_absolute_claude_path_to_client(script_text):
+    """除了補 PATH，也直接指定絕對路徑（雙層保險）。"""
+    assert "AI_DESK_CLAUDE_BIN" in script_text
+
+
+def test_claude_binary_actually_exists_at_configured_path(script_text):
+    """設定的絕對路徑要真的存在，否則等於沒修。"""
+    m = re.search(r'AI_DESK_CLAUDE_BIN="([^"]+)"', script_text)
+    assert m, "腳本未設定 AI_DESK_CLAUDE_BIN"
+    assert os.path.exists(m.group(1)), f"claude 不在 {m.group(1)}"

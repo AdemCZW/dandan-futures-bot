@@ -31,6 +31,16 @@ DEFAULT_CLI_TIMEOUT = 600
 """
 
 
+def _env_binary() -> str:
+    """從 AI_DESK_CLAUDE_BIN 讀 claude 執行檔路徑；未設 → 裸名稱 "claude"。
+
+    為什麼需要：launchd（排程）執行時的 PATH 極簡（約 /usr/bin:/bin:/usr/sbin:/sbin），
+    不會載入 shell profile，因此找不到裝在 /opt/homebrew/bin 的 claude。
+    實際踩過：排程連續多輪 exit 1，log 顯示 No such file or directory: 'claude'。
+    """
+    return os.getenv("AI_DESK_CLAUDE_BIN", "").strip() or "claude"
+
+
 def _env_timeout() -> int:
     """從 AI_DESK_CLI_TIMEOUT 讀逾時秒數；未設或無法解析 → 預設值。"""
     raw = os.getenv("AI_DESK_CLI_TIMEOUT", "").strip()
@@ -48,9 +58,9 @@ class ClaudeCliClient:
     model 預設釘死 DEFAULT_CLI_MODEL；傳 None 才會退回 CLI 自己的預設（不建議）。
     """
 
-    def __init__(self, binary: str = "claude", model: str | None = DEFAULT_CLI_MODEL,
+    def __init__(self, binary: str | None = None, model: str | None = DEFAULT_CLI_MODEL,
                  timeout: int | None = None, runner=None):
-        self.binary = binary
+        self.binary = binary if binary is not None else _env_binary()
         self.model = model
         self.timeout = timeout if timeout is not None else _env_timeout()
         self._runner = runner or self._default_runner
@@ -71,7 +81,10 @@ class ClaudeCliClient:
         except FileNotFoundError as e:
             raise RuntimeError(
                 f"找不到 {self.binary} CLI。ClaudeCliClient 需要本機已安裝並登入的 "
-                "claude CLI（走 Max 訂閱）。若要在無登入的伺服器跑，請改用 AnthropicLLMClient。"
+                "claude CLI（走 Max 訂閱）。排程（launchd/cron）環境的 PATH 極簡、"
+                "找不到 /opt/homebrew/bin 下的執行檔時，請設環境變數 "
+                "AI_DESK_CLAUDE_BIN 指向絕對路徑。"
+                "若要在無登入的伺服器跑，請改用 AnthropicLLMClient。"
             ) from e
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or "").strip()
