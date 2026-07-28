@@ -35,3 +35,24 @@ def test_auto_approve_enabled_requires_exact_true(monkeypatch):
     assert auto_approve_enabled() is True
     monkeypatch.setenv("AI_DESK_AUTO_APPROVE", "TRUE")
     assert auto_approve_enabled() is True
+
+
+def test_fetch_live_price_returns_float():
+    from run_ai_desk_once import fetch_live_price
+
+    class FakeClient:
+        def futures_symbol_ticker(self, symbol):
+            return {"symbol": symbol, "price": "63205.70"}
+
+    assert fetch_live_price(FakeClient(), "BTCUSDT") == 63205.70
+
+
+def test_fetch_live_price_returns_none_on_failure_not_crash():
+    """抓現價失敗只是少了附註，不該讓整輪分析掛掉（排程無人值守時尤其重要）。"""
+    from run_ai_desk_once import fetch_live_price
+
+    class BoomClient:
+        def futures_symbol_ticker(self, symbol):
+            raise RuntimeError("網路斷線")
+
+    assert fetch_live_price(BoomClient(), "BTCUSDT") is None

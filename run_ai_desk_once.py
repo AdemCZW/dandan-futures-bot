@@ -49,6 +49,18 @@ def prepare_df(raw: pd.DataFrame) -> pd.DataFrame:
     return raw.iloc[:-1]
 
 
+def fetch_live_price(client, symbol: str) -> float | None:
+    """抓此刻市場成交價（僅供簡報附註，不參與指標計算）。
+
+    失敗一律回 None——少了這個附註只是 AI 少一項參考，不該讓整輪分析中斷
+    （排程無人值守時尤其重要）。
+    """
+    try:
+        return float(client.futures_symbol_ticker(symbol=symbol)["price"])
+    except Exception:
+        return None
+
+
 def build_llm():
     """依 AI_DESK_LLM 選後端：預設 cli（走訂閱、免額外計費）；api（按量計費，Phase 2 排程）。"""
     if os.getenv("AI_DESK_LLM", "cli").lower() == "api":
@@ -64,6 +76,7 @@ def main() -> None:
     client = Client()                                 # 公開 K 線端點不需金鑰
     raw = fetch_klines(client, symbol, interval, limit=400, futures=True)
     df = prepare_df(raw)
+    live_price = fetch_live_price(client, symbol)
 
     store = ApprovalStore()
     memory = ThesisMemory(MEMORY_DIR, symbol, interval)
@@ -76,13 +89,14 @@ def main() -> None:
         auto = run_auto_cycle(
             df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
             equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
-            engine=engine,
+            engine=engine, live_price=live_price,
         )
         result = auto.cycle
     else:
         result = run_one_cycle(
             df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
             equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+            live_price=live_price,
         )
         auto = None
 

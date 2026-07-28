@@ -30,7 +30,7 @@ class AutoCycleResult:
 def run_auto_cycle(df, symbol: str, interval: str, *,
                    llm_call, risk_officer: RiskOfficer, equity: float,
                    memory: ThesisMemory, approval_store: ApprovalStore,
-                   engine, on_progress=None) -> AutoCycleResult:
+                   engine, on_progress=None, live_price=None) -> AutoCycleResult:
     """跑一輪辯論；風控放行的方向性提案立刻自動核准+掛單，不等人工核准。
 
     觀望或風控拒絕的提案（proposal_id 為 None）不會被核准，也不會嘗試掛單。
@@ -41,6 +41,7 @@ def run_auto_cycle(df, symbol: str, interval: str, *,
         df, symbol, interval,
         llm_call=llm_call, risk_officer=risk_officer, equity=equity,
         memory=memory, approval_store=approval_store, on_progress=on_progress,
+        live_price=live_price,
     )
     if cycle.proposal_id is None:
         return AutoCycleResult(cycle=cycle, placed=False, error=None)

@@ -34,14 +34,14 @@ def run_one_cycle(df, symbol: str, interval: str, *,
                   llm_call, risk_officer: RiskOfficer, equity: float,
                   memory: ThesisMemory,
                   approval_store: ApprovalStore,
-                  on_progress=None) -> CycleResult:
+                  on_progress=None, live_price=None) -> CycleResult:
     """on_progress(role_name, full_text)（可選）：每個角色跑完就回報一次，
     role_name 依序為 analyst/bull/bear/judge，供即時介面逐步顯示辯論。"""
     def _report(role: str, text: str) -> None:
         if on_progress is not None:
             on_progress(role, text)
 
-    briefing = build_market_briefing(df, symbol, interval)
+    briefing = build_market_briefing(df, symbol, interval, live_price=live_price)
     briefing_text = format_briefing(briefing)
     memory_text = memory.format_for_prompt()
 

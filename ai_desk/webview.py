@@ -39,10 +39,13 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     from ai_desk.desk import run_one_cycle
     from ai_desk.llm_client import ClaudeCliClient
     from ai_desk.memory import ThesisMemory
-    from run_ai_desk_once import EQUITY_FOR_SIZING, MEMORY_DIR, auto_approve_enabled, prepare_df
+    from run_ai_desk_once import (EQUITY_FOR_SIZING, MEMORY_DIR, auto_approve_enabled,
+                                  fetch_live_price, prepare_df)
 
-    raw = fetch_klines(Client(), symbol, interval, limit=400, futures=True)
+    public = Client()
+    raw = fetch_klines(public, symbol, interval, limit=400, futures=True)
     df = prepare_df(raw)
+    live_price = fetch_live_price(public, symbol)
     memory = ThesisMemory(MEMORY_DIR, symbol, interval)
     risk_officer = RiskOfficer(Config())
     store = ApprovalStore(store_path)
@@ -59,13 +62,13 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
         return run_auto_cycle(
             df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
             equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
-            engine=engine, on_progress=on_progress,
+            engine=engine, on_progress=on_progress, live_price=live_price,
         )
 
     return run_one_cycle(
         df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
         equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
-        on_progress=on_progress,
+        on_progress=on_progress, live_price=live_price,
     )
 
 
@@ -86,10 +89,12 @@ def _real_briefing(symbol: str, interval: str):
     from core.market_analyst import fetch_klines
 
     from ai_desk.briefing import build_market_briefing
-    from run_ai_desk_once import prepare_df
+    from run_ai_desk_once import fetch_live_price, prepare_df
 
-    raw = fetch_klines(Client(), symbol, interval, limit=400, futures=True)
-    return build_market_briefing(prepare_df(raw), symbol, interval)
+    client = Client()
+    raw = fetch_klines(client, symbol, interval, limit=400, futures=True)
+    return build_market_briefing(prepare_df(raw), symbol, interval,
+                                 live_price=fetch_live_price(client, symbol))
 
 
 def _real_klines(symbol: str, since: str):
@@ -469,6 +474,14 @@ function sparkline(vals){
     'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>';
 }
 
+function livePriceBadge(b){
+  const drift = b.live_price - b.close;
+  const pct = (drift / b.close) * 100;
+  const cls = Math.abs(pct) < 0.3 ? "flat" : (drift > 0 ? "up" : "down");
+  return '<span class="trend-pill '+cls+'">現價 '+b.live_price.toLocaleString()+
+         '（'+(drift>=0?"+":"")+pct.toFixed(2)+'%）</span>';
+}
+
 function rsiColor(v){ return v >= 70 ? "#f2555a" : v <= 30 ? "#4ad07a" : "#4ac0f2"; }
 
 async function loadGauges(){
@@ -494,7 +507,8 @@ async function loadGauges(){
         '<span class="price-now">'+b.close.toLocaleString()+'</span>'+
         '<span class="trend-pill '+trendCls+'">日線'+trendTxt+'</span>'+
         '<span class="muted">'+emaTxt+'（EMA12 '+b.ema_fast.toFixed(2)+' / EMA26 '+b.ema_slow.toFixed(2)+'）</span>'+
-        '<span class="muted">資料時間 '+escapeHtml(b.as_of)+'</span>'+
+        (b.live_price != null ? livePriceBadge(b) : "")+
+        '<span class="muted">資料時間 '+escapeHtml(b.as_of)+'（已收盤）</span>'+
       '</div>'+
       '<div class="gauges">'+
         gauge("RSI(14) 動能", b.rsi.toFixed(1),

@@ -31,9 +31,17 @@ class MarketBriefing:
     fib_618: float
     htf_trend: int        # 日線趨勢 +1/-1/0（已 shift、無前視）
     recent_closes: list   # 最近 6 根收盤價
+    live_price: float | None = None
+    """此刻的市場成交價（僅供 AI 感知「收盤後價格已走多遠」，不參與任何指標計算）。
+
+    所有指標一律只用已收盤 K 棒（防前視）；但 4h 週期下，最後一根收盤到現在最多
+    可差 4 小時，實測曾出現 -0.81% 的落差，AI 若完全不知情容易掛出過時的價位。
+    抓不到現價時為 None，簡報就不顯示這段——絕不可因此讓整輪分析失敗。
+    """
 
 
-def build_market_briefing(df: pd.DataFrame, symbol: str, interval: str) -> MarketBriefing:
+def build_market_briefing(df: pd.DataFrame, symbol: str, interval: str,
+                          live_price: float | None = None) -> MarketBriefing:
     """df：已收盤 K 棒（DatetimeIndex + open/high/low/close/volume）。
 
     任一關鍵指標為 NaN → 拋 ValueError（寧可整輪失敗，不餵 LLM 髒資料）。
@@ -61,6 +69,7 @@ def build_market_briefing(df: pd.DataFrame, symbol: str, interval: str) -> Marke
         fib_618=float(last["fib_618"]),
         htf_trend=int(last["htf_trend"]),
         recent_closes=[float(x) for x in df["close"].iloc[-6:]],
+        live_price=None if live_price is None else float(live_price),
     )
 
 
@@ -80,4 +89,19 @@ def format_briefing(b: MarketBriefing) -> str:
         f"Fib 38.2% 水位：{b.fib_382:.2f}／61.8% 水位：{b.fib_618:.2f}\n"
         f"日線趨勢：{trend_txt}\n"
         f"最近 6 根收盤：{recent}"
+        + _live_price_line(b)
+    )
+
+
+def _live_price_line(b: MarketBriefing) -> str:
+    """現價附註。刻意放在最後、並標明「不參與指標」，避免模型拿它當收盤價用。"""
+    if b.live_price is None:
+        return ""
+    drift = b.live_price - b.close
+    pct = (drift / b.close * 100) if b.close else 0.0
+    return (
+        f"\n\n【即時參考】此刻市場現價：{b.live_price:.2f}"
+        f"（自上述收盤價已變動 {drift:+.2f}，{pct:+.2f}%）\n"
+        "註：上方所有指標一律以「已收盤 K 棒」計算（防前視），不含此現價；"
+        "本行僅供你判斷掛單價位時參考價格已走多遠。"
     )
