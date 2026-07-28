@@ -56,3 +56,15 @@ def test_fetch_live_price_returns_none_on_failure_not_crash():
             raise RuntimeError("網路斷線")
 
     assert fetch_live_price(BoomClient(), "BTCUSDT") is None
+
+
+def test_kline_limit_is_enough_for_ma200():
+    """MA200 需 200 天 = 1200 根 4h；抓太少會讓該層永遠「資料不足」。"""
+    import re
+    for path in ("run_ai_desk_once.py", "ai_desk/webview.py"):
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        for m in re.finditer(r"fetch_klines\([^)]*limit=(\d+)[^)]*interval|"
+                             r"fetch_klines\(\s*\w+,\s*symbol,\s*interval,\s*limit=(\d+)", src):
+            got = int(m.group(1) or m.group(2))
+            assert got >= 1200, f"{path} 抓 {got} 根，不足以算 MA200（需 1200）"

@@ -6,13 +6,26 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
 from core import signal_engineer as se
 
 MIN_BARS = 200  # 指標暖機下限（ema26/rsi14/zscore50/fib50 皆綽綽有餘）
+
+DAILY_MA_PERIODS = (20, 60, 120, 200)
+"""多層日均線週期。
+
+為什麼要多層：原本只有 htf_trend 一個「多頭/空頭」標籤，但它用 20/60 日均線、
+在只餵 400 根 4h（≈66 天）時 60 日均線僅 7 個有效值，89.5% 的時間算不出來，
+卻仍輸出一個看似確定的方向給 AI 當證據。改成攤開四層均線的實際數值，
+讓 AI 自己判斷排列與距離；算不出來的一律回 None 並在簡報明示「資料不足」，
+不給假數字。
+
+資料需求（每天 6 根 4h）：MA200 需 1200 根才有第一個有效值；
+進入點已改抓 1500 根（幣安單次上限，≈250 天）。
+"""
 
 
 @dataclass
@@ -31,6 +44,11 @@ class MarketBriefing:
     fib_618: float
     htf_trend: int        # 日線趨勢 +1/-1/0（已 shift、無前視）
     recent_closes: list   # 最近 6 根收盤價
+    daily_mas: dict = field(default_factory=dict)
+    """日均線收盤值 {20: v, 60: v, 120: v, 200: v}；資料不足者為 None。
+
+    一律用「已收完的日線」（shift(1)）——今天的日線還在跑，用它就是前視。
+    """
     live_price: float | None = None
     """此刻的市場成交價（僅供 AI 感知「收盤後價格已走多遠」，不參與任何指標計算）。
 
@@ -38,6 +56,21 @@ class MarketBriefing:
     可差 4 小時，實測曾出現 -0.81% 的落差，AI 若完全不知情容易掛出過時的價位。
     抓不到現價時為 None，簡報就不顯示這段——絕不可因此讓整輪分析失敗。
     """
+
+
+def compute_daily_mas(df: pd.DataFrame, periods=DAILY_MA_PERIODS) -> dict:
+    """把 4h 重採樣成日線，算各週期均線的最新值（僅用已收完的日線）。
+
+    資料不足的週期回 None——寧可讓 AI 知道「這層算不出來」，
+    也不要給一個暖機不足、統計上毫無意義的數字當證據。
+    """
+    daily = df["close"].resample("1D").last().dropna()
+    out = {}
+    for n in periods:
+        ma = daily.rolling(n, min_periods=n).mean().shift(1)
+        v = ma.iloc[-1] if len(ma) else float("nan")
+        out[n] = None if pd.isna(v) else float(v)
+    return out
 
 
 def build_market_briefing(df: pd.DataFrame, symbol: str, interval: str,
@@ -69,6 +102,7 @@ def build_market_briefing(df: pd.DataFrame, symbol: str, interval: str,
         fib_618=float(last["fib_618"]),
         htf_trend=int(last["htf_trend"]),
         recent_closes=[float(x) for x in df["close"].iloc[-6:]],
+        daily_mas=compute_daily_mas(df),
         live_price=None if live_price is None else float(live_price),
     )
 
@@ -87,10 +121,26 @@ def format_briefing(b: MarketBriefing) -> str:
         f"收盤價 Z 分數(50)：{b.zscore:.2f}\n"
         f"Fib 區間位置：{b.fib_pos:.3f}（0=區間低點, 1=區間高點）\n"
         f"Fib 38.2% 水位：{b.fib_382:.2f}／61.8% 水位：{b.fib_618:.2f}\n"
-        f"日線趨勢：{trend_txt}\n"
+        f"日線趨勢（20/60日均線）：{trend_txt}\n"
+        f"{_ma_stack_line(b)}"
         f"最近 6 根收盤：{recent}"
         + _live_price_line(b)
     )
+
+
+def _ma_stack_line(b: MarketBriefing) -> str:
+    """多層日均線一覽，並標示價格在各層的上/下方。資料不足者明說。"""
+    if not b.daily_mas:
+        return ""
+    parts = []
+    for n in DAILY_MA_PERIODS:
+        v = b.daily_mas.get(n)
+        if v is None:
+            parts.append(f"MA{n}：資料不足")
+        else:
+            side = "上" if b.close >= v else "下"
+            parts.append(f"MA{n}：{v:.2f}（價在其{side}方）")
+    return "日均線層級：" + "；".join(parts) + "\n"
 
 
 def _live_price_line(b: MarketBriefing) -> str:

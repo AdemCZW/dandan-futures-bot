@@ -39,6 +39,15 @@ from ai_desk.memory import ThesisMemory
 MEMORY_DIR = os.path.join("ai_desk", "memory")
 EQUITY_FOR_SIZING = 10_000.0   # Phase 1 名目資金（測試網虛擬資金基準）
 
+KLINE_LIMIT = 1500
+"""每次抓的 4h K 棒數（幣安單次上限）＝ 250 天。
+
+為什麼要這麼多：日均線 MA200 需要 200 天（＝1200 根 4h）才有第一個有效值。
+原本只抓 400 根（≈66 天），導致 MA120/MA200 永遠算不出來、連 MA60 都只有
+7 個有效值（暖機不足卻仍輸出方向給 AI 當證據）。1500 根讓 MA200 有 51 個
+有效值——偏少但可用；再多就得分批抓。
+"""
+
 
 def auto_approve_enabled() -> bool:
     return os.getenv("AI_DESK_AUTO_APPROVE", "false").lower() == "true"
@@ -74,7 +83,7 @@ def main() -> None:
 
     llm = build_llm()
     client = Client()                                 # 公開 K 線端點不需金鑰
-    raw = fetch_klines(client, symbol, interval, limit=400, futures=True)
+    raw = fetch_klines(client, symbol, interval, limit=KLINE_LIMIT, futures=True)
     df = prepare_df(raw)
     live_price = fetch_live_price(client, symbol)
 

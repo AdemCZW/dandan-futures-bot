@@ -39,11 +39,11 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     from ai_desk.desk import run_one_cycle
     from ai_desk.llm_client import ClaudeCliClient
     from ai_desk.memory import ThesisMemory
-    from run_ai_desk_once import (EQUITY_FOR_SIZING, MEMORY_DIR, auto_approve_enabled,
-                                  fetch_live_price, prepare_df)
+    from run_ai_desk_once import (EQUITY_FOR_SIZING, KLINE_LIMIT, MEMORY_DIR,
+                                  auto_approve_enabled, fetch_live_price, prepare_df)
 
     public = Client()
-    raw = fetch_klines(public, symbol, interval, limit=400, futures=True)
+    raw = fetch_klines(public, symbol, interval, limit=KLINE_LIMIT, futures=True)
     df = prepare_df(raw)
     live_price = fetch_live_price(public, symbol)
     memory = ThesisMemory(MEMORY_DIR, symbol, interval)
@@ -89,10 +89,10 @@ def _real_briefing(symbol: str, interval: str):
     from core.market_analyst import fetch_klines
 
     from ai_desk.briefing import build_market_briefing
-    from run_ai_desk_once import fetch_live_price, prepare_df
+    from run_ai_desk_once import KLINE_LIMIT, fetch_live_price, prepare_df
 
     client = Client()
-    raw = fetch_klines(client, symbol, interval, limit=400, futures=True)
+    raw = fetch_klines(client, symbol, interval, limit=KLINE_LIMIT, futures=True)
     return build_market_briefing(prepare_df(raw), symbol, interval,
                                  live_price=fetch_live_price(client, symbol))
 
