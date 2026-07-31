@@ -25,6 +25,30 @@ def build_engines(client, symbols) -> dict:
     return {s: FuturesExecutionEngineer(client, s, set_leverage=False) for s in symbols}
 
 
+def report_result(result: dict) -> int:
+    """印出一輪的結果，回傳行程退出碼（有錯誤 → 非零）。
+
+    run_execution_pass 現在會隔離單筆失敗、把原因收進 result["errors"] 後繼續跑。
+    好處是一筆失敗不再讓整輪停擺，代價是失敗不會再自己中止程式——所以這裡必須
+    主動、完整地把原因印出來，否則就從「大聲中止」退化成「靜默失敗」，
+    排程 log 只剩一句「本輪結束」，比原本更難察覺。
+    """
+    for w in result["warnings"]:
+        print(w)
+    print(f"新掛單：{result['placed']}")
+    print(f"已有部位而跳過：{result['skipped']}")
+    print(f"本輪成交：{result['filled']}")
+    print(f"逾時撤單：{result['expired']}")
+
+    errors = result.get("errors") or []
+    if not errors:
+        return 0
+    print(f"\n❌ 本輪有 {len(errors)} 筆失敗（已隔離，其餘提案照常處理）：")
+    for e in errors:
+        print(f"  · {e}")
+    return 1
+
+
 def main() -> None:
     if os.getenv("AI_DESK_EXEC_ENABLED", "false").lower() != "true":
         print("AI_DESK_EXEC_ENABLED 未開啟，不執行任何動作。"
@@ -39,13 +63,9 @@ def main() -> None:
     store = ApprovalStore()
     engines = build_engines(client, symbols)
     result = run_execution_pass(store, engines)
-
-    for w in result["warnings"]:
-        print(w)
-    print(f"新掛單：{result['placed']}")
-    print(f"已有部位而跳過：{result['skipped']}")
-    print(f"本輪成交：{result['filled']}")
-    print(f"逾時撤單：{result['expired']}")
+    code = report_result(result)
+    if code:
+        sys.exit(code)
 
 
 if __name__ == "__main__":

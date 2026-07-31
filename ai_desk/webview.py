@@ -39,8 +39,8 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     from ai_desk.desk import run_one_cycle
     from ai_desk.llm_client import ClaudeCliClient
     from ai_desk.memory import ThesisMemory
-    from run_ai_desk_once import (EQUITY_FOR_SIZING, KLINE_LIMIT, MEMORY_DIR,
-                                  auto_approve_enabled, fetch_live_price, prepare_df)
+    from run_ai_desk_once import (KLINE_LIMIT, MEMORY_DIR, auto_approve_enabled,
+                                  fetch_account_equity, fetch_live_price, prepare_df)
 
     public = Client()
     raw = fetch_klines(public, symbol, interval, limit=KLINE_LIMIT, futures=True)
@@ -51,23 +51,25 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     store = ApprovalStore(store_path)
     llm = ClaudeCliClient()
 
+    cfg = Config()
+    client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+    equity = fetch_account_equity(client)
+
     if auto_approve_enabled():
         from core.futures_execution_engineer import FuturesExecutionEngineer
 
         from ai_desk.auto import run_auto_cycle
 
-        cfg = Config()
-        client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
         engine = FuturesExecutionEngineer(client, symbol, set_leverage=False)
         return run_auto_cycle(
             df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
-            equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+            equity=equity, memory=memory, approval_store=store,
             engine=engine, on_progress=on_progress, live_price=live_price,
         )
 
     return run_one_cycle(
         df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
-        equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+        equity=equity, memory=memory, approval_store=store,
         on_progress=on_progress, live_price=live_price,
     )
 

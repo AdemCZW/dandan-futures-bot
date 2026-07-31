@@ -37,7 +37,6 @@ from ai_desk.llm_client import AnthropicLLMClient, ClaudeCliClient
 from ai_desk.memory import ThesisMemory
 
 MEMORY_DIR = os.path.join("ai_desk", "memory")
-EQUITY_FOR_SIZING = 10_000.0   # Phase 1 名目資金（測試網虛擬資金基準）
 
 KLINE_LIMIT = 1500
 """每次抓的 4h K 棒數（幣安單次上限）＝ 250 天。
@@ -56,6 +55,22 @@ def auto_approve_enabled() -> bool:
 def prepare_df(raw: pd.DataFrame) -> pd.DataFrame:
     """fetch_klines 已以 open_time 為 DatetimeIndex；這裡只丟掉最後一根未收盤 K 棒。"""
     return raw.iloc[:-1]
+
+
+def fetch_account_equity(client, asset: str = "USDT") -> float:
+    """讀真實測試網帳戶餘額，供風控算倉位大小用。
+
+    跟 run_live_futures.py 既有作法一致（FuturesExecutionEngineer.balance() 也是
+    讀 futures_account_balance() 裡的這個欄位）；這裡不透過 engine，因為非全自動
+    模式沒有建 engine，只是想單獨查餘額。
+
+    找不到資產一律拋錯，不回傳 0.0——equity 是風控算倉位的必要輸入，靜默回 0
+    會被誤讀成「帳戶真的沒錢」而不是「查詢失敗」，兩者處置天差地遠。
+    """
+    for b in client.futures_account_balance():
+        if b.get("asset") == asset:
+            return float(b["balance"])
+    raise ValueError(f"帳戶餘額查無 {asset}，無法算倉位大小")
 
 
 def fetch_live_price(client, symbol: str) -> float | None:
@@ -91,20 +106,22 @@ def main() -> None:
     memory = ThesisMemory(MEMORY_DIR, symbol, interval)
     risk_officer = RiskOfficer(Config())
 
+    cfg = Config()
+    trade_client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+    equity = fetch_account_equity(trade_client)
+
     if auto_approve_enabled():
-        cfg = Config()
-        trade_client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
         engine = FuturesExecutionEngineer(trade_client, symbol, set_leverage=False)
         auto = run_auto_cycle(
             df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
-            equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+            equity=equity, memory=memory, approval_store=store,
             engine=engine, live_price=live_price,
         )
         result = auto.cycle
     else:
         result = run_one_cycle(
             df, symbol, interval, llm_call=llm, risk_officer=risk_officer,
-            equity=EQUITY_FOR_SIZING, memory=memory, approval_store=store,
+            equity=equity, memory=memory, approval_store=store,
             live_price=live_price,
         )
         auto = None

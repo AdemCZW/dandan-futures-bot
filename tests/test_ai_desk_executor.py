@@ -207,13 +207,13 @@ class FakeEngine:
     def get_order(self, order_id):
         return {"orderId": order_id, "status": self._order_status}
 
-    def place_stop(self, direction, price):
+    def place_stop(self, direction, price, qty=None):
         if self._place_stop_should_fail:
-            raise RuntimeError("模擬掛停損失敗（如 -4130）")
-        self.stop_calls.append((direction, price))
+            raise RuntimeError("模擬掛停損失敗（如 -4045）")
+        self.stop_calls.append((direction, price, qty))
 
-    def place_take_profit(self, direction, price):
-        self.tp_calls.append((direction, price))
+    def place_take_profit(self, direction, price, qty=None):
+        self.tp_calls.append((direction, price, qty))
 
     def close(self, qty, direction):
         self.close_calls.append((qty, direction))
@@ -286,8 +286,10 @@ def test_handle_placed_fill_places_stop_and_tp(tmp_path):
 
     assert action == "fill"
     assert store.get(row["id"])["status"] == "filled"
-    assert engine.stop_calls == [(-1, 1877.0)]
-    assert engine.tp_calls == [(-1, 1808.0)]
+    # qty 必須帶入（帶量 + reduceOnly），不可用 closePosition（qty=None）——
+    # 實測 closePosition 委託在這個帳戶會撞 -4045（見 _protect_with_stop 註解）。
+    assert engine.stop_calls == [(-1, 1877.0, 1.5)]
+    assert engine.tp_calls == [(-1, 1808.0, 1.5)]
 
 
 def test_handle_placed_stop_failure_forces_market_close_never_naked(tmp_path):
@@ -440,3 +442,93 @@ def test_pass_ignores_proposals_outside_given_engines(tmp_path):
     result = run_execution_pass(store, {"ETHUSDT": FakeEngine("ETHUSDT")})
     assert store.get(a["id"])["status"] == "approved"
     assert result["placed"] == [] and result["skipped"] == []
+
+
+# ── 錯誤隔離：單筆失敗不得讓整輪中止 ──────────────────────────
+#
+# 實際事故：2026-07-24~30 排程連續多輪，ETHUSDT 成交後掛停損收到
+# APIError(-4045) Reach max stop order limit，_protect_with_stop 依設計拋
+# RuntimeError，但這個例外一路穿出 run_execution_pass、穿出進入點的 main()，
+# 導致「後面所有提案完全不被處理」——#29/#30 因此永遠卡在 placed、
+# #19/#21/#23 永遠卡在 approved，兩天都沒人動。
+#
+# 修法方向與 scheduling/run_ai_desk_scheduled.sh 刻意不用 set -e 的理由一致：
+# 一個幣種失敗不該讓其他幣種被跳過。_protect_with_stop 本身的 raise 保留不動
+# （大聲失敗、絕不裸倉的性質不變），只把炸開範圍縮小到單筆。
+
+
+def test_pass_continues_other_symbols_after_stop_failure(tmp_path, monkeypatch):
+    """ETH 掛停損失敗不得讓 BTC 的 approved 提案被跳過。"""
+    monkeypatch.setenv("AI_DESK_SYMBOLS", "ETHUSDT,BTCUSDT")
+    store = _fresh_store(tmp_path)
+    eth = _approved_row(store, symbol="ETHUSDT")
+    eth_engine = FakeEngine("ETHUSDT", place_stop_should_fail=True)
+    place_entry(eth, store, eth_engine)
+    eth_engine._position_amt = -1.5
+    eth_engine._order_status = "FILLED"
+
+    btc = _approved_row(store, symbol="BTCUSDT")
+    btc_engine = FakeEngine("BTCUSDT")
+
+    # ETH 排在前面，確保失敗發生在 BTC 被處理之前
+    result = run_execution_pass(
+        store, {"ETHUSDT": eth_engine, "BTCUSDT": btc_engine})
+
+    assert store.get(btc["id"])["status"] == "placed"   # 後面的仍被處理
+    assert result["placed"] == [btc["id"]]
+
+
+def test_pass_records_stop_failure_instead_of_swallowing(tmp_path):
+    """錯誤要被記錄下來，不可靜默吞掉——否則排程 log 看不出出了什麼事。"""
+    store = _fresh_store(tmp_path)
+    eth = _approved_row(store, symbol="ETHUSDT")
+    engine = FakeEngine("ETHUSDT", place_stop_should_fail=True)
+    place_entry(eth, store, engine)
+    engine._position_amt = -1.5
+    engine._order_status = "FILLED"
+
+    result = run_execution_pass(store, {"ETHUSDT": engine})
+
+    assert len(result["errors"]) == 1
+    assert str(eth["id"]) in result["errors"][0]
+    assert "裸倉" in result["errors"][0]
+
+
+def test_pass_stop_failure_still_protects_against_naked_position(tmp_path):
+    """錯誤隔離不得弱化裸倉防護：該筆仍必須被市價平掉並記為 closed_manual。"""
+    store = _fresh_store(tmp_path)
+    eth = _approved_row(store, symbol="ETHUSDT")
+    engine = FakeEngine("ETHUSDT", place_stop_should_fail=True)
+    place_entry(eth, store, engine)
+    engine._position_amt = -1.5
+    engine._order_status = "FILLED"
+
+    run_execution_pass(store, {"ETHUSDT": engine})
+
+    assert engine.close_calls == [(1.5, -1)]
+    assert store.get(eth["id"])["status"] == "closed_manual"
+
+
+def test_pass_continues_after_place_entry_failure(tmp_path, monkeypatch):
+    """掛進場單失敗（實測見過 APIError(-2019) 保證金不足）也只能炸掉該筆。"""
+    monkeypatch.setenv("AI_DESK_SYMBOLS", "ETHUSDT,BTCUSDT")
+    store = _fresh_store(tmp_path)
+    eth = _approved_row(store, symbol="ETHUSDT")
+    eth_engine = FakeEngine("ETHUSDT")
+
+    def _boom(**params):
+        raise RuntimeError("APIError(code=-2019): Margin is insufficient.")
+
+    eth_engine.client.futures_create_order = _boom
+
+    btc = _approved_row(store, symbol="BTCUSDT")
+    btc_engine = FakeEngine("BTCUSDT")
+
+    result = run_execution_pass(
+        store, {"ETHUSDT": eth_engine, "BTCUSDT": btc_engine})
+
+    assert store.get(eth["id"])["status"] == "approved"   # 沒掛出去，狀態不動
+    assert store.get(btc["id"])["status"] == "placed"     # 後面的仍被處理
+    assert result["placed"] == [btc["id"]]
+    assert len(result["errors"]) == 1
+    assert "-2019" in result["errors"][0]

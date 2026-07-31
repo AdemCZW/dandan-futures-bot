@@ -4,6 +4,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -56,6 +57,42 @@ def test_fetch_live_price_returns_none_on_failure_not_crash():
             raise RuntimeError("網路斷線")
 
     assert fetch_live_price(BoomClient(), "BTCUSDT") is None
+
+
+# ── 真實帳戶淨值（取代寫死的 EQUITY_FOR_SIZING = 10_000）──────────
+#
+# 實測帳戶只有約 4458，卻拿 10,000 去算倉位大小，導致每筆名目大了 2.3 倍，
+# 可用保證金常被榨乾。改成跟 run_live_futures.py 既有作法一致：
+# 讀 futures_account_balance() 裡的 USDT 餘額（core/futures_execution_engineer.py
+# 的 balance() 方法就是這樣寫的，這裡只是不需要整個 engine 就能單獨呼叫）。
+
+def test_fetch_account_equity_returns_real_balance():
+    from run_ai_desk_once import fetch_account_equity
+
+    class FakeClient:
+        def futures_account_balance(self):
+            return [{"asset": "BNB", "balance": "0.00100000"},
+                    {"asset": "USDT", "balance": "4458.08000000"}]
+
+    assert fetch_account_equity(FakeClient()) == 4458.08
+
+
+def test_fetch_account_equity_missing_asset_raises_not_silent_zero():
+    """找不到資產寧可拋錯，也不要靜默回 0（0 會被誤讀成『真的沒錢』而不是『查詢失敗』）。"""
+    from run_ai_desk_once import fetch_account_equity
+
+    class FakeClient:
+        def futures_account_balance(self):
+            return [{"asset": "BNB", "balance": "0.001"}]
+
+    with pytest.raises(ValueError, match="USDT"):
+        fetch_account_equity(FakeClient())
+
+
+def test_no_hardcoded_equity_constant_left():
+    """EQUITY_FOR_SIZING 這個寫死常數必須整個移除，不留著當死碼或後備值。"""
+    import run_ai_desk_once
+    assert not hasattr(run_ai_desk_once, "EQUITY_FOR_SIZING")
 
 
 def test_kline_limit_is_enough_for_ma200():

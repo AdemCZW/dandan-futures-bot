@@ -184,12 +184,21 @@ def handle_placed(row: dict, store, engine, *, ttl_hours: int = DEFAULT_TTL_HOUR
 def _protect_with_stop(row: dict, store, engine) -> None:
     """成交後立刻掛停損停利；掛停損失敗 → 絕不留裸倉，立刻市價平倉。
 
+    必須帶 qty（帶量 + reduceOnly），不可用 closePosition（qty=None）：實測這個
+    帳戶的 closePosition 條件單會撞 -4045（Reach max stop order limit）——
+    root cause 是舊 bot 艦隊留下的 98 筆孤兒 algo 委託（見
+    core/futures_execution_engineer.py 的 stop_order_params 註解）佔滿了
+    closePosition 專用名額，futures_get_open_orders() 完全看不到、
+    futures_cancel_all_open_orders() 也撤不掉（它們活在另一套 algo order
+    系統）。帶量單走一般委託額度，不受此限制。
+
     真實損益需要對帳補正（此處無法可靠算出平倉均價），先記 None，交由
     Phase 2 對帳補正——不可用假數字冒充。
     """
+    qty = abs(engine.position_amt())
     try:
-        engine.place_stop(row["direction"], row["stop"])
-        engine.place_take_profit(row["direction"], row["take_profit"])
+        engine.place_stop(row["direction"], row["stop"], qty=qty)
+        engine.place_take_profit(row["direction"], row["take_profit"], qty=qty)
     except Exception as e:
         qty = abs(engine.position_amt())
         engine.close(qty, row["direction"])
@@ -226,8 +235,16 @@ def run_execution_pass(store, engines: dict, *, ttl_hours: int = DEFAULT_TTL_HOU
 
     engines：{symbol: engine}。只處理有傳入 engine 的幣種，其餘一律不碰
     （即使資料庫裡有其他幣種的提案）。回傳各動作影響到的提案 id，方便記錄/測試。
+
+    單筆失敗一律隔離：錯誤收進 result["errors"] 後繼續處理下一筆，絕不讓一筆
+    炸掉整輪。實際事故（2026-07-24~30）是 ETHUSDT 掛停損收到 -4045，例外穿出
+    本函式，導致其後所有提案連續多日完全不被處理。理由與
+    scheduling/run_ai_desk_scheduled.sh 刻意不用 set -e 相同。
+    注意這裡只縮小炸開範圍：place_entry 的安全檢查與 _protect_with_stop 的
+    「絕不裸倉 + 大聲拋錯」行為都不變，錯誤也不靜默吞掉。
     """
-    result = {"warnings": [], "placed": [], "skipped": [], "filled": [], "expired": []}
+    result = {"warnings": [], "placed": [], "skipped": [], "filled": [],
+              "expired": [], "errors": []}
     result["warnings"] = reconcile_orphan_positions(engines, store)
 
     for symbol, engine in engines.items():
@@ -238,13 +255,22 @@ def run_execution_pass(store, engines: dict, *, ttl_hours: int = DEFAULT_TTL_HOU
             if has_position:
                 result["skipped"].append(row["id"])
                 continue
-            place_entry(row, store, engine)
+            try:
+                place_entry(row, store, engine)
+            except Exception as e:
+                result["errors"].append(f"#{row['id']} {symbol} 掛進場單失敗：{e}")
+                continue
             result["placed"].append(row["id"])
 
         for row in store.by_status("placed"):
             if row["symbol"] != symbol:
                 continue
-            action = handle_placed(row, store, engine, ttl_hours=ttl_hours, now=now)
+            try:
+                action = handle_placed(row, store, engine,
+                                       ttl_hours=ttl_hours, now=now)
+            except Exception as e:
+                result["errors"].append(f"#{row['id']} {symbol} 處理掛單失敗：{e}")
+                continue
             if action == ACTION_FILL:
                 result["filled"].append(row["id"])
             elif action == ACTION_EXPIRE:
