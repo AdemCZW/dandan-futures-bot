@@ -1,13 +1,13 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
-  "//": "定時跑模式：每小時第2分醒來跑 run_once.py（單輪決策）就退出，出場由交易所掛單守護。回滾：startCommand 改回 run_multi_futures.py、刪 cronSchedule、healthcheckPath 加回 /health、restartPolicyType 改回 ON_FAILURE。詳見 docs/定時跑部署.md。",
+  "//": "⚠️ 2026-08-06 起 cronSchedule 已刻意移除，bot 不再自動每小時下單。原因：cron 讓 bot 在 railway down 之後仍能被任何一次 railway up 悄悄復活（2026-08-05 就這樣發生過），且 bot 的 BTC/ETH 與 ai_desk 白名單搶同一個測試網帳戶部位、互相平倉並塞爆 Binance algo order 配額（-4045）。沒有 cronSchedule 時 run_once.py 部署後只跑一次就結束，不會週期性下單。",
+  "//restore": "要恢復每小時自動跑：在 deploy 區塊加回 \"cronSchedule\": \"2 * * * *\"。恢復前務必先確認 ai_desk 已停用（launchctl unload com.dandan.aidesk）或雙方白名單幣種不重疊，否則會重演互搶部位。完整回滾（改回常駐多bot模式）：startCommand 改 run_multi_futures.py、healthcheckPath 加回 /health、restartPolicyType 改 ON_FAILURE。詳見 docs/定時跑部署.md。",
   "build": {
     "builder": "DOCKERFILE",
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
     "startCommand": "python -u run_once.py",
-    "cronSchedule": "2 * * * *",
     "restartPolicyType": "NEVER",
     "numReplicas": 1
   }
