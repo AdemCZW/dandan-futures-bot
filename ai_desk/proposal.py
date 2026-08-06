@@ -6,9 +6,54 @@ AI 的信心分數對風控沒有任何影響力。
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from core.risk_officer import RiskDecision, RiskOfficer
+
+DEFAULT_SHORT_MIN_FIB = 0.45
+DEFAULT_LONG_MAX_FIB = 0.55
+"""進場區位閘門門檻：做空需 fib >= 0.45、做多需 fib <= 0.55（對稱於區間中點）。
+
+為什麼有這道閘門（2026-08-06，56 筆已結算前瞻樣本的實測）：把做空依「進場當下的
+Fib 區間位置」分組，勝率呈單調遞增——
+    低位 fib<0.30      n=16  勝率 6.2%   平均 -21.18
+    中位 0.30~0.45     n=17  勝率 17.6%  平均 -10.04
+    高位 fib>=0.45     n=11  勝率 45.5%  平均 +13.22   ← 唯一為正的分組
+相關係數 +0.347。反事實：只保留 fib>=0.45 的做空，被砍掉的 33 筆合計 -509.46，
+保留的 11 筆合計 +145.45。做多側是同一個病的鏡像（實測 #4 fib=1.095、#8 fib=0.857
+都是貼著區間頂做多後停損）。
+
+關鍵在於：Fib 區間位置本來就印在簡報裡給 AI 看，它也常在辯論中自己寫「此處做空已
+遲到、不宜追空」，但最終提案仍把進場價設在不利區（44 筆做空有 75% 落在 fib<0.45）。
+所以這道閘門補的不是資訊，是紀律——把 AI 自己說過的話變成硬性約束。
+
+⚠️ 誠實界定：這是「唯一一組方向與整體相反、值得優先測試的線索」，**不是已證明的
+edge**。保留組的 bootstrap 信賴下界仍為 -1.24（n=11），未通過本專案的正式晉升閘門；
+做多側證據更弱（僅 2~3 筆可量測），屬鏡像對稱推論。故預設關閉，需明確開啟。
+"""
+
+
+def zone_gate_enabled() -> bool:
+    """進場區位閘門總開關。預設關閉——比照專案既有新過濾器慣例，不默默改變線上行為。"""
+    return os.getenv("AI_DESK_ZONE_GATE", "false").lower() == "true"
+
+
+def entry_zone_allows(direction: int, fib_pos: float | None, *,
+                      short_min_fib: float = DEFAULT_SHORT_MIN_FIB,
+                      long_max_fib: float = DEFAULT_LONG_MAX_FIB) -> bool:
+    """進場當下的區間位置是否落在該方向的有利區。純函式，不讀環境變數。
+
+    fib_pos 為 None（算不出來）一律回 False——比照 smc_structure 的 vol/corr
+    過濾器慣例：寧可少做一筆，也不要在不知道自己站在區間哪裡時進場。
+    """
+    if fib_pos is None:
+        return False
+    if direction == -1:
+        return fib_pos >= short_min_fib
+    if direction == 1:
+        return fib_pos <= long_max_fib
+    return False
 
 
 @dataclass
@@ -52,11 +97,23 @@ def proposal_from_judge(data: dict, symbol: str, ts: str) -> TradeProposal:
 
 
 def clamp_with_risk_officer(proposal: TradeProposal, officer: RiskOfficer,
-                            equity: float, atr=None) -> RiskDecision:
+                            equity: float, atr=None, fib_pos=None) -> RiskDecision:
     """既有風控官夾限：熔斷/清算守衛照走，倉位取「AI 停損」與「風控停損」
-    兩種算法中較保守（較小）者。AI 信心分數不參與任何計算。"""
+    兩種算法中較保守（較小）者。AI 信心分數不參與任何計算。
+
+    fib_pos：進場當下的 Fib 區間位置，供進場區位閘門判斷（見 entry_zone_allows）。
+    閘門只決定「進不進場」這個是非題，絕不參與倉位計算——與「信心不影響倉位」
+    同一條硬規則的精神。
+    """
     if proposal.direction == 0:
         return RiskDecision(False, 0.0, "AI 建議觀望，不進場")
+    if zone_gate_enabled() and not entry_zone_allows(proposal.direction, fib_pos):
+        where = "資料不足" if fib_pos is None else f"{fib_pos:.2f}"
+        side = "做空" if proposal.direction == -1 else "做多"
+        return RiskDecision(
+            False, 0.0,
+            f"進場區位閘門擋下：{side}時 Fib 區間位置 {where} 不在有利區"
+            f"（做空需 ≥{DEFAULT_SHORT_MIN_FIB}、做多需 ≤{DEFAULT_LONG_MAX_FIB}）")
     gate = officer.check_entry(equity, proposal.entry, proposal.ts,
                                direction=proposal.direction, atr=atr)
     if not gate.allow:

@@ -58,7 +58,7 @@ def run_one_cycle(df, symbol: str, interval: str, *,
 
     proposal = proposal_from_judge(judge.data, symbol, briefing.as_of)
     risk = clamp_with_risk_officer(proposal, risk_officer, equity,
-                                   atr=briefing.atr)
+                                   atr=briefing.atr, fib_pos=briefing.fib_pos)
 
     debate = {"analyst": analyst.full_text, "bull": bull.full_text,
               "bear": bear.full_text, "judge": judge.full_text}

@@ -92,3 +92,116 @@ def test_clamp_respects_circuit_breaker(officer):
                             "2026-07-17T08:00:00Z")
     d = clamp_with_risk_officer(p, officer, equity=9_000.0)        # 當日 -10%
     assert d.allow is False and "熔斷" in d.reason
+
+
+# ── 進場區位閘門（Fib zone gate）────────────────────────────
+#
+# 證據（2026-08-06，56 筆已結算前瞻樣本）：做空依進場時的 Fib 區間位置分組，
+# 勝率呈單調遞增——低位(fib<0.30) 6.2%／中位(0.30~0.45) 17.6%／
+# 高位(fib>=0.45) 45.5%，相關係數 +0.347。反事實：只留 fib>=0.45 的做空，
+# 被砍掉的 33 筆合計 -509.46，保留的 11 筆合計 +145.45。
+# 做多側是同一個病的鏡像（#4 fib=1.095、#8 fib=0.857 都是貼著區間頂做多後停損）。
+#
+# ⚠️ 界定：這是「唯一一組方向與整體相反、值得優先測試的線索」，不是已證明的 edge。
+# 保留組 bootstrap 信賴下界仍為 -1.24（n=11），未過本專案的正式晉升閘門；
+# 做多側證據更弱（僅 2-3 筆可量測），屬鏡像對稱推論。故程式碼預設關閉。
+
+from ai_desk.proposal import (DEFAULT_LONG_MAX_FIB, DEFAULT_SHORT_MIN_FIB,  # noqa: E402
+                              entry_zone_allows, zone_gate_enabled)
+
+
+def test_zone_gate_disabled_by_default(monkeypatch):
+    """預設關閉——比照專案既有新過濾器慣例，不默默改變線上行為。"""
+    monkeypatch.delenv("AI_DESK_ZONE_GATE", raising=False)
+    assert zone_gate_enabled() is False
+
+
+def test_zone_gate_requires_exact_true(monkeypatch):
+    monkeypatch.setenv("AI_DESK_ZONE_GATE", "1")
+    assert zone_gate_enabled() is False
+    monkeypatch.setenv("AI_DESK_ZONE_GATE", "true")
+    assert zone_gate_enabled() is True
+    monkeypatch.setenv("AI_DESK_ZONE_GATE", "TRUE")
+    assert zone_gate_enabled() is True
+
+
+def test_short_blocked_at_range_low():
+    """貼近區間低點追空 = 實測勝率 6.2% 的區域，擋掉。"""
+    assert entry_zone_allows(-1, 0.21) is False
+    assert entry_zone_allows(-1, 0.0) is False
+
+
+def test_short_allowed_at_range_high():
+    """反彈到區間中上緣才做空 = 實測勝率 45.5% 的區域，放行。"""
+    assert entry_zone_allows(-1, 0.50) is True
+    assert entry_zone_allows(-1, 0.76) is True
+
+
+def test_short_boundary_is_inclusive():
+    """門檻本身算通過（fib>=0.45），與統計分組的定義一致。"""
+    assert entry_zone_allows(-1, DEFAULT_SHORT_MIN_FIB) is True
+
+
+def test_long_blocked_at_range_high():
+    """貼區間頂做多 —— #4(fib=1.095)、#8(fib=0.857) 都是這樣停損的。"""
+    assert entry_zone_allows(1, 0.857) is False
+    assert entry_zone_allows(1, 1.095) is False
+
+
+def test_long_allowed_at_range_low():
+    assert entry_zone_allows(1, 0.345) is True
+    assert entry_zone_allows(1, 0.10) is True
+
+
+def test_long_boundary_is_inclusive():
+    assert entry_zone_allows(1, DEFAULT_LONG_MAX_FIB) is True
+
+
+def test_missing_fib_blocks_entry():
+    """缺值視為不通過——比照 smc_structure 的 vol/corr 過濾器慣例，
+    寧可少做一筆，也不要在不知道自己站在區間哪裡的情況下進場。"""
+    assert entry_zone_allows(-1, None) is False
+    assert entry_zone_allows(1, None) is False
+
+
+def test_thresholds_are_symmetric_around_midpoint():
+    """雙向對稱：做空下限與做多上限應對稱於區間中點 0.5。"""
+    assert DEFAULT_SHORT_MIN_FIB + DEFAULT_LONG_MAX_FIB == pytest.approx(1.0)
+
+
+def test_clamp_blocks_short_in_bad_zone_when_gate_on(officer, monkeypatch):
+    """閘門開啟時，風控層真的擋下低位做空。"""
+    monkeypatch.setenv("AI_DESK_ZONE_GATE", "true")
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, fib_pos=0.21)
+    assert d.allow is False
+    assert "區間" in d.reason and "0.21" in d.reason   # 原因要說清楚，方便事後稽核
+
+
+def test_clamp_allows_short_in_good_zone_when_gate_on(officer, monkeypatch):
+    monkeypatch.setenv("AI_DESK_ZONE_GATE", "true")
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, fib_pos=0.60)
+    assert d.allow is True
+
+
+def test_clamp_ignores_zone_when_gate_off(officer, monkeypatch):
+    """閘門關閉時行為與現況逐位元相同——低位做空照樣放行。"""
+    monkeypatch.delenv("AI_DESK_ZONE_GATE", raising=False)
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, fib_pos=0.21)
+    assert d.allow is True
+
+
+def test_zone_gate_never_affects_sizing(officer, monkeypatch):
+    """硬規則不變：閘門只決定「進不進場」，絕不改變倉位大小。"""
+    monkeypatch.setenv("AI_DESK_ZONE_GATE", "true")
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    gated = clamp_with_risk_officer(p, officer, equity=10_000.0, fib_pos=0.60)
+    monkeypatch.delenv("AI_DESK_ZONE_GATE", raising=False)
+    plain = clamp_with_risk_officer(p, officer, equity=10_000.0, fib_pos=0.60)
+    assert gated.quantity == plain.quantity

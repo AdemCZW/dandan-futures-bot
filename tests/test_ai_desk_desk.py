@@ -136,3 +136,30 @@ def test_records_llm_model_on_proposal(deps):
     r = run_one_cycle(df, "BTCUSDT", "4h", llm_call=llm, **deps)
     row = deps["approval_store"].get(r.proposal_id)
     assert row["model"] == "claude-opus-4-8"
+
+
+def test_cycle_passes_fib_pos_to_risk_clamp(deps, monkeypatch):
+    """desk 必須把簡報的 fib_pos 傳進風控夾限。
+
+    沒接線的話，進場區位閘門開啟後會永遠收到 None、把所有提案都擋掉
+    （缺值視為不通過），變成靜默停擺而不是有紀律的過濾。
+    """
+    import ai_desk.desk as desk_mod
+    from ai_desk.briefing import build_market_briefing
+
+    captured = {}
+    real_clamp = desk_mod.clamp_with_risk_officer
+
+    def spy(proposal, officer, equity, atr=None, fib_pos=None):
+        captured["fib_pos"] = fib_pos
+        return real_clamp(proposal, officer, equity, atr=atr, fib_pos=fib_pos)
+
+    monkeypatch.setattr(desk_mod, "clamp_with_risk_officer", spy)
+
+    df = make_df()
+    llm = scripted_llm('{"direction": -1, "confidence": 0.6, "entry": 100.0, '
+                       '"stop": 105.0, "take_profit": 90.0, "rationale": "測試"}')
+    run_one_cycle(df, "BTCUSDT", "4h", llm_call=llm, **deps)
+
+    expected = build_market_briefing(df, "BTCUSDT", "4h").fib_pos
+    assert captured["fib_pos"] == pytest.approx(expected)
