@@ -42,14 +42,16 @@ CREATE TABLE IF NOT EXISTS ai_desk_proposals (
     exchange_order_id TEXT,
     filled_at TEXT,
     closed_at TEXT,
-    realized_pnl REAL
+    realized_pnl REAL,
+    judge_hedges INTEGER
 )
 """
 
 _COLS = ["id", "symbol", "ts", "direction", "confidence", "entry", "stop",
          "take_profit", "qty", "rationale", "debate_full_text", "status",
          "created_at", "decided_at", "model",
-         "exchange_order_id", "filled_at", "closed_at", "realized_pnl"]
+         "exchange_order_id", "filled_at", "closed_at", "realized_pnl",
+         "judge_hedges"]
 
 
 # 舊資料庫可能缺這些欄位，開啟時逐一補上（順序即新增順序）
@@ -59,6 +61,7 @@ _ADDED_COLUMNS = [
     ("filled_at", "TEXT"),
     ("closed_at", "TEXT"),
     ("realized_pnl", "REAL"),
+    ("judge_hedges", "INTEGER"),
 ]
 
 # Phase 2 訂單生命週期：
@@ -86,18 +89,25 @@ class ApprovalStore:
         return sqlite3.connect(self.db_path)
 
     def add(self, proposal: TradeProposal, qty: float,
-            debate_full_text: str, model: str | None = None) -> int:
-        """model：產生這筆提案的 LLM 模型。留 None 代表未記錄（舊樣本），不可假裝知道。"""
+            debate_full_text: str, model: str | None = None,
+            judge_hedges: int | None = None) -> int:
+        """model：產生這筆提案的 LLM 模型。留 None 代表未記錄（舊樣本），不可假裝知道。
+
+        judge_hedges：裁判提了幾種自我警告（見 ai_desk.hedge_signal）。純觀察欄位，
+        不影響任何執行邏輯。同樣地，沒給就留 None（未記錄），不可用 0 冒充
+        「真的一個警告語都沒有」——兩者的統計意義完全不同。
+        """
         with self._conn() as c:
             cur = c.execute(
                 "INSERT INTO ai_desk_proposals "
                 "(symbol, ts, direction, confidence, entry, stop, take_profit,"
-                " qty, rationale, debate_full_text, status, created_at, model) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?)",
+                " qty, rationale, debate_full_text, status, created_at, model,"
+                " judge_hedges) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?, ?)",
                 (proposal.symbol, proposal.ts, proposal.direction,
                  proposal.confidence, proposal.entry, proposal.stop,
                  proposal.take_profit, qty, proposal.rationale,
-                 debate_full_text, _utc_now(), model))
+                 debate_full_text, _utc_now(), model, judge_hedges))
             return cur.lastrowid
 
     def _rows(self, where: str, args=()) -> list:

@@ -184,3 +184,37 @@ def test_reject_fails_from_placed(store):
     store.mark_placed(pid, "OID-1")
     with pytest.raises(ValueError):
         store.reject(pid)
+
+
+# ── judge_hedges 觀察欄位（2026-08-06）────────────────────
+#
+# 純觀察指標：記錄裁判提了幾種顧慮，跟著新樣本一起累積，供日後與進場區位一併
+# 檢驗。刻意不接進任何執行邏輯——見 ai_desk/hedge_signal.py 的三點理由。
+
+def test_add_records_judge_hedges(tmp_path):
+    store = ApprovalStore(str(tmp_path / "p.db"))
+    p = TradeProposal("BTCUSDT", "t", -1, 0.6, 100.0, 105.0, 90.0, "測試")
+    pid = store.add(p, 1.0, "全文", judge_hedges=3)
+    assert store.get(pid)["judge_hedges"] == 3
+
+
+def test_judge_hedges_defaults_to_none_when_not_given(tmp_path):
+    """沒給就是 None（未記錄），不可用 0 冒充「真的沒有警告語」——
+    與 model / realized_pnl 同一條「不假造已知」的慣例。"""
+    store = ApprovalStore(str(tmp_path / "p.db"))
+    p = TradeProposal("BTCUSDT", "t", -1, 0.6, 100.0, 105.0, 90.0, "測試")
+    pid = store.add(p, 1.0, "全文")
+    assert store.get(pid)["judge_hedges"] is None
+
+
+def test_judge_hedges_column_added_to_existing_db(tmp_path):
+    """舊資料庫開啟時自動補欄位（走既有 _ADDED_COLUMNS 遷移），不需手動改 schema。"""
+    db = str(tmp_path / "old.db")
+    store = ApprovalStore(db)
+    p = TradeProposal("BTCUSDT", "t", -1, 0.6, 100.0, 105.0, 90.0, "測試")
+    pid = store.add(p, 1.0, "全文")
+    import sqlite3
+    with sqlite3.connect(db) as c:                     # 模擬舊 schema：把欄位砍掉
+        c.execute("ALTER TABLE ai_desk_proposals DROP COLUMN judge_hedges")
+    reopened = ApprovalStore(db)                        # 重開應自動補回
+    assert reopened.get(pid)["judge_hedges"] is None

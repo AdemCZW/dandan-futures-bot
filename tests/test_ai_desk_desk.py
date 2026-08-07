@@ -163,3 +163,25 @@ def test_cycle_passes_fib_pos_to_risk_clamp(deps, monkeypatch):
 
     expected = build_market_briefing(df, "BTCUSDT", "4h").fib_pos
     assert captured["fib_pos"] == pytest.approx(expected)
+
+
+def test_cycle_records_judge_hedge_count(deps):
+    """desk 要把裁判的警告語數量一併存進提案，供日後與進場區位一併檢驗。"""
+    df = make_df()
+    judge_body = ('此處做空已遲到、不宜追空，現價進場等於接刀，R/R 極差。\n'
+                  '```json\n{"direction": -1, "confidence": 0.6, "entry": 100.0, '
+                  '"stop": 105.0, "take_profit": 90.0, "rationale": "測試"}\n```')
+    replies = ['結構。\n```json\n{"structure_summary": "震盪"}\n```',
+               '多方。\n```json\n{"points": ["A"]}\n```',
+               '空方。\n```json\n{"rebuttals": ["A"], "points": ["B"]}\n```',
+               judge_body]
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return replies[len(calls) - 1]
+
+    result = run_one_cycle(df, "BTCUSDT", "4h", llm_call=llm, **deps)
+    assert result.proposal_id is not None
+    row = deps["approval_store"].get(result.proposal_id)
+    assert row["judge_hedges"] >= 3          # 遲到 + 不宜追 + 接刀 + 賠率差

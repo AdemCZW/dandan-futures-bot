@@ -12,6 +12,7 @@ from core.risk_officer import RiskDecision, RiskOfficer
 
 from ai_desk.approval import ApprovalStore
 from ai_desk.briefing import build_market_briefing, format_briefing
+from ai_desk.hedge_signal import count_judge_hedges
 from ai_desk.memory import ThesisMemory
 from ai_desk.proposal import TradeProposal, clamp_with_risk_officer, proposal_from_judge
 from ai_desk.roles import (
@@ -67,9 +68,12 @@ def run_one_cycle(df, symbol: str, interval: str, *,
     if risk.allow:
         full_text = "\n\n".join(
             f"【{k}】\n{v}" for k, v in debate.items())
-        # 記下產生這筆提案的模型（llm_call 有 .model 就取），供樣本分組比較
-        proposal_id = approval_store.add(proposal, risk.quantity, full_text,
-                                         model=getattr(llm_call, "model", None))
+        # 記下產生這筆提案的模型（llm_call 有 .model 就取），供樣本分組比較；
+        # judge_hedges 是純觀察指標（裁判提了幾種顧慮），不影響任何執行決策。
+        proposal_id = approval_store.add(
+            proposal, risk.quantity, full_text,
+            model=getattr(llm_call, "model", None),
+            judge_hedges=count_judge_hedges(full_text))
 
     memory.append({
         "ts": proposal.ts,
