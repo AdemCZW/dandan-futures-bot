@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from config import Config
+from core.external_data import ExternalDailyCloseCache
 from core.market_analyst import make_client, make_data_client, fetch_klines, detect_anomaly
 from core.quant_researcher import build_strategy
 from core.risk_officer import RiskOfficer
@@ -87,7 +88,8 @@ class FuturesLiveTrader:
                  dcg_enabled: bool | None = None,
                  dcg_max_losses: int | None = None,
                  dcg_cooldown_bars: int | None = None,
-                 data_client=None):
+                 data_client=None,
+                 external_close_cache: ExternalDailyCloseCache | None = None):
         # state_path 預設 None → 解析「當前」模組全域 STATE_PATH（而非定義時綁定），
         # 既保留單台部署相容（含既有測試的 monkeypatch.setattr(M, "STATE_PATH", …)），
         # 又讓多 bot 監督器能為每台傳入獨立檔路徑，避免共用一檔互相覆蓋。
@@ -100,6 +102,9 @@ class FuturesLiveTrader:
         # 行情資料 client（訊號/指標/軟停損判斷）：預設同執行 client（向後相容）；
         # 部署時傳入主網公開 client → decisions 在主網座標、fills 在測試網（稽核 F1）。
         self.data_client = data_client if data_client is not None else client
+        # SPX 連動過濾（use_corr_filter）即時管道：懶初始化——多數策略/部署根本沒
+        # 開這個過濾器，不該為每台 bot 都建一個沒用到的快取物件。可注入方便測試。
+        self._external_close_cache = external_close_cache
         self.dir = 0
         self.entry_price = self.sl = self.tp = 0.0
         self.qty = 0.0                      # 本地追蹤的持倉量（避免開倉後立刻讀帶號倉位的最終一致性問題）
@@ -209,6 +214,22 @@ class FuturesLiveTrader:
         """
         rate = getattr(self.cfg, "taker_fee_rate", 0.0)
         return abs(qty) * (abs(entry_px) + abs(exit_px)) * rate
+
+    def _refresh_external_daily_close(self) -> None:
+        """use_corr_filter 開啟時，把 SPX 近期日收盤寫進 strat.params 供過濾器讀。
+
+        no-op 情況（刻意，零行為改變）：策略沒有 params 屬性（測試假物件/舊策略）、
+        或 params 裡沒開 use_corr_filter。抓不到資料時 ExternalDailyCloseCache 自己
+        會沿用舊快取，這裡不需要額外處理——策略的 use_corr_filter 邏輯本身已把
+        「external_daily_close 缺值」視為不通過過濾（見 core/quant_researcher.py），
+        與 vol filter/fib zone gate 同一條「缺值一律保守擋單」慣例一致。
+        """
+        params = getattr(self.strat, "params", None)
+        if not isinstance(params, dict) or not params.get("use_corr_filter"):
+            return
+        if self._external_close_cache is None:
+            self._external_close_cache = ExternalDailyCloseCache()
+        params["external_daily_close"] = self._external_close_cache.get()
 
     def _latest_atr(self):
         """抓最近已收盤那根的 ATR（供 restore 重建停損用）；失敗則回 None 退回固定百分比。"""
@@ -719,6 +740,7 @@ class FuturesLiveTrader:
 
     def on_bar_close(self, bar_time) -> None:
         cfg = self.cfg
+        self._refresh_external_daily_close()
         df = self.strat.prepare(
             fetch_klines(self.data_client, cfg.symbol, cfg.interval,
                          self._fetch_bars(), futures=True)).dropna()

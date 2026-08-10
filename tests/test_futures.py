@@ -1451,3 +1451,60 @@ def test_restored_last_bar_state_file_wins_over_journal(patched, monkeypatch):
     with open(t.state_path, "w") as f:
         _json.dump(state, f)
     assert t.restored_last_bar() == pd.Timestamp("2026-07-04 12:00:00")
+
+
+# ── SPX 連動過濾即時接線（2026-08-07）─────────────────────────
+#
+# 切半驗證通過（corr_max=0.5 兩半皆不輸基準）；缺的是即時抓 SPX 日收盤並寫進
+# strat.params["external_daily_close"] 這段膠水。策略本身的 use_corr_filter
+# 邏輯已把「缺值」視為不通過過濾，這裡不需要重複處理，只要負責把資料放進去。
+
+class ParamStrat:
+    """有 params 字典的假策略，模擬 SmcStructureStrategy 的介面形狀。"""
+    allow_short = True
+
+    def __init__(self, use_corr_filter=False):
+        self.params = {"use_corr_filter": use_corr_filter}
+
+    def prepare(self, df):
+        return df
+
+    def signal(self, row, pos):
+        return 0
+
+
+def test_refresh_external_close_noop_when_strategy_has_no_params():
+    """ScriptStrat 這類測試假物件根本沒有 .params——不可因此炸掉。"""
+    t = M.FuturesLiveTrader(Config(), None, ScriptStrat([0]), RiskOfficer(Config()),
+                            FakeExecu(), FakeJournal())
+    t._refresh_external_daily_close()          # 不應拋錯
+
+
+def test_refresh_external_close_noop_when_filter_disabled():
+    strat = ParamStrat(use_corr_filter=False)
+    t = M.FuturesLiveTrader(Config(), None, strat, RiskOfficer(Config()),
+                            FakeExecu(), FakeJournal())
+    t._refresh_external_daily_close()
+    assert "external_daily_close" not in strat.params
+
+
+def test_refresh_external_close_writes_series_when_filter_enabled():
+    import pandas as pd
+    fake_series = pd.Series([1.0], index=pd.to_datetime(["2026-01-01"]))
+    strat = ParamStrat(use_corr_filter=True)
+    t = M.FuturesLiveTrader(Config(), None, strat, RiskOfficer(Config()),
+                            FakeExecu(), FakeJournal(),
+                            external_close_cache=M.ExternalDailyCloseCache(
+                                fetch_fn=lambda: fake_series, now_fn=lambda: 1000.0))
+    t._refresh_external_daily_close()
+    assert strat.params["external_daily_close"] is fake_series
+
+
+def test_refresh_external_close_fetch_failure_does_not_crash():
+    strat = ParamStrat(use_corr_filter=True)
+    t = M.FuturesLiveTrader(Config(), None, strat, RiskOfficer(Config()),
+                            FakeExecu(), FakeJournal(),
+                            external_close_cache=M.ExternalDailyCloseCache(
+                                fetch_fn=lambda: None, now_fn=lambda: 1000.0))
+    t._refresh_external_daily_close()           # 不應拋錯
+    assert strat.params["external_daily_close"] is None
