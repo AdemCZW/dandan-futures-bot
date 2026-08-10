@@ -185,3 +185,38 @@ def test_cycle_records_judge_hedge_count(deps):
     assert result.proposal_id is not None
     row = deps["approval_store"].get(result.proposal_id)
     assert row["judge_hedges"] >= 3          # 遲到 + 不宜追 + 接刀 + 賠率差
+
+
+def test_cycle_injects_real_outcomes_into_memory_prompt(deps):
+    """desk 必須把 approval_store + 真實 K 線傳給記憶格式化，讓提示詞裡出現真實
+    結算結果，而不是只能靠模型自己拿「當時價 vs 現價」瞎猜上次對不對。"""
+    df = make_df()
+    memory = deps["memory"]
+    store = deps["approval_store"]
+
+    # 先塞一筆「過去的判斷」+ 對應的核准紀錄，模擬上一輪已經進了佇列
+    past_ts = str(df.index[100])
+    memory.append({"ts": past_ts, "direction": -1, "confidence": 0.5,
+                   "rationale_summary": "上一輪判斷", "price_at_decision": 100.0})
+    from ai_desk.proposal import TradeProposal
+    # entry 設在遠低於後續 K 線最高價之下，確保一定成交且觸及停損（df 是隨機遊走，
+    # 用寬鬆的停損/停利避免這裡本身受隨機性影響——只是要讓 attach_outcomes 有東西可查）
+    hi = float(df["high"].iloc[100:].max())
+    lo = float(df["low"].iloc[100:].min())
+    p = TradeProposal("BTCUSDT", ts=past_ts, direction=-1, confidence=0.5,
+                      entry=hi, stop=hi + 1, take_profit=lo, rationale="r")
+    store.add(p, qty=1.0, debate_full_text="全文")
+
+    captured = {}
+    real_llm = scripted_llm('{"direction": 0, "confidence": 0.5, "entry": null, '
+                            '"stop": null, "take_profit": null, "rationale": "觀望"}')
+
+    def spy_llm(prompt):
+        if "上一輪判斷" in prompt:
+            captured["prompt"] = prompt
+        return real_llm(prompt)
+
+    run_one_cycle(df, "BTCUSDT", "4h", llm_call=spy_llm, **deps)
+
+    assert "prompt" in captured, "記憶文字沒有被注入任何一輪的 prompt"
+    assert "結果" in captured["prompt"]

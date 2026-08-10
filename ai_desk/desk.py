@@ -44,7 +44,11 @@ def run_one_cycle(df, symbol: str, interval: str, *,
 
     briefing = build_market_briefing(df, symbol, interval, live_price=live_price)
     briefing_text = format_briefing(briefing)
-    memory_text = memory.format_for_prompt()
+    # 附上真實結算結果（觸及停損/停利/未成交），不讓模型自己拿「當時價 vs 現價」
+    # 的價差瞎猜上次判斷對不對——那個推論方式是錯的，見 ai_desk.memory.attach_outcomes。
+    memory_text = memory.format_for_prompt(
+        approval_rows=[r for r in approval_store.all() if r["symbol"] == symbol],
+        klines=df)
 
     analyst = run_technical_analyst(briefing_text, llm_call)
     _report("analyst", analyst.full_text)
