@@ -121,3 +121,43 @@ def test_claude_binary_actually_exists_at_configured_path(script_text):
     m = re.search(r'AI_DESK_CLAUDE_BIN="([^"]+)"', script_text)
     assert m, "腳本未設定 AI_DESK_CLAUDE_BIN"
     assert os.path.exists(m.group(1)), f"claude 不在 {m.group(1)}"
+
+
+# ── 帳號層級自動記憶隔離（2026-08-12）───────────────────────
+#
+# claude CLI 每次啟動都會自動載入帳號層級的持久記憶（~/.claude/projects/.../
+# memory/），不是 ai_desk 專屬、也關不掉（實測 --tools none / --system-prompt /
+# --setting-sources / 換模型全部無效）——導致四角色辯論讀到使用者對這套系統
+# 本身下的評語，判斷不再是純粹從 briefing 推論。唯一有效的隔離是讓記憶資料夾
+# 在呼叫期間物理上不存在。這裡鎖住修復的關鍵行為，避免以後被誤刪或改壞。
+
+def test_script_hides_memory_before_and_restores_after_llm_calls(script_text):
+    hide_at = script_text.index("hide_claude_memory\n")
+    restore_at = script_text.index("restore_claude_memory\n", hide_at)
+    loop_at = script_text.index("for SYMBOL in")
+    assert hide_at < loop_at < restore_at, "隱藏/還原沒有正確包住 LLM 呼叫的迴圈"
+
+
+def test_script_traps_exit_signals_to_guarantee_restore(script_text):
+    """腳本中途被中斷或崩潰時，記憶也一定要還原——不能只靠正常結束那條路徑。"""
+    assert re.search(r"trap\s+restore_claude_memory\s+EXIT\s+INT\s+TERM", script_text)
+
+
+def test_restore_handles_leftover_backup_from_previous_crash(script_text):
+    """上次排程若中途當掉、記憶還卡在隱藏狀態，這次啟動前必須先自我修復，
+    不可以在已經隱藏的狀態上再隱藏一次（會把備份蓋掉）。"""
+    hide_fn = re.search(r"hide_claude_memory\(\)\s*\{(.*?)\n\}", script_text, re.S)
+    assert hide_fn, "找不到 hide_claude_memory 函式定義"
+    assert "restore_claude_memory" in hide_fn.group(1), \
+        "hide_claude_memory 沒有在隱藏前先處理殘留的舊備份"
+
+
+def test_restore_does_not_nest_into_cli_recreated_directory(script_text):
+    """2026-08-12 實測踩到：記憶被隱藏後，claude CLI 找不到資料夾會自己重建一個
+    新的；若還原時目標路徑已存在，mv 備份回去會變成巢狀一層而非取代，
+    當場弄丟一層真正的記憶內容。還原邏輯必須先處理這個已存在的情況。"""
+    restore_fn = re.search(r"restore_claude_memory\(\)\s*\{(.*?)\n\}", script_text, re.S)
+    assert restore_fn, "找不到 restore_claude_memory 函式定義"
+    body = restore_fn.group(1)
+    assert "CLAUDE_MEMORY_DIR" in body and re.search(r'-d\s+"\$CLAUDE_MEMORY_DIR"', body), \
+        "還原前沒有檢查目標路徑是否已被 CLI 重新建立"
