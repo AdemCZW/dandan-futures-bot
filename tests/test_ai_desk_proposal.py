@@ -205,3 +205,116 @@ def test_zone_gate_never_affects_sizing(officer, monkeypatch):
     monkeypatch.delenv("AI_DESK_ZONE_GATE", raising=False)
     plain = clamp_with_risk_officer(p, officer, equity=10_000.0, fib_pos=0.60)
     assert gated.quantity == plain.quantity
+
+
+# ── 停利可達性閘門（target reachability gate）─────────────────
+#
+# 證據（2026-08-13，68 筆已結算前瞻樣本）：依停利距離（ATR 單位）分組，
+# 勝率單調遞減——
+#     <2 ATR   n=48  勝率 27.1%  合計 -158.66
+#     2~3 ATR  n= 9  勝率 11.1%  合計 -222.95
+#     >=3 ATR  n=11  勝率  0.0%  合計 -278.89   ← 11 戰全敗
+#
+# 關鍵對照：規劃 R/R 中位數 2.23，純隨機進場的理論勝率是 31%，實際只有 20.6%
+# ——比隨機還差，代表有系統性錯誤，不只是猜不準方向。機制：震盪盤裡 3+ ATR 的
+# 停利，在觸及 1.5 ATR 停損之前物理上到不了，這是規格上就達不成的單。
+#
+# ⚠️ 這是同一批樣本上測的第 6 個假設（p-hacking 風險高），且未經樣本外驗證。
+# 故預設關閉，須與區位閘門一起用新樣本前瞻對照。
+
+from ai_desk.proposal import (DEFAULT_MAX_TP_ATR, target_gate_enabled,  # noqa: E402
+                              target_is_reachable)
+
+
+def test_target_gate_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("AI_DESK_TARGET_GATE", raising=False)
+    assert target_gate_enabled() is False
+
+
+def test_target_gate_requires_exact_true(monkeypatch):
+    monkeypatch.setenv("AI_DESK_TARGET_GATE", "1")
+    assert target_gate_enabled() is False
+    monkeypatch.setenv("AI_DESK_TARGET_GATE", "true")
+    assert target_gate_enabled() is True
+
+
+def test_near_target_is_reachable():
+    """1 ATR 的停利，震盪盤裡也走得到。"""
+    assert target_is_reachable(entry=100.0, take_profit=110.0, atr=10.0) is True
+
+
+def test_far_target_is_not_reachable():
+    """實測 >=3 ATR 那組 11 戰全敗。"""
+    assert target_is_reachable(entry=100.0, take_profit=140.0, atr=10.0) is False
+
+
+def test_threshold_boundary_is_exclusive():
+    """門檻本身算不通過（>=3 才是實測全敗那組的定義）。"""
+    atr = 10.0
+    tp_at_threshold = 100.0 + DEFAULT_MAX_TP_ATR * atr
+    assert target_is_reachable(entry=100.0, take_profit=tp_at_threshold, atr=atr) is False
+    assert target_is_reachable(entry=100.0, take_profit=tp_at_threshold - 0.01,
+                               atr=atr) is True
+
+
+def test_works_for_short_direction_by_absolute_distance():
+    """做空的停利在進場價下方；只看絕對距離，方向無關。"""
+    assert target_is_reachable(entry=100.0, take_profit=90.0, atr=10.0) is True
+    assert target_is_reachable(entry=100.0, take_profit=60.0, atr=10.0) is False
+
+
+def test_missing_atr_blocks_entry():
+    """缺 ATR 一律不通過——比照區位閘門與 smc_structure 過濾器的既有慣例。"""
+    assert target_is_reachable(entry=100.0, take_profit=110.0, atr=None) is False
+
+
+def test_non_positive_atr_blocks_entry_instead_of_dividing_by_zero():
+    assert target_is_reachable(entry=100.0, take_profit=110.0, atr=0.0) is False
+    assert target_is_reachable(entry=100.0, take_profit=110.0, atr=-5.0) is False
+
+
+def test_clamp_blocks_unreachable_target_when_gate_on(officer, monkeypatch):
+    monkeypatch.setenv("AI_DESK_TARGET_GATE", "true")
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=60.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, atr=10.0)
+    assert d.allow is False
+    assert "停利" in d.reason and "ATR" in d.reason      # 原因要可稽核
+
+
+def test_clamp_allows_reachable_target_when_gate_on(officer, monkeypatch):
+    monkeypatch.setenv("AI_DESK_TARGET_GATE", "true")
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, atr=10.0)
+    assert d.allow is True
+
+
+def test_clamp_ignores_target_distance_when_gate_off(officer, monkeypatch):
+    """閘門關閉時行為與現況逐位元相同。"""
+    monkeypatch.delenv("AI_DESK_TARGET_GATE", raising=False)
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=60.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, atr=10.0)
+    assert d.allow is True
+
+
+def test_two_gates_are_independent(officer, monkeypatch):
+    """只開停利閘門時，不利區位的提案照樣放行（兩道閘門互不牽連）。"""
+    monkeypatch.setenv("AI_DESK_TARGET_GATE", "true")
+    monkeypatch.delenv("AI_DESK_ZONE_GATE", raising=False)
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    d = clamp_with_risk_officer(p, officer, equity=10_000.0, atr=10.0, fib_pos=0.10)
+    assert d.allow is True
+
+
+def test_target_gate_never_affects_sizing(officer, monkeypatch):
+    """硬規則不變：閘門只決定進不進場，絕不改變倉位大小。"""
+    p = proposal_from_judge(judge_data(direction=-1, entry=100.0, stop=105.0,
+                                       take_profit=90.0), "BTCUSDT", "t")
+    monkeypatch.setenv("AI_DESK_TARGET_GATE", "true")
+    gated = clamp_with_risk_officer(p, officer, equity=10_000.0, atr=10.0)
+    monkeypatch.delenv("AI_DESK_TARGET_GATE", raising=False)
+    plain = clamp_with_risk_officer(p, officer, equity=10_000.0, atr=10.0)
+    assert gated.quantity == plain.quantity

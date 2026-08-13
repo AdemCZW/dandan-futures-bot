@@ -34,9 +34,51 @@ edge**。保留組的 bootstrap 信賴下界仍為 -1.24（n=11），未通過�
 """
 
 
+DEFAULT_MAX_TP_ATR = 3.0
+"""停利距離上限（以進場當下的 ATR 為單位）。超過就視為「物理上到不了」。
+
+為什麼有這道閘門（2026-08-13，68 筆已結算前瞻樣本的實測）：依停利距離分組，
+勝率單調遞減——
+    <2 ATR    n=48  勝率 27.1%  合計 -158.66
+    2~3 ATR   n= 9  勝率 11.1%  合計 -222.95
+    >=3 ATR   n=11  勝率  0.0%  合計 -278.89   ← 11 戰全敗
+
+真正的診斷點不是這三格本身，而是這個對照：規劃 R/R 中位數 2.23，**純隨機進場
+的理論勝率是 1/(1+2.23) = 31%，而實際勝率只有 20.6%**。「沒有 edge」會落在 31%；
+掉到 20.6% 代表有東西在系統性地做錯，不只是猜不準方向。
+
+機制：這段期間市場在震盪，裁判卻經常把停利設在 3 個 ATR 以外。在一個約 2 ATR
+寬的箱體裡，3+ ATR 的目標在觸及 1.5 ATR 停損之前根本走不到——這不是判斷失誤，
+是**規格上就不可能達成的單**。裁判的算術其實是準的（實測 23 筆自稱風報比與
+實算對照，21 筆誤差在 3% 內），問題在於沒有任何東西檢查那個目標可不可達。
+
+⚠️ 誠實界定：這是在同一批樣本上測的第 6 個假設（p-hacking 風險高），**尚未
+經過任何樣本外驗證**。與區位閘門疊加的 in-sample 數字（n=21 / 33.3% / +100.55）
+不能當成證據，只是「值得優先前瞻測試的線索」。故預設關閉。
+"""
+
+
 def zone_gate_enabled() -> bool:
     """進場區位閘門總開關。預設關閉——比照專案既有新過濾器慣例，不默默改變線上行為。"""
     return os.getenv("AI_DESK_ZONE_GATE", "false").lower() == "true"
+
+
+def target_gate_enabled() -> bool:
+    """停利可達性閘門總開關。預設關閉，理由同上。"""
+    return os.getenv("AI_DESK_TARGET_GATE", "false").lower() == "true"
+
+
+def target_is_reachable(entry: float, take_profit: float, atr: float | None, *,
+                        max_tp_atr: float = DEFAULT_MAX_TP_ATR) -> bool:
+    """停利距離是否落在當前波動下走得到的範圍。純函式，不讀環境變數。
+
+    只看絕對距離，做多做空同一套標準。atr 缺值或非正數一律回 False——
+    比照區位閘門與 smc_structure vol/corr 過濾器的既有慣例：寧可少做一筆，
+    也不要在不知道當前波動有多大時，放行一個可能永遠走不到的目標。
+    """
+    if atr is None or atr <= 0:
+        return False
+    return abs(take_profit - entry) / atr < max_tp_atr
 
 
 def entry_zone_allows(direction: int, fib_pos: float | None, *,
@@ -114,6 +156,14 @@ def clamp_with_risk_officer(proposal: TradeProposal, officer: RiskOfficer,
             False, 0.0,
             f"進場區位閘門擋下：{side}時 Fib 區間位置 {where} 不在有利區"
             f"（做空需 ≥{DEFAULT_SHORT_MIN_FIB}、做多需 ≤{DEFAULT_LONG_MAX_FIB}）")
+    if target_gate_enabled() and not target_is_reachable(
+            proposal.entry, proposal.take_profit, atr):
+        dist = ("ATR 資料不足" if not atr or atr <= 0
+                else f"{abs(proposal.take_profit - proposal.entry) / atr:.2f} 個 ATR")
+        return RiskDecision(
+            False, 0.0,
+            f"停利可達性閘門擋下：停利距離 {dist}，當前波動下走不到"
+            f"（需 <{DEFAULT_MAX_TP_ATR} 個 ATR）")
     gate = officer.check_entry(equity, proposal.entry, proposal.ts,
                                direction=proposal.direction, atr=atr)
     if not gate.allow:

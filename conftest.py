@@ -18,6 +18,7 @@ collect_ignore = []
 # 什麼旗標。這裡統一清掉，要測開啟行為的測試自己 monkeypatch.setenv 明確開。
 _FEATURE_FLAGS = (
     "AI_DESK_ZONE_GATE",
+    "AI_DESK_TARGET_GATE",
     "AI_DESK_AUTO_APPROVE",
     "AI_DESK_EXEC_ENABLED",
 )
