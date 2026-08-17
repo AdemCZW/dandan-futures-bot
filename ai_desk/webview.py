@@ -42,7 +42,7 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     from run_ai_desk_once import (KLINE_LIMIT, MEMORY_DIR, auto_approve_enabled,
                                   fetch_account_equity, fetch_live_price, prepare_df)
 
-    public = Client()
+    public = Client(ping=False)
     raw = fetch_klines(public, symbol, interval, limit=KLINE_LIMIT, futures=True)
     df = prepare_df(raw)
     live_price = fetch_live_price(public, symbol)
@@ -52,7 +52,8 @@ def _real_cycle(symbol: str, interval: str, on_progress, store_path: str):
     llm = ClaudeCliClient()
 
     cfg = Config()
-    client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+    client = Client(cfg.futures_api_key, cfg.futures_api_secret,
+                    testnet=True, ping=False)
     equity = fetch_account_equity(client)
 
     if auto_approve_enabled():
@@ -93,7 +94,7 @@ def _real_briefing(symbol: str, interval: str):
     from ai_desk.briefing import build_market_briefing
     from run_ai_desk_once import KLINE_LIMIT, fetch_live_price, prepare_df
 
-    client = Client()
+    client = Client(ping=False)
     raw = fetch_klines(client, symbol, interval, limit=KLINE_LIMIT, futures=True)
     return build_market_briefing(prepare_df(raw), symbol, interval,
                                  live_price=fetch_live_price(client, symbol))
@@ -106,7 +107,7 @@ def _real_klines(symbol: str, since: str):
 
     from core.market_analyst import fetch_klines
 
-    raw = fetch_klines(Client(), symbol, "1h", limit=1000, futures=True)
+    raw = fetch_klines(Client(ping=False), symbol, "1h", limit=1000, futures=True)
     t0 = pd.to_datetime(since).tz_localize(None)
     return raw[raw.index >= t0]
 

@@ -56,7 +56,8 @@ def main() -> None:
         return
 
     cfg = Config()
-    client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+    client = Client(cfg.futures_api_key, cfg.futures_api_secret,
+                    testnet=True, ping=False)
     symbols = sorted(allowed_symbols())
     print(f"白名單幣種：{symbols}")
 

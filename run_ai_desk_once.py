@@ -97,7 +97,7 @@ def main() -> None:
     interval = sys.argv[2] if len(sys.argv) > 2 else "4h"
 
     llm = build_llm()
-    client = Client()                                 # 公開 K 線端點不需金鑰
+    client = Client(ping=False)                       # 公開 K 線端點不需金鑰
     raw = fetch_klines(client, symbol, interval, limit=KLINE_LIMIT, futures=True)
     df = prepare_df(raw)
     live_price = fetch_live_price(client, symbol)
@@ -107,7 +107,8 @@ def main() -> None:
     risk_officer = RiskOfficer(Config())
 
     cfg = Config()
-    trade_client = Client(cfg.futures_api_key, cfg.futures_api_secret, testnet=True)
+    trade_client = Client(cfg.futures_api_key, cfg.futures_api_secret,
+                          testnet=True, ping=False)
     equity = fetch_account_equity(trade_client)
 
     if auto_approve_enabled():
