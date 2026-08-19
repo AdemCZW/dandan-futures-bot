@@ -20,6 +20,23 @@ PLIST = os.path.join(ROOT, "scheduling", "com.dandan.aidesk.plist")
 SCRIPT = os.path.join(ROOT, "scheduling", "run_ai_desk_scheduled.sh")
 
 
+def _plist_program_path() -> str:
+    with open(PLIST, "rb") as f:
+        return plistlib.load(f)["ProgramArguments"][-1]
+
+
+# plist 與腳本裡的絕對路徑（專案目錄、/opt/homebrew/bin/claude）是**排程主機專屬**的。
+# 這些檢查在那台機器上很有價值——它們正是用來抓「路徑設錯 → 半夜靜靜地什麼都沒發生」
+# 的（實際故障：2026-07-24~27 連續多輪 exit 1）。但拿到 CI 的 Linux runner 上跑一定失敗：
+# repo 根目錄變成 /home/runner/work/...、也不會有 /opt/homebrew。
+# 實際後果：這兩筆從 2026-07-31 起讓每一次 push 的 CI 都是紅燈，把真正的回歸訊號淹掉。
+# 解法是限定在排程主機上跑，而不是刪掉檢查或放寬斷言。
+_SCHEDULED_SCRIPT = _plist_program_path()
+on_scheduling_host = pytest.mark.skipif(
+    not os.path.exists(_SCHEDULED_SCRIPT),
+    reason=f"排程主機專屬檢查；本機沒有 {_SCHEDULED_SCRIPT}（例如 CI runner）")
+
+
 @pytest.fixture(scope="module")
 def plist():
     with open(PLIST, "rb") as f:
@@ -51,7 +68,19 @@ def test_does_not_auto_restart_on_exit(plist):
 
 
 def test_points_at_the_wrapper_script(plist):
-    assert plist["ProgramArguments"][-1] == SCRIPT
+    """必須透過包裝腳本啟動，不能直接叫 python——那層包裝在補 launchd 的極簡環境
+    （PATH、工作目錄、記憶隔離）。這是結構檢查，與 repo 放在哪無關，處處適用。"""
+    assert os.path.basename(plist["ProgramArguments"][-1]) == os.path.basename(SCRIPT)
+
+
+@on_scheduling_host
+def test_scheduled_script_exists_at_the_path_plist_points_to():
+    """排程主機上，plist 指到的絕對路徑必須真的存在。
+
+    路徑打錯或專案搬家時，launchd 不會抱怨，只會半夜靜靜地什麼都不做——
+    這正是這個檔案開頭說的那種故障，所以要主動檢查。
+    """
+    assert os.path.exists(_SCHEDULED_SCRIPT), f"plist 指向 {_SCHEDULED_SCRIPT}，但檔案不存在"
 
 
 def test_logs_stdout_and_stderr_to_files(plist):
@@ -116,6 +145,7 @@ def test_script_passes_absolute_claude_path_to_client(script_text):
     assert "AI_DESK_CLAUDE_BIN" in script_text
 
 
+@on_scheduling_host
 def test_claude_binary_actually_exists_at_configured_path(script_text):
     """設定的絕對路徑要真的存在，否則等於沒修。"""
     m = re.search(r'AI_DESK_CLAUDE_BIN="([^"]+)"', script_text)
